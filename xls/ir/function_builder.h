@@ -15,10 +15,21 @@
 #ifndef XLS_IR_FUNCTION_BUILDER_H_
 #define XLS_IR_FUNCTION_BUILDER_H_
 
+// NOTE: We're trying to keep the API minimal here to not drag too much into
+// publicly-exposed APIs (FunctionBuilder/ProcBuilder are publicly exposed), so
+// forward decls are used.
+//
+// To this end, DO NOT add node/function headers here.
+
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "xls/common/logging/logging.h"
+#include "xls/common/status/ret_check.h"
+#include "xls/ir/block.h"
 #include "xls/ir/function.h"
+#include "xls/ir/lsb_or_msb.h"
+#include "xls/ir/op.h"
+#include "xls/ir/package.h"
 #include "xls/ir/proc.h"
 #include "xls/ir/source_location.h"
 #include "xls/ir/value.h"
@@ -26,7 +37,12 @@
 namespace xls {
 
 class BuilderBase;
+class Channel;
+class Function;
+class FunctionBase;
 class Node;
+class Proc;
+class Type;
 
 // Represents a value for use in the function-definition building process,
 // supports some basic C++ operations that have a natural correspondence to the
@@ -43,12 +59,10 @@ class BValue {
   BuilderBase* builder() const { return builder_; }
 
   Node* node() const { return node_; }
-  Type* GetType() const { return node()->GetType(); }
-  int64_t BitCountOrDie() const { return node()->BitCountOrDie(); }
-  absl::optional<SourceLocation> loc() const { return node_->loc(); }
-  std::string ToString() const {
-    return node_ == nullptr ? std::string("<null BValue>") : node_->ToString();
-  }
+  Type* GetType() const;
+  int64_t BitCountOrDie() const;
+  absl::optional<SourceLocation> loc() const;
+  std::string ToString() const;
 
   bool valid() const {
     XLS_CHECK_EQ(node_ == nullptr, builder_ == nullptr);
@@ -56,29 +70,14 @@ class BValue {
   }
 
   // Sets the name of the node.
-  std::string SetName(absl::string_view name) {
-    if (node_ != nullptr) {
-      node_->SetName(name);
-    }
-    return "";
-  }
+  std::string SetName(absl::string_view name);
 
   // Returns the name of the node.
-  std::string GetName() const {
-    if (node_ != nullptr) {
-      return node_->GetName();
-    }
-    return "";
-  }
+  std::string GetName() const;
 
   // Returns whether the node has been assigned a name. Nodes without assigned
   // names have names generated from the opcode and unique id.
-  bool HasAssignedName() const {
-    if (node_ != nullptr) {
-      return node_->HasAssignedName();
-    }
-    return false;
-  }
+  bool HasAssignedName() const;
 
   BValue operator>>(BValue rhs);
   BValue operator<<(BValue rhs);
@@ -115,13 +114,10 @@ class BuilderBase {
   // 'should_verify' is a test-only argument which can be set to false in tests
   // that wish to build malformed IR.
   explicit BuilderBase(std::unique_ptr<FunctionBase> function,
-                       bool should_verify = true)
-      : function_(std::move(function)),
-        error_pending_(false),
-        should_verify_(should_verify) {}
-  virtual ~BuilderBase() = default;
+                       bool should_verify = true);
+  virtual ~BuilderBase();
 
-  const std::string& name() const { return function_->name(); }
+  const std::string& name() const;
 
   // Get access to currently built up function (or proc).
   FunctionBase* function() const { return function_.get(); }
@@ -520,7 +516,7 @@ class BuilderBase {
                 absl::string_view name = "");
 
   // Retrieves the type of "value" and returns it.
-  Type* GetType(BValue value) { return value.node()->GetType(); }
+  Type* GetType(const BValue& value) { return value.GetType(); }
 
   // Adds a Arith/UnOp/BinOp/CompareOp to the function. Exposed for
   // programmatically adding these ops using with variable Op values.
@@ -553,32 +549,26 @@ class BuilderBase {
                 absl::optional<SourceLocation> loc = absl::nullopt,
                 absl::string_view name = "");
 
-  // Add a receive operation. The type of the data value received is
-  // determined by the channel.
-  virtual BValue Receive(Channel* channel, BValue token,
-                         absl::optional<SourceLocation> loc = absl::nullopt,
-                         absl::string_view name = "") = 0;
+  // Adds a coverpoint to the function that records every time the associated
+  // condition evaluates to true.
+  BValue Cover(BValue token, BValue condition, absl::string_view label,
+               absl::optional<SourceLocation> loc = absl::nullopt,
+               absl::string_view name = "");
 
-  // Add a receive_if operation. The receive executes conditionally on the value
-  // of the predicate "pred". The type of the data value received is
-  // determined by the channel.
-  virtual BValue ReceiveIf(Channel* channel, BValue token, BValue pred,
-                           absl::optional<SourceLocation> loc = absl::nullopt,
-                           absl::string_view name = "") = 0;
+  // Adds a gate operation. The output of the operation is `data` if `cond` is
+  // true and zero-valued otherwise. Gates are side-effecting.
+  BValue Gate(BValue condition, BValue data,
+              absl::optional<SourceLocation> loc = absl::nullopt,
+              absl::string_view name = "");
 
-  // Add a send operation.
-  virtual BValue Send(Channel* channel, BValue token, BValue data,
-                      absl::optional<SourceLocation> loc = absl::nullopt,
-                      absl::string_view name = "") = 0;
+  Package* package() const;
 
-  // Add a send_if operation. The send executes conditionally on the value of
-  // the predicate "pred".
-  virtual BValue SendIf(Channel* channel, BValue token, BValue pred,
-                        BValue data,
-                        absl::optional<SourceLocation> loc = absl::nullopt,
-                        absl::string_view name = "") = 0;
-
-  Package* package() const { return function_->package(); }
+  // Returns the last node enqueued onto this builder -- when Build() is called
+  // this is what is used as the return value.
+  absl::StatusOr<BValue> GetLastValue() {
+    XLS_RET_CHECK(last_node_ != nullptr);
+    return BValue(last_node_, this);
+  }
 
  protected:
   BValue SetError(absl::string_view msg, absl::optional<SourceLocation> loc);
@@ -587,17 +577,9 @@ class BuilderBase {
   // Constructs and adds a node to the function and returns a corresponding
   // BValue.
   template <typename NodeT, typename... Args>
-  BValue AddNode(absl::optional<SourceLocation> loc, Args&&... args) {
-    last_node_ = function_->AddNode<NodeT>(absl::make_unique<NodeT>(
-        loc, std::forward<Args>(args)..., function_.get()));
-    if (should_verify_) {
-      absl::Status verify_status = VerifyNode(last_node_);
-      if (!verify_status.ok()) {
-        return SetError(verify_status.message(), loc);
-      }
-    }
-    return BValue(last_node_, this);
-  }
+  BValue AddNode(absl::optional<SourceLocation> loc, Args&&... args);
+
+  BValue CreateBValue(Node* node, absl::optional<SourceLocation> loc);
 
   // The most recently added node to the function.
   Node* last_node_ = nullptr;
@@ -622,25 +604,11 @@ class FunctionBuilder : public BuilderBase {
   // Builder for xls::Functions. 'should_verify' is a test-only argument which
   // can be set to false in tests that wish to build malformed IR.
   FunctionBuilder(absl::string_view name, Package* package,
-                  bool should_verify = true)
-      : BuilderBase(absl::make_unique<Function>(std::string(name), package),
-                    should_verify) {}
+                  bool should_verify = true);
   virtual ~FunctionBuilder() = default;
 
   BValue Param(absl::string_view name, Type* type,
                absl::optional<SourceLocation> loc = absl::nullopt) override;
-  BValue Receive(Channel* channel, BValue token,
-                 absl::optional<SourceLocation> loc = absl::nullopt,
-                 absl::string_view name = "") override;
-  BValue ReceiveIf(Channel* channel, BValue token, BValue pred,
-                   absl::optional<SourceLocation> loc = absl::nullopt,
-                   absl::string_view name = "") override;
-  BValue Send(Channel* channel, BValue token, BValue data,
-              absl::optional<SourceLocation> loc = absl::nullopt,
-              absl::string_view name = "") override;
-  BValue SendIf(Channel* channel, BValue token, BValue pred, BValue data,
-                absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "") override;
 
   // Adds the function internally being built-up by this builder to the package
   // given at construction time, and returns a pointer to it (the function is
@@ -660,52 +628,55 @@ class ProcBuilder : public BuilderBase {
   // be set to false in tests that wish to build malformed IR.
   ProcBuilder(absl::string_view name, const Value& init_value,
               absl::string_view token_name, absl::string_view state_name,
-              Package* package, bool should_verify = true)
-      : BuilderBase(absl::make_unique<Proc>(name, init_value, token_name,
-                                            state_name, package),
-                    should_verify),
-        // The parameter nodes are added at construction time. Create a BValue
-        // for each param node so they may be used in construction of
-        // expressions.
-        token_param_(proc()->TokenParam(), this),
-        state_param_(proc()->StateParam(), this) {}
+              Package* package, bool should_verify = true);
   virtual ~ProcBuilder() = default;
 
   // Returns the Proc being constructed.
-  Proc* proc() const { return down_cast<Proc*>(function()); }
+  Proc* proc() const;
 
   // Returns the Param BValue for the state or token parameter. Unlike
   // BuilderBase::Param this does add a Param node to the Proc. Rather the state
   // and token parameters are added to the Proc at construction time and these
-  // methods return references to the these parameters.
+  // methods return references to these parameters.
   BValue GetStateParam() const { return state_param_; }
   BValue GetTokenParam() const { return token_param_; }
 
   // Build the proc using the given BValues as the recurrent token and state
-  // respectively. The return value of the proc is constructed as a two-tuple
-  // of the token and next-state.
+  // respectively.
   absl::StatusOr<Proc*> Build(BValue token, BValue next_state);
 
   BValue Param(absl::string_view name, Type* type,
                absl::optional<SourceLocation> loc = absl::nullopt) override;
+
+  // Add a receive operation. The type of the data value received is
+  // determined by the channel.
   BValue Receive(Channel* channel, BValue token,
                  absl::optional<SourceLocation> loc = absl::nullopt,
-                 absl::string_view name = "") override;
+                 absl::string_view name = "");
+
+  // Add a conditional receive operation. The receive executes conditionally on
+  // the value of the predicate "pred". The type of the data value received is
+  // determined by the channel.
   BValue ReceiveIf(Channel* channel, BValue token, BValue pred,
                    absl::optional<SourceLocation> loc = absl::nullopt,
-                   absl::string_view name = "") override;
+                   absl::string_view name = "");
+
+  // Add a send operation.
   BValue Send(Channel* channel, BValue token, BValue data,
               absl::optional<SourceLocation> loc = absl::nullopt,
-              absl::string_view name = "") override;
+              absl::string_view name = "");
+
+  // Add a conditional send operation. The send executes conditionally on the
+  // value of the predicate "pred".
   BValue SendIf(Channel* channel, BValue token, BValue pred, BValue data,
                 absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "") override;
+                absl::string_view name = "");
 
  private:
-  // The BValue of the token parameter (parameter 1).
+  // The BValue of the token parameter (parameter 0).
   BValue token_param_;
 
-  // The BValue of the state parameter (parameter 0).
+  // The BValue of the state parameter (parameter 1).
   BValue state_param_;
 };
 
@@ -738,17 +709,19 @@ class TokenlessProcBuilder : public ProcBuilder {
   absl::StatusOr<Proc*> Build(BValue next_state);
 
   // Add a receive operation. The type of the data value received is determined
-  // by the channel. The returned BValue is the received data itself (not a
-  // tuple containing a token and the data).
+  // by the channel. The returned BValue is the received data itself (*not* the
+  // receive operation itself which produces a tuple containing a token and the
+  // data).
   using ProcBuilder::Receive;
   BValue Receive(Channel* channel,
                  absl::optional<SourceLocation> loc = absl::nullopt,
                  absl::string_view name = "");
 
-  // Add a receive_if operation. The receive executes conditionally on the value
-  // of the predicate "pred". The type of the data value received is determined
-  // by the channel.  The returned BValue is the received data itself (not a
-  // tuple containing a token and the data).
+  // Add a conditinal receive operation. The receive executes conditionally on
+  // the value of the predicate "pred". The type of the data value received is
+  // determined by the channel.  The returned BValue is the received data itself
+  // (*not* the receiveif operation itself which produces a tuple containing a
+  // token and the data).
   using ProcBuilder::ReceiveIf;
   BValue ReceiveIf(Channel* channel, BValue pred,
                    absl::optional<SourceLocation> loc = absl::nullopt,
@@ -760,8 +733,9 @@ class TokenlessProcBuilder : public ProcBuilder {
               absl::optional<SourceLocation> loc = absl::nullopt,
               absl::string_view name = "");
 
-  // Add a send_if operation. The send executes conditionally on the value of
-  // the predicate "pred". Returns the token-typed BValue of the send_if node.
+  // Add a conditional send operation. The send executes conditionally on the
+  // value of the predicate "pred". Returns the token-typed BValue of the send
+  // node.
   using ProcBuilder::SendIf;
   BValue SendIf(Channel* channel, BValue pred, BValue data,
                 absl::optional<SourceLocation> loc = absl::nullopt,
@@ -777,6 +751,62 @@ class TokenlessProcBuilder : public ProcBuilder {
  private:
   // The tokens from any added send(if)/receive(if) nodes.
   std::vector<BValue> tokens_;
+};
+
+// Class for building an XLS Block.
+class BlockBuilder : public BuilderBase {
+ public:
+  // Builder for xls::Blocks. 'should_verify' is a test-only argument which can
+  // be set to false in tests that wish to build malformed IR.
+  BlockBuilder(absl::string_view name, Package* package,
+               bool should_verify = true)
+      : BuilderBase(absl::make_unique<Block>(name, package), should_verify) {}
+  virtual ~BlockBuilder() = default;
+
+  // Returns the Block being constructed.
+  Block* block() const { return down_cast<Block*>(function()); }
+
+  // Build the block.
+  absl::StatusOr<Block*> Build();
+
+  BValue Param(absl::string_view name, Type* type,
+               absl::optional<SourceLocation> loc = absl::nullopt) override;
+
+  // Add an input/output port.
+  BValue InputPort(absl::string_view name, Type* type,
+                   absl::optional<SourceLocation> loc = absl::nullopt);
+  BValue OutputPort(absl::string_view name, BValue operand,
+                    absl::optional<SourceLocation> loc = absl::nullopt);
+
+  // Add a register read operation. The register argument comes from a
+  // Block::AddRegister.
+  BValue RegisterRead(Register* reg,
+                      absl::optional<SourceLocation> loc = absl::nullopt,
+                      absl::string_view name = "");
+
+  // Add a register write operation. The register argument comes from a
+  // Block::AddRegister. If the register being writen has a reset value then
+  // `reset` must be specified.
+  BValue RegisterWrite(Register* reg, BValue data,
+                       absl::optional<BValue> load_enable = absl::nullopt,
+                       absl::optional<BValue> reset = absl::nullopt,
+                       absl::optional<SourceLocation> loc = absl::nullopt,
+                       absl::string_view name = "");
+
+  // Add a register named 'name' with an input of 'data'. Returns the output
+  // value of the register. Equivalent to creating a register with
+  // Block::AddRegister, adding a RegisterWrite operation with operand 'data'
+  // and adding a RegisterRead operation. Returned BValue is the RegisterRead
+  // operation.
+  BValue InsertRegister(absl::string_view name, BValue data,
+                        absl::optional<BValue> load_enable = absl::nullopt,
+                        absl::optional<SourceLocation> loc = absl::nullopt);
+
+  // As InsertRegister above but with a reset value.
+  BValue InsertRegister(absl::string_view name, BValue data,
+                        BValue reset_signal, Reset reset,
+                        absl::optional<BValue> load_enable = absl::nullopt,
+                        absl::optional<SourceLocation> loc = absl::nullopt);
 };
 
 }  // namespace xls

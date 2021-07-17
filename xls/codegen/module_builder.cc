@@ -19,6 +19,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_replace.h"
+#include "absl/strings/string_view.h"
 #include "xls/codegen/flattening.h"
 #include "xls/codegen/lint_annotate.h"
 #include "xls/codegen/node_expressions.h"
@@ -68,8 +69,19 @@ absl::StatusOr<Expression*> FlattenValueToExpression(const Value& value,
     return file->Literal(value.bits());
   }
   // Compound types are represented as a concatenation of their elements.
+  std::vector<Value> value_elements;
+  if (value.IsArray()) {
+    for (int64_t i = value.size() - 1; i >= 0; --i) {
+      value_elements.push_back(value.element(i));
+    }
+  } else {
+    XLS_RET_CHECK(value.IsTuple());
+    for (const Value& element : value.elements()) {
+      value_elements.push_back(element);
+    }
+  }
   std::vector<Expression*> elements;
-  for (const Value& element : value.elements()) {
+  for (const Value& element : value_elements) {
     if (element.GetFlatBitCount() > 0) {
       XLS_ASSIGN_OR_RETURN(Expression * element_expr,
                            FlattenValueToExpression(element, file));
@@ -182,6 +194,7 @@ ModuleBuilder::ModuleBuilder(absl::string_view name, VerilogFile* file,
   input_section_ = module_->Add<ModuleSection>();
   declaration_and_assignment_section_ = module_->Add<ModuleSection>();
   assert_section_ = module_->Add<ModuleSection>();
+  cover_section_ = module_->Add<ModuleSection>();
   output_section_ = module_->Add<ModuleSection>();
 
   NewDeclarationAndAssignmentSections();
@@ -330,8 +343,15 @@ bool ModuleBuilder::CanEmitAsInlineExpression(
     return false;
   }
 
-  absl::Span<Node* const> users =
-      users_of_expression.has_value() ? *users_of_expression : node->users();
+  std::vector<Node*> users_vec;
+  absl::Span<Node* const> users;
+  if (users_of_expression.has_value()) {
+    users = *users_of_expression;
+  } else {
+    users_vec.insert(users_vec.begin(), node->users().begin(),
+                     node->users().end());
+    users = users_vec;
+  }
   for (Node* user : users) {
     for (int64_t i = 0; i < user->operand_count(); ++i) {
       if (user->operand(i) == node && OperandMustBeNamedReference(user, i)) {
@@ -546,17 +566,56 @@ absl::StatusOr<LogicRef*> ModuleBuilder::EmitAsAssignment(
         break;
       }
       case Op::kArraySlice: {
-        IndexableExpression* array = inputs[0]->AsIndexableExpressionOrDie();
-        int64_t input_size =
-            node->As<ArraySlice>()->array()->GetType()->AsArrayOrDie()->size();
+        ArraySlice* slice = node->As<ArraySlice>();
+        IndexableExpression* input_array =
+            inputs[0]->AsIndexableExpressionOrDie();
+        int64_t input_array_size =
+            slice->array()->GetType()->AsArrayOrDie()->size();
+
+        // If the start value is too narrow to hold the maximum index value of
+        // the input array, zero-extend it to avoid overflows in the necessary
+        // comparison and arithmetic operations below.
+        int64_t min_index_width =
+            Bits::MinBitCountUnsigned(input_array_size - 1);
+
+        Expression* start_expr = inputs[1];
+        int64_t start_width = slice->start()->BitCountOrDie();
+        if (start_width < min_index_width) {
+          // Zero-extend start to `min_index_width` bits.
+          start_expr = file_->Concat(
+              {file_->Literal(0, min_index_width - start_width), start_expr});
+          start_width = min_index_width;
+        }
+
+        Expression* max_index_expr =
+            file_->Literal(input_array_size - 1, start_width);
         for (int64_t i = 0; i < array_type->size(); i++) {
-          Expression* normal = file_->Add(inputs[1], file_->PlainLiteral(i));
-          Expression* overflow = file_->PlainLiteral(input_size - 1);
+          // The index for iteration `i` is out of bounds if the following
+          // condition is true:
+          //   start + i > $INPUT_ARRAY_SIZE - 1
+          // However, the expression `start + i` might overflow so instead
+          // equivalently compute as:
+          //   start > $INPUT_ARRAY_SIZE - 1 - i
+          // Check that `$INPUT_ARRAY_SIZE - 1 - i` is non-negative to avoid
+          // underflow. This is possible if the input array is narrower than the
+          // output array (slice is wider than its input)
+          Expression* element;
+          if (input_array_size - 1 - i < 0) {
+            // Index is definitely out of bounds.
+            element = file_->Index(input_array, max_index_expr);
+          } else {
+            // Index might be out of bounds.
+            Expression* oob_condition = file_->GreaterThan(
+                start_expr,
+                file_->Literal(input_array_size - 1 - i, start_width));
+            element = file_->Index(
+                input_array,
+                file_->Ternary(
+                    oob_condition, max_index_expr,
+                    file_->Add(start_expr, file_->Literal(i, start_width))));
+          }
           assignment_section()->Add<ContinuousAssignment>(
-              file_->Index(ref, file_->PlainLiteral(i)),
-              file_->Index(array,
-                           file_->Ternary(file_->GreaterThan(normal, overflow),
-                                          overflow, normal)));
+              file_->Index(ref, file_->PlainLiteral(i)), element);
         }
         break;
       }
@@ -780,7 +839,7 @@ absl::Status ModuleBuilder::EmitAssert(
     // Asserts are a SystemVerilog only feature.
     // TODO(meheff): 2021/02/27 We should raise an error here or possibly emit a
     // construct like: if (!condition) $display("Assert failed ...");
-    XLS_LOG(WARNING) << "Asserts only supported in SystemVerilog.";
+    XLS_LOG(WARNING) << "Asserts are only supported in SystemVerilog.";
     return absl::OkStatus();
   }
   if (assert_always_comb_ == nullptr) {
@@ -802,6 +861,24 @@ absl::Status ModuleBuilder::EmitAssert(
                            "isunknown", std::vector<Expression*>({condition})),
                        condition),
       asrt->message());
+  return absl::OkStatus();
+}
+
+absl::Status ModuleBuilder::EmitCover(xls::Cover* cover,
+                                      Expression* condition) {
+  if (!use_system_verilog_) {
+    // Coverpoints are a SystemVerilog only feature.
+    XLS_LOG(WARNING) << "Coverpoints are only supported in SystemVerilog.";
+    return absl::OkStatus();
+  }
+  if (clk_ == nullptr) {
+    return absl::InvalidArgumentError(
+        "Coverpoints require a clock to be present in the module.");
+  }
+  if (cover_always_comb_ == nullptr) {
+    cover_always_comb_ = cover_section_->Add<AlwaysComb>();
+  }
+  cover_always_comb_->statements()->Add<Cover>(clk_, condition, cover->label());
   return absl::OkStatus();
 }
 
@@ -839,8 +916,11 @@ absl::StatusOr<ModuleBuilder::Register> ModuleBuilder::DeclareRegister(
                           file_->BitVectorType(type->GetFlatBitCount()),
                           /*init=*/nullptr, declaration_section());
   }
-  return Register{
-      .ref = reg, .next = next, .reset_value = reset_value, .xls_type = type};
+  return Register{.ref = reg,
+                  .next = next,
+                  .reset_value = reset_value,
+                  .load_enable = nullptr,
+                  .xls_type = type};
 }
 
 absl::StatusOr<ModuleBuilder::Register> ModuleBuilder::DeclareRegister(
@@ -859,11 +939,12 @@ absl::StatusOr<ModuleBuilder::Register> ModuleBuilder::DeclareRegister(
                       /*init=*/nullptr, declaration_section()),
                   .next = next,
                   .reset_value = reset_value,
+                  .load_enable = nullptr,
                   .xls_type = nullptr};
 }
 
 absl::Status ModuleBuilder::AssignRegisters(
-    absl::Span<const Register> registers, Expression* load_enable) {
+    absl::Span<const Register> registers) {
   XLS_RET_CHECK(clk_ != nullptr);
 
   // Construct an always_ff block.
@@ -921,9 +1002,9 @@ absl::Status ModuleBuilder::AssignRegisters(
     XLS_RETURN_IF_ERROR(AddAssignment(
         reg.xls_type, reg.ref, reg.next, [&](Expression* lhs, Expression* rhs) {
           assignment_block->Add<NonblockingAssignment>(
-              lhs, load_enable == nullptr
+              lhs, reg.load_enable == nullptr
                        ? rhs
-                       : file_->Ternary(load_enable, rhs, lhs));
+                       : file_->Ternary(reg.load_enable, rhs, lhs));
         }));
   }
   return absl::OkStatus();

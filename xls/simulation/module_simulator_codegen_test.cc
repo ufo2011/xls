@@ -16,13 +16,15 @@
 #include "gtest/gtest.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "xls/codegen/block_generator.h"
 #include "xls/codegen/combinational_generator.h"
 #include "xls/codegen/module_signature.h"
 #include "xls/codegen/pipeline_generator.h"
-#include "xls/codegen/proc_generator.h"
+#include "xls/codegen/signature_generator.h"
 #include "xls/common/status/matchers.h"
 #include "xls/common/status/status_macros.h"
 #include "xls/delay_model/delay_estimator.h"
+#include "xls/ir/channel.h"
 #include "xls/ir/function_builder.h"
 #include "xls/ir/package.h"
 #include "xls/scheduling/pipeline_schedule.h"
@@ -475,35 +477,21 @@ TEST_P(ModuleSimulatorCodegenTest, ReturnParameter) {
 
 TEST_P(ModuleSimulatorCodegenTest, Assert) {
   Package p(TestName());
-  XLS_ASSERT_OK_AND_ASSIGN(
-      Channel * input_ch,
-      p.CreatePortChannel("in", ChannelOps::kReceiveOnly, p.GetBitsType(8)));
-  XLS_ASSERT_OK_AND_ASSIGN(
-      Channel * output_ch,
-      p.CreatePortChannel("out", ChannelOps::kSendOnly, p.GetBitsType(8)));
-  TokenlessProcBuilder b("assert_test", /*initial_value*/ Value::Tuple({}),
-                         "tkn", "st", &p);
-  BValue in = b.Receive(input_ch);
+  BlockBuilder b("assert_test", &p);
+  BValue in = b.InputPort("in", p.GetBitsType(8));
   BValue in_lt_42 = b.ULt(in, b.Literal(UBits(42, 8)));
-  b.Assert(in_lt_42, "input is not less than 42!");
-  b.Send(output_ch, in);
-  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, b.Build(b.GetStateParam()));
-  XLS_ASSERT_OK_AND_ASSIGN(
-      ModuleGeneratorResult result,
-      GenerateModule(
-          proc, GeneratorOptions().use_system_verilog(UseSystemVerilog())));
+  b.Assert(b.AfterAll({}), in_lt_42, "input is not less than 42!");
+  b.OutputPort("out", in);
+  XLS_ASSERT_OK_AND_ASSIGN(Block * block, b.Build());
+  CodegenOptions options;
+  options.use_system_verilog(UseSystemVerilog());
 
-  // Manually construct the signature because the proc generator produces a
-  // signature with the "unknown" interface type which the module builder
-  // doesn't known what to do with.
-  // TODO(meheff): Fix this when we have a unified code generator which properly
-  // lowers combinational and pipeline procs.
-  ModuleSignatureBuilder sig_b("assert_test");
-  sig_b.WithCombinationalInterface();
-  sig_b.AddDataInput("in", 8);
-  sig_b.AddDataOutput("out", 8);
-  XLS_ASSERT_OK_AND_ASSIGN(ModuleSignature sig, sig_b.Build());
-  ModuleSimulator simulator(sig, result.verilog_text, GetSimulator());
+  XLS_ASSERT_OK_AND_ASSIGN(std::string verilog,
+                           GenerateVerilog(block, options));
+  XLS_ASSERT_OK_AND_ASSIGN(ModuleSignature sig,
+                           GenerateSignature(options, block));
+
+  ModuleSimulator simulator(sig, verilog, GetSimulator());
 
   absl::flat_hash_map<std::string, Bits> outputs;
   XLS_ASSERT_OK(
@@ -520,6 +508,44 @@ TEST_P(ModuleSimulatorCodegenTest, Assert) {
   } else {
     XLS_ASSERT_OK(run_status);
   }
+}
+
+TEST_P(ModuleSimulatorCodegenTest, PassThroughArrayCombinationalModule) {
+  Package package(TestName());
+  FunctionBuilder fb(TestName(), &package);
+  BValue x = fb.Param("x", package.GetArrayType(3, package.GetBitsType(8)));
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func, fb.BuildWithReturnValue(x));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      ModuleGeneratorResult result,
+      GenerateCombinationalModule(func,
+                                  /*use_system_verilog=*/UseSystemVerilog()));
+
+  ModuleSimulator simulator(result.signature, result.verilog_text,
+                            GetSimulator());
+  XLS_ASSERT_OK_AND_ASSIGN(Value input, Value::UBitsArray({1, 2, 3}, 8));
+  XLS_ASSERT_OK_AND_ASSIGN(Value output, simulator.Run({input}));
+
+  EXPECT_EQ(output, input);
+}
+
+TEST_P(ModuleSimulatorCodegenTest, ConstructArrayCombinationalModule) {
+  Package package(TestName());
+  FunctionBuilder fb(TestName(), &package);
+  Type* u8 = package.GetBitsType(8);
+  fb.Array({fb.Param("x", u8), fb.Param("y", u8), fb.Param("z", u8)}, u8);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func, fb.Build());
+  XLS_ASSERT_OK_AND_ASSIGN(
+      ModuleGeneratorResult result,
+      GenerateCombinationalModule(func,
+                                  /*use_system_verilog=*/UseSystemVerilog()));
+
+  ModuleSimulator simulator(result.signature, result.verilog_text,
+                            GetSimulator());
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Value output, simulator.Run({Value(UBits(1, 8)), Value(UBits(2, 8)),
+                                   Value(UBits(3, 8))}));
+
+  EXPECT_EQ(output, Value::UBitsArray({1, 2, 3}, 8).value());
 }
 
 INSTANTIATE_TEST_SUITE_P(ModuleSimulatorCodegenTestInstantiation,

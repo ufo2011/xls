@@ -303,7 +303,7 @@ absl::StatusOr<Z3_ast> IrTranslator::ToFloat32(absl::Span<const Z3_ast> nodes) {
         "Incorrect number of arguments - need 3, got ", nodes.size()));
   }
 
-  // Does some sanity checking and returns the node of interest.
+  // Does some validation and returns the node of interest.
   auto get_fp_component =
       [this, nodes](int64_t index,
                     int64_t expected_width) -> absl::StatusOr<Z3_ast> {
@@ -756,6 +756,25 @@ absl::Status IrTranslator::HandleArrayConcat(ArrayConcat* array_concat) {
   NoteTranslation(
       array_concat,
       CreateArray(array_concat->GetType()->AsArrayOrDie(), elements));
+  return seh.status();
+}
+
+absl::Status IrTranslator::HandleArraySlice(ArraySlice* array_slice) {
+  ScopedErrorHandler seh(ctx_);
+  Z3_ast array_ast = GetValue(array_slice->array());
+  Z3_ast start_ast = GetValue(array_slice->start());
+  ArrayType* input_type = array_slice->array()->GetType()->AsArrayOrDie();
+  ArrayType result_type(array_slice->width(), input_type->element_type());
+  Z3_ast formatted_start_ast = GetAsFormattedArrayIndex(start_ast, input_type);
+
+  std::vector<Z3_ast> elements;
+  for (uint64_t i = 0; i < array_slice->width(); ++i) {
+    Z3_ast i_ast = Z3_mk_int64(ctx_, i, Z3_get_sort(ctx_, formatted_start_ast));
+    Z3_ast index_ast = Z3_mk_bvadd(ctx_, i_ast, formatted_start_ast);
+    elements.push_back(GetArrayElement(input_type, array_ast, index_ast));
+  }
+
+  NoteTranslation(array_slice, CreateArray(&result_type, elements));
   return seh.status();
 }
 

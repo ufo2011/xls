@@ -86,36 +86,6 @@
       
     </div>
     
-      <label class="md-header-nav__button md-icon" for="__search">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0116 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.516 6.516 0 019.5 16 6.5 6.5 0 013 9.5 6.5 6.5 0 019.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5z"/></svg>
-      </label>
-      
-<div class="md-search" data-md-component="search" role="dialog">
-  <label class="md-search__overlay" for="__search"></label>
-  <div class="md-search__inner" role="search">
-    <form class="md-search__form" name="search">
-      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" data-md-state="active">
-      <label class="md-search__icon md-icon" for="__search">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0116 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.516 6.516 0 019.5 16 6.5 6.5 0 013 9.5 6.5 6.5 0 019.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5z"/></svg>
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11h12z"/></svg>
-      </label>
-      <button type="reset" class="md-search__icon md-icon" aria-label="Clear" data-md-component="search-reset" tabindex="-1">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12 19 6.41z"/></svg>
-      </button>
-    </form>
-    <div class="md-search__output">
-      <div class="md-search__scrollwrap" data-md-scrollfix>
-        <div class="md-search-result" data-md-component="search-result">
-          <div class="md-search-result__meta">
-            Initializing search
-          </div>
-          <ol class="md-search-result__list"></ol>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-    
     
       <div class="md-header-nav__source">
         
@@ -587,6 +557,19 @@
     Array Type
   </a>
   
+    <nav class="md-nav" aria-label="Array Type">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#character-string-constants" class="md-nav__link">
+    Character String Constants
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
           <li class="md-nav__item">
@@ -737,6 +720,19 @@
     Match Expression
   </a>
   
+    <nav class="md-nav" aria-label="Match Expression">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#redundant-patterns" class="md-nav__link">
+    Redundant Patterns
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
           <li class="md-nav__item">
@@ -806,6 +802,26 @@
     Bit Slice Expressions
   </a>
   
+    <nav class="md-nav" aria-label="Bit Slice Expressions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#width-slice" class="md-nav__link">
+    Width Slice
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bit-slice-examples" class="md-nav__link">
+    Bit Slice Examples
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
           <li class="md-nav__item">
@@ -866,13 +882,6 @@
           <li class="md-nav__item">
   <a href="#one_hot" class="md-nav__link">
     one_hot
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#explicitly-signed-comparison-builtins-sge-sgt-sle-slt" class="md-nav__link">
-    Explicitly-signed comparison builtins: sge, sgt, sle, slt
   </a>
   
 </li>
@@ -940,6 +949,13 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#cover" class="md-nav__link">
+    cover!
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -984,18 +1000,30 @@
           
 
 
+  <li class="md-nav__item">
+    <a href="../dslx_std/" title="Standard Library" class="md-nav__link">
+      Standard Library
+    </a>
+  </li>
+
+        
+          
+          
+          
+
+
   <li class="md-nav__item md-nav__item--nested">
     
-      <input class="md-nav__toggle md-toggle" data-md-toggle="nav-3-2" type="checkbox" id="nav-3-2">
+      <input class="md-nav__toggle md-toggle" data-md-toggle="nav-3-3" type="checkbox" id="nav-3-3">
     
-    <label class="md-nav__link" for="nav-3-2">
+    <label class="md-nav__link" for="nav-3-3">
       Examples
       <span class="md-nav__icon md-icon">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M8.59 16.58L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.42z"/></svg>
       </span>
     </label>
     <nav class="md-nav" aria-label="Examples" data-md-level="2">
-      <label class="md-nav__title" for="nav-3-2">
+      <label class="md-nav__title" for="nav-3-3">
         <span class="md-nav__icon md-icon">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11h12z"/></svg>
         </span>
@@ -1042,6 +1070,18 @@
         
       </ul>
     </nav>
+  </li>
+
+        
+          
+          
+          
+
+
+  <li class="md-nav__item">
+    <a href="../floating_point/" title="Floating Point" class="md-nav__link">
+      Floating Point
+    </a>
   </li>
 
         
@@ -1578,6 +1618,19 @@
     Array Type
   </a>
   
+    <nav class="md-nav" aria-label="Array Type">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#character-string-constants" class="md-nav__link">
+    Character String Constants
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
           <li class="md-nav__item">
@@ -1728,6 +1781,19 @@
     Match Expression
   </a>
   
+    <nav class="md-nav" aria-label="Match Expression">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#redundant-patterns" class="md-nav__link">
+    Redundant Patterns
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
           <li class="md-nav__item">
@@ -1797,6 +1863,26 @@
     Bit Slice Expressions
   </a>
   
+    <nav class="md-nav" aria-label="Bit Slice Expressions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#width-slice" class="md-nav__link">
+    Width Slice
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bit-slice-examples" class="md-nav__link">
+    Bit Slice Examples
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
           <li class="md-nav__item">
@@ -1862,13 +1948,6 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#explicitly-signed-comparison-builtins-sge-sgt-sle-slt" class="md-nav__link">
-    Explicitly-signed comparison builtins: sge, sgt, sle, slt
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
   <a href="#signex" class="md-nav__link">
     signex
   </a>
@@ -1927,6 +2006,13 @@
           <li class="md-nav__item">
   <a href="#fail" class="md-nav__link">
     fail!
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cover" class="md-nav__link">
+    cover!
   </a>
   
 </li>
@@ -2242,13 +2328,20 @@ value outside of the representable <code>u3</code> range will produce a compile 
 
 <p>Enums can be compared for equality/inequality, but they do not permit arithmetic
 operations, they must be cast to numerical types in order to perform arithmetic:</p>
-<div class="highlight"><pre><span></span><code><span class="k">fn</span> <span class="nf">same_opcode</span><span class="p">(</span><span class="n">x</span>: <span class="nc">Opcode</span><span class="p">,</span><span class="w"> </span><span class="n">y</span>: <span class="nc">Opcode</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">bool</span> <span class="p">{</span><span class="w"></span>
+<div class="highlight"><pre><span></span><code><span class="k">enum</span> <span class="nc">Opcode</span>: <span class="nc">u3</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">NOP</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">ADD</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">SUB</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">MUL</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">fn</span> <span class="nf">same_opcode</span><span class="p">(</span><span class="n">x</span>: <span class="nc">Opcode</span><span class="p">,</span><span class="w"> </span><span class="n">y</span>: <span class="nc">Opcode</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">bool</span> <span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="n">x</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">y</span><span class="w">  </span><span class="c1">// ok</span>
 <span class="p">}</span><span class="w"></span>
 
 <span class="k">fn</span> <span class="nf">next_in_sequence</span><span class="p">(</span><span class="n">x</span>: <span class="nc">Opcode</span><span class="p">,</span><span class="w"> </span><span class="n">y</span>: <span class="nc">Opcode</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">bool</span> <span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="c1">// x+1 == y // does not work, arithmetic!</span>
-<span class="w">  </span><span class="n">u3</span>:<span class="nc">x</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">u3</span>:<span class="mi">1</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">u3</span>:<span class="nc">y</span><span class="w">  </span><span class="c1">// ok, casted first</span>
+<span class="w">  </span><span class="n">x</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">u3</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">u3</span>:<span class="mi">1</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="p">(</span><span class="n">y</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">u3</span><span class="p">)</span><span class="w">  </span><span class="c1">// ok, casted first</span>
 <span class="p">}</span><span class="w"></span>
 </code></pre></div>
 
@@ -2258,17 +2351,17 @@ will sign extend because the source type for the enum is signed. (See
 <a href="#numerical-conversions">numerical conversions</a> for the full description of
 extension/truncation behavior.)</p>
 <div class="highlight"><pre><span></span><code><span class="k">enum</span> <span class="nc">MySignedEnum</span><span class="w"> </span>: <span class="nc">s3</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
-<span class="w">  </span><span class="n">LOW</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span><span class="w"></span>
-<span class="w">  </span><span class="n">ZERO</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
-<span class="w">  </span><span class="n">HIGH</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="n">LOW</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">ZERO</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">HIGH</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 
 <span class="k">fn</span> <span class="nf">extend_to_32b</span><span class="p">(</span><span class="n">x</span>: <span class="nc">MySignedEnum</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">u32</span> <span class="p">{</span><span class="w"></span>
-<span class="w">  </span><span class="kt">u32</span>:<span class="nc">x</span><span class="w">  </span><span class="c1">// Sign-extends because the source type is signed.</span>
+<span class="w">  </span><span class="n">x</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u32</span><span class="w">  </span><span class="c1">// Sign-extends because the source type is signed.</span>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">extend_to_32b</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_extend_to_32b</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">extend_to_32b</span><span class="p">(</span><span class="n">MySignedEnum</span>::<span class="n">LOW</span><span class="p">),</span><span class="w"> </span><span class="kt">u32</span>:<span class="o">-</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 </code></pre></div>
@@ -2297,7 +2390,7 @@ types.</p>
 <span class="c1">//       the 1st element is of type u8</span>
 <span class="c1">//       the 2nd element is another tuple with 1 element of type u16</span>
 <span class="c1">//       the 3rd element is of type u8</span>
-<span class="k">type</span> <span class="nc">MyTuple</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">u16</span><span class="p">,),</span><span class="w"> </span><span class="kt">u8</span><span class="p">);</span><span class="w"></span>
+<span class="k">type</span> <span class="nc">MyTuple</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">u16</span><span class="p">,),</span><span class="w"> </span><span class="kt">u8</span><span class="p">));</span><span class="w"></span>
 </code></pre></div>
 
 <p>To access individual tuple elements use simple indices, starting at 0. For
@@ -2350,7 +2443,7 @@ order:</p>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">struct_equality</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_struct_equality</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">p0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Point</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">x</span>: <span class="kt">u32</span>:<span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="n">y</span>: <span class="kt">u32</span>:<span class="mi">64</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">p1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Point</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">y</span>: <span class="kt">u32</span>:<span class="mi">64</span><span class="p">,</span><span class="w"> </span><span class="n">x</span>: <span class="kt">u32</span>:<span class="mi">42</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">p0</span><span class="p">,</span><span class="w"> </span><span class="n">p1</span><span class="p">)</span><span class="w"></span>
@@ -2362,7 +2455,7 @@ names of in-scope values:</p>
 <div class="highlight"><pre><span></span><code><span class="k">struct</span> <span class="nc">Point</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">x</span>: <span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="n">y</span>: <span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">struct_equality</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_struct_equality</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">42</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">64</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">p0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Point</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
@@ -2386,7 +2479,7 @@ names of in-scope values:</p>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">main</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u32</span>:<span class="mi">106</span><span class="p">,</span><span class="w"> </span><span class="n">main</span><span class="p">())</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 </code></pre></div>
@@ -2410,7 +2503,7 @@ field values, as in the following:</p>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">main</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">want</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Point3</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">x</span>: <span class="kt">u32</span>:<span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="n">y</span>: <span class="kt">u32</span>:<span class="mi">128</span><span class="p">,</span><span class="w"> </span><span class="n">z</span>: <span class="kt">u32</span>:<span class="mi">256</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">want</span><span class="p">,</span><span class="w"> </span><span class="n">main</span><span class="p">())</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
@@ -2419,7 +2512,13 @@ field values, as in the following:</p>
 <h4 id="struct-update-syntax">Struct Update Syntax</h4>
 <p>The DSL has syntax for conveniently producing a new value with a subset of
 fields updated to reduce verbosity. The "struct update" syntax is:</p>
-<div class="highlight"><pre><span></span><code><span class="k">fn</span> <span class="nf">update_y</span><span class="p">(</span><span class="n">p</span>: <span class="nc">Point3</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Point3</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<div class="highlight"><pre><span></span><code><span class="k">struct</span> <span class="nc">Point3</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">x</span>: <span class="kt">u32</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">y</span>: <span class="kt">u32</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">z</span>: <span class="kt">u32</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">fn</span> <span class="nf">update_y</span><span class="p">(</span><span class="n">p</span>: <span class="nc">Point3</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Point3</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="n">Point3</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">y</span>: <span class="kt">u32</span>:<span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="o">..</span><span class="n">p</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 
@@ -2434,14 +2533,17 @@ type-parametricity works, see the <a href="#parametric-functions">parametric fun
 section.</p>
 <div class="highlight"><pre><span></span><code><span class="k">fn</span> <span class="nf">double</span><span class="p">(</span><span class="n">n</span>: <span class="kt">u32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">u32</span> <span class="p">{</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">2</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
 
-<span class="k">struct</span> <span class="nc">Point</span><span class="o">&lt;</span><span class="n">N</span>: <span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="n">M</span>: <span class="kt">u32</span> <span class="o">=</span><span class="w"> </span><span class="n">double</span><span class="p">(</span><span class="n">N</span><span class="p">)</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Point</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">x</span>: <span class="nc">bits</span><span class="p">[</span><span class="n">N</span><span class="p">],</span><span class="w"> </span><span class="n">y</span>: <span class="nc">bits</span><span class="p">[</span><span class="n">M</span><span class="p">],</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="k">struct</span> <span class="nc">Point</span><span class="o">&lt;</span><span class="n">N</span>: <span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="n">M</span>: <span class="kt">u32</span> <span class="o">=</span><span class="w"> </span><span class="n">double</span><span class="p">(</span><span class="n">N</span><span class="p">)</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">x</span>: <span class="nc">bits</span><span class="p">[</span><span class="n">N</span><span class="p">],</span><span class="w"></span>
+<span class="w">  </span><span class="n">y</span>: <span class="nc">bits</span><span class="p">[</span><span class="n">M</span><span class="p">],</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
 
-<span class="k">fn</span> <span class="nf">make_point</span><span class="o">&lt;</span><span class="n">A</span>: <span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="n">B</span>: <span class="kt">u32</span><span class="o">&gt;</span><span class="w"> </span><span class="n">make_point</span><span class="p">(</span><span class="n">x</span>: <span class="nc">bits</span><span class="p">[</span><span class="n">A</span><span class="p">],</span><span class="w"> </span><span class="n">y</span>: <span class="nc">bits</span><span class="p">[</span><span class="n">B</span><span class="p">])</span><span class="w"> </span>-&gt; <span class="nc">Point</span><span class="p">[</span><span class="n">A</span><span class="p">,</span><span class="w"> </span><span class="n">B</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">make_point</span><span class="o">&lt;</span><span class="n">A</span>: <span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="n">B</span>: <span class="kt">u32</span><span class="o">&gt;</span><span class="p">(</span><span class="n">x</span>: <span class="nc">bits</span><span class="p">[</span><span class="n">A</span><span class="p">],</span><span class="w"> </span><span class="n">y</span>: <span class="nc">bits</span><span class="p">[</span><span class="n">B</span><span class="p">])</span><span class="w"> </span>-&gt; <span class="nc">Point</span><span class="o">&lt;</span><span class="n">A</span><span class="p">,</span><span class="w"> </span><span class="n">B</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="n">Point</span><span class="p">{</span><span class="w"> </span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">struct_construction</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_struct_construction</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">make_point</span><span class="p">(</span><span class="kt">u16</span>:<span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">42</span><span class="p">);</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u16</span>:<span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">x</span><span class="p">)</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
@@ -2469,12 +2571,13 @@ different type when they have a different name).</p>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_ok</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">f</span><span class="p">(</span><span class="n">Point</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">x</span>: <span class="kt">u32</span>:<span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="n">y</span>: <span class="kt">u32</span>:<span class="mi">64</span><span class="w"> </span><span class="p">}),</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">106</span><span class="p">)</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
+</code></pre></div>
 
-<span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">type_checker_error</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<div class="highlight"><pre><span></span><code><span class="cp">#![test]</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_type_checker_error</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">f</span><span class="p">(</span><span class="n">Coordinate</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">x</span>: <span class="kt">u32</span>:<span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="n">y</span>: <span class="kt">u32</span>:<span class="mi">64</span><span class="w"> </span><span class="p">}),</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">106</span><span class="p">)</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 </code></pre></div>
@@ -2488,7 +2591,7 @@ array must have the same type. Arrays can be indexed with indexing notation
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">main</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">42</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">64</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="c1">// Make an array with &quot;bracket notation&quot;.</span>
@@ -2509,7 +2612,7 @@ shown.</p>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">make_array</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_make_array</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u32</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span>:<span class="p">[</span><span class="kt">u32</span>:<span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">42</span><span class="p">],</span><span class="w"> </span><span class="n">make_array</span><span class="p">(</span><span class="kt">u32</span>:<span class="mi">42</span><span class="p">));</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u32</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span>:<span class="p">[</span><span class="kt">u32</span>:<span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">64</span><span class="p">,</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">64</span><span class="p">],</span><span class="w"> </span><span class="n">make_array</span><span class="p">(</span><span class="kt">u32</span>:<span class="mi">64</span><span class="p">));</span><span class="w"></span>
 <span class="w">  </span><span class="p">()</span><span class="w"></span>
@@ -2518,6 +2621,26 @@ shown.</p>
 
 <p>TODO(meheff): Explain arrays and the intricacies of our bits type interpretation
 and how it affects arrays of bits etc.</p>
+<h4 id="character-string-constants">Character String Constants</h4>
+<p>Character strings are a special case of array types, being implicitly-sized
+arrays of u8 elements. String constants can be used just as traditional arrays:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span> <span class="nf">add_one</span><span class="o">&lt;</span><span class="n">N</span>: <span class="kt">u32</span><span class="o">&gt;</span><span class="p">(</span><span class="n">input</span>: <span class="kt">u8</span><span class="p">[</span><span class="n">N</span><span class="p">])</span><span class="w"> </span>-&gt; <span class="kt">u8</span><span class="p">[</span><span class="n">N</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="p">,</span><span class="w"> </span><span class="n">result</span><span class="p">)</span><span class="w"> </span>: <span class="p">(</span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="kt">u8</span><span class="p">[</span><span class="n">N</span><span class="p">])</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">range</span><span class="p">(</span><span class="kt">u32</span>:<span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">N</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">update</span><span class="p">(</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">i</span><span class="p">,</span><span class="w"> </span><span class="n">result</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="kt">u8</span>:<span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}(</span><span class="n">input</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="cp">#![test]</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="s">&quot;bcdef&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">add_one</span><span class="p">(</span><span class="s">&quot;abcde&quot;</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>DSLX string constants support the
+<a href="https://doc.rust-lang.org/reference/tokens.html">full Rust set of escape sequences</a> -
+for multi-byte sequences, i.e., Unicode escapes, the resulting byte sequence
+will be in printed order. In other words, the sequence <code>\u{89ab}</code> will result in
+an array with the (binary) values <code>1000 1001 1010 1011</code> in sequence.</p>
 <h3 id="type-aliases">Type Aliases</h3>
 <p>DLSX supports the definition of type aliases.</p>
 <p>Type aliases can be used to provide a more human-readable name for an existing
@@ -2526,7 +2649,8 @@ type. The new name is on the left, the existing name on the right:</p>
 </code></pre></div>
 
 <p>We can create an alias for an imported type:</p>
-<div class="highlight"><pre><span></span><code><span class="n">import</span><span class="w"> </span><span class="n">xls</span><span class="p">.</span><span class="n">dslx</span><span class="p">.</span><span class="n">interpreter</span><span class="p">.</span><span class="n">tests</span><span class="p">.</span><span class="n">mod_imported</span><span class="w"></span>
+<div class="highlight"><pre><span></span><code><span class="c1">// Note: this imports an external file in the codebase.</span>
+<span class="n">import</span><span class="w"> </span><span class="n">xls</span><span class="p">.</span><span class="n">dslx</span><span class="p">.</span><span class="n">tests</span><span class="p">.</span><span class="n">mod_imported</span><span class="w"></span>
 
 <span class="k">type</span> <span class="nc">MyEnum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mod_imported</span>::<span class="n">MyEnum</span><span class="p">;</span><span class="w"></span>
 
@@ -2535,7 +2659,7 @@ type. The new name is on the left, the existing name on the right:</p>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">main</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">main</span><span class="p">(</span><span class="kt">u8</span>:<span class="mi">42</span><span class="p">),</span><span class="w"> </span><span class="n">MyEnum</span>::<span class="n">FOO</span><span class="p">);</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">main</span><span class="p">(</span><span class="kt">u8</span>:<span class="mi">64</span><span class="p">),</span><span class="w"> </span><span class="n">MyEnum</span>::<span class="n">BAR</span><span class="p">);</span><span class="w"></span>
 <span class="w">  </span><span class="p">()</span><span class="w"></span>
@@ -2561,37 +2685,37 @@ changed between signed and unsigned. Some examples are found below. See
 <a href="#numerical-conversions">Numerical Conversions</a> for a description of the
 semantics.</p>
 <div class="highlight"><pre><span></span><code><span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">narrow_cast</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_narrow_cast</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">twelve</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">u4</span>:<span class="mb">0b1100</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">twelve</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">u2</span><span class="p">,</span><span class="w"> </span><span class="n">u2</span>:<span class="mi">0</span><span class="p">)</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">widen_cast</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_widen_cast</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">three</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">u2</span>:<span class="mb">0b11</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">three</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">u4</span><span class="p">,</span><span class="w"> </span><span class="n">u4</span>:<span class="mi">3</span><span class="p">)</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">narrow_signed_cast</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_narrow_signed_cast</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">negative_seven</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s4</span>:<span class="mb">0b1001</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">negative_seven</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">u2</span><span class="p">,</span><span class="w"> </span><span class="n">u2</span>:<span class="mi">1</span><span class="p">)</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">widen_signed_cast</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_widen_signed_cast</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">negative_one</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s2</span>:<span class="mb">0b11</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">negative_one</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">s4</span><span class="p">,</span><span class="w"> </span><span class="n">s4</span>:<span class="o">-</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">widen_to_unsigned</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_widen_to_unsigned</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">negative_one</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s2</span>:<span class="mb">0b11</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">negative_one</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">u3</span><span class="p">,</span><span class="w"> </span><span class="n">u3</span>:<span class="mb">0b111</span><span class="p">)</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">widen_to_signed</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_widen_to_signed</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">three</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">u2</span>:<span class="mb">0b11</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">three</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">u3</span><span class="p">,</span><span class="w"> </span><span class="n">u3</span>:<span class="mb">0b011</span><span class="p">)</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
@@ -2734,15 +2858,17 @@ different lines:</p>
 same thing.</p>
 <p>Here is an example using the same function via two different aliases for the
 same module:</p>
-<div class="highlight"><pre><span></span><code><span class="n">import</span><span class="w"> </span><span class="n">xls</span><span class="p">.</span><span class="n">dslx</span><span class="p">.</span><span class="n">interpreter</span><span class="p">.</span><span class="n">tests</span><span class="p">.</span><span class="n">mod_imported</span><span class="w"></span>
-<span class="n">import</span><span class="w"> </span><span class="n">xls</span><span class="p">.</span><span class="n">dslx</span><span class="p">.</span><span class="n">interpreter</span><span class="p">.</span><span class="n">tests</span><span class="p">.</span><span class="n">mod_imported</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">mi</span><span class="w"></span>
+<div class="highlight"><pre><span></span><code><span class="c1">// Note: this imports an external file in the codebase under two different</span>
+<span class="c1">// names.</span>
+<span class="n">import</span><span class="w"> </span><span class="n">xls</span><span class="p">.</span><span class="n">dslx</span><span class="p">.</span><span class="n">tests</span><span class="p">.</span><span class="n">mod_imported</span><span class="w"></span>
+<span class="n">import</span><span class="w"> </span><span class="n">xls</span><span class="p">.</span><span class="n">dslx</span><span class="p">.</span><span class="n">tests</span><span class="p">.</span><span class="n">mod_imported</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">mi</span><span class="w"></span>
 
 <span class="k">fn</span> <span class="nf">main</span><span class="p">(</span><span class="n">x</span>: <span class="nc">u3</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">u1</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="n">mod_imported</span>::<span class="n">my_lsb</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">mi</span>::<span class="n">my_lsb</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">main</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">u1</span>:<span class="mb">0b1</span><span class="p">,</span><span class="w"> </span><span class="n">main</span><span class="p">(</span><span class="n">u3</span>:<span class="mb">0b001</span><span class="p">))</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 </code></pre></div>
@@ -2757,15 +2883,15 @@ must be added as a prefix; e.g.</p>
 
 <p>This applies to other things defined at module scope as well: functions, enums,
 type aliases, etc.</p>
-<div class="highlight"><pre><span></span><code><span class="n">import</span><span class="w"> </span><span class="n">xls</span><span class="p">.</span><span class="n">dslx</span><span class="p">.</span><span class="n">interpreter</span><span class="p">.</span><span class="n">tests</span><span class="p">.</span><span class="n">mod_imported</span><span class="w"></span>
-<span class="n">import</span><span class="w"> </span><span class="n">xls</span><span class="p">.</span><span class="n">dslx</span><span class="p">.</span><span class="n">interpreter</span><span class="p">.</span><span class="n">tests</span><span class="p">.</span><span class="n">mod_imported</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">mi</span><span class="w"></span>
+<div class="highlight"><pre><span></span><code><span class="n">import</span><span class="w"> </span><span class="n">xls</span><span class="p">.</span><span class="n">dslx</span><span class="p">.</span><span class="n">tests</span><span class="p">.</span><span class="n">mod_imported</span><span class="w"></span>
+<span class="n">import</span><span class="w"> </span><span class="n">xls</span><span class="p">.</span><span class="n">dslx</span><span class="p">.</span><span class="n">tests</span><span class="p">.</span><span class="n">mod_imported</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">mi</span><span class="w"></span>
 
 <span class="k">fn</span> <span class="nf">main</span><span class="p">(</span><span class="n">x</span>: <span class="nc">u3</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">u1</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="n">mod_imported</span>::<span class="n">my_lsb</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">mi</span>::<span class="n">my_lsb</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">main</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">u1</span>:<span class="mb">0b1</span><span class="p">,</span><span class="w"> </span><span class="n">main</span><span class="p">(</span><span class="n">u3</span>:<span class="mb">0b001</span><span class="p">))</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 </code></pre></div>
@@ -2783,7 +2909,7 @@ constants should be usable anywhere a literal value can be used:</p>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">match_const_not_binding</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_match_const_not_binding</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u8</span>:<span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="n">match_const</span><span class="p">(</span><span class="kt">u8</span>:<span class="mi">0</span><span class="p">));</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u8</span>:<span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="n">match_const</span><span class="p">(</span><span class="kt">u8</span>:<span class="mi">1</span><span class="p">));</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u8</span>:<span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">match_const</span><span class="p">(</span><span class="kt">u8</span>:<span class="mi">42</span><span class="p">));</span><span class="w"></span>
@@ -2799,7 +2925,7 @@ constants should be usable anywhere a literal value can be used:</p>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">match_nested</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_match_nested</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u32</span>:<span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="n">h</span><span class="p">((</span><span class="kt">u8</span>:<span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">u16</span>:<span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">2</span><span class="p">))));</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u32</span>:<span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">h</span><span class="p">((</span><span class="kt">u8</span>:<span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">u16</span>:<span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">42</span><span class="p">))));</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u32</span>:<span class="mi">7</span><span class="p">,</span><span class="w"> </span><span class="n">h</span><span class="p">((</span><span class="kt">u8</span>:<span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">u16</span>:<span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">0</span><span class="p">))));</span><span class="w"></span>
@@ -2867,7 +2993,7 @@ below:</p>
 <div class="highlight"><pre><span></span><code><span class="cp">#![test]</span><span class="w"></span>
 <span class="k">fn</span> <span class="nf">test_bits_concat</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u8</span>:<span class="mb">0b11000000</span><span class="p">,</span><span class="w"> </span><span class="n">u2</span>:<span class="mb">0b11</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="n">u6</span>:<span class="mb">0b000000</span><span class="p">);</span><span class="w"></span>
-<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u8</span>:<span class="mb">0b00000111</span><span class="p">,</span><span class="w"> </span><span class="n">u2</span>:<span class="mb">0b00</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="n">u6</span>:<span class="mb">0b000111</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u8</span>:<span class="mb">0b00000111</span><span class="p">,</span><span class="w"> </span><span class="n">u2</span>:<span class="mb">0b00</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="n">u6</span>:<span class="mb">0b000111</span><span class="p">);</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">u6</span>:<span class="mb">0b100111</span><span class="p">,</span><span class="w"> </span><span class="n">u1</span>:<span class="mi">1</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="n">u2</span>:<span class="mb">0b00</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="n">u3</span>:<span class="mb">0b111</span><span class="p">);</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">u6</span>:<span class="mb">0b001000</span><span class="p">,</span><span class="w"> </span><span class="n">u1</span>:<span class="mi">0</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="n">u2</span>:<span class="mb">0b01</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="n">u3</span>:<span class="mb">0b000</span><span class="p">);</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u32</span>:<span class="mh">0xdeadbeef</span><span class="p">,</span><span class="w"> </span><span class="kt">u16</span>:<span class="mh">0xdead</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="kt">u16</span>:<span class="mh">0xbeef</span><span class="p">);</span><span class="w"></span>
@@ -2882,7 +3008,7 @@ values to identifiers for subsequent use. For example:</p>
 <div class="highlight"><pre><span></span><code><span class="k">fn</span> <span class="nf">f</span><span class="p">(</span><span class="n">t</span>: <span class="p">(</span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="kt">u32</span><span class="p">))</span><span class="w"> </span>-&gt; <span class="kt">u32</span> <span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="k">match</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">    </span><span class="p">(</span><span class="kt">u8</span>:<span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">y</span><span class="p">,</span><span class="w"></span>
-<span class="w">    </span><span class="p">(</span><span class="n">_</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">y</span><span class="o">+</span><span class="kt">u8</span>:<span class="mi">77</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="n">_</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">y</span><span class="o">+</span><span class="kt">u32</span>:<span class="mi">77</span><span class="w"></span>
 <span class="w">  </span><span class="p">}</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 </code></pre></div>
@@ -2896,7 +3022,7 @@ constants; For example, consider this variation on the above:</p>
 <span class="k">fn</span> <span class="nf">f</span><span class="p">(</span><span class="n">t</span>: <span class="p">(</span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="kt">u32</span><span class="p">))</span><span class="w"> </span>-&gt; <span class="kt">u32</span> <span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="k">match</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">    </span><span class="p">(</span><span class="n">MY_FAVORITE_NUMBER</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">y</span><span class="p">,</span><span class="w"></span>
-<span class="w">    </span><span class="p">(</span><span class="n">_</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">y</span><span class="o">+</span><span class="kt">u8</span>:<span class="mi">77</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="n">_</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">y</span><span class="o">+</span><span class="kt">u32</span>:<span class="mi">77</span><span class="w"></span>
 <span class="w">  </span><span class="p">}</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 </code></pre></div>
@@ -2905,8 +3031,8 @@ constants; For example, consider this variation on the above:</p>
 <div class="highlight"><pre><span></span><code><span class="k">const</span><span class="w"> </span><span class="n">MY_FAVORITE_NUMBER</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">u8</span>:<span class="mi">42</span><span class="p">;</span><span class="w"></span>
 <span class="k">fn</span> <span class="nf">f</span><span class="p">(</span><span class="n">t</span>: <span class="p">(</span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">u16</span><span class="p">,</span><span class="w"> </span><span class="kt">u32</span><span class="p">)))</span><span class="w"> </span>-&gt; <span class="kt">u32</span> <span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="k">match</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
-<span class="w">    </span><span class="p">(</span><span class="n">MY_FAVORITE_NUMBER</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">y</span><span class="p">,</span><span class="w"> </span><span class="n">z</span><span class="p">))</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="nc">y</span><span class="o">+</span><span class="n">z</span><span class="p">,</span><span class="w"></span>
-<span class="w">    </span><span class="p">(</span><span class="n">_</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">y</span><span class="p">,</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">42</span><span class="p">))</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="nc">y</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="n">MY_FAVORITE_NUMBER</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">y</span><span class="p">,</span><span class="w"> </span><span class="n">z</span><span class="p">))</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u32</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">z</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="n">_</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">y</span><span class="p">,</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">42</span><span class="p">))</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w"></span>
 <span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">7</span><span class="w"></span>
 <span class="w">  </span><span class="p">}</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
@@ -2914,6 +3040,33 @@ constants; For example, consider this variation on the above:</p>
 
 <p>Here we use a "catch all" wildcard pattern in the last match arm to ensure the
 match expression always matches the input somehow.</p>
+<h4 id="redundant-patterns">Redundant Patterns</h4>
+<p><code>match</code> will flag an error if a <em>syntactically identical</em> pattern is typed
+twice; e.g.</p>
+<div class="highlight"><pre><span></span><code><span class="k">const</span><span class="w"> </span><span class="n">FOO</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">42</span><span class="p">;</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">f</span><span class="p">(</span><span class="n">x</span>: <span class="kt">u32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">u2</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">match</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">FOO</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">u2</span>:<span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">FOO</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">u2</span>:<span class="mi">1</span><span class="p">,</span><span class="w">  </span><span class="c1">// Identical pattern!</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">u2</span>:<span class="mi">2</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Only the first pattern will ever match, so it is fully redundant (and therefore
+likely a user error they'd like to be informed of). Note that <em>equivalent</em> but
+not <em>syntactically identical</em> patterns will not be flagged in this way.</p>
+<div class="highlight"><pre><span></span><code><span class="k">const</span><span class="w"> </span><span class="n">FOO</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">42</span><span class="p">;</span><span class="w"></span>
+<span class="k">const</span><span class="w"> </span><span class="n">BAR</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">42</span><span class="p">;</span><span class="w">  </span><span class="c1">// Compares `==` to `FOO`.</span>
+<span class="k">fn</span> <span class="nf">f</span><span class="p">(</span><span class="n">x</span>: <span class="kt">u32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">u2</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">match</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">FOO</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">u2</span>:<span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">BAR</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">u2</span>:<span class="mi">1</span><span class="p">,</span><span class="w">  </span><span class="c1">// _Equivalent_ pattern, but not syntactically identical.</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">u2</span>:<span class="mi">2</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
 <h3 id="let-expression"><code>let</code> Expression</h3>
 <p>let expressions work the same way as let expressions in other functional
 languages (such as the ML family languages). let expressions provide a nested,
@@ -2990,6 +3143,8 @@ implementation, since pipelines cannot be unrolled indefinitely.</p>
 } (initial-accumulator-value)
 </code></pre></div>
 
+<p>The type annotation in the above "blueprint" is optional, but often helpful to
+include for increased clarity.</p>
 <p>Because DSLX is a pure dataflow description, a for loop is an expression that
 produces a value. As a result, you grab the output of a for loop just like any
 other expression:</p>
@@ -3053,7 +3208,7 @@ for semantics of numeric casts:</p>
     no-op.</li>
 </ul>
 <div class="highlight"><pre><span></span><code><span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">numerical_conversions</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_numerical_conversions</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">s8_m2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s8</span>:<span class="o">-</span><span class="mi">2</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">u8_m2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">u8</span>:<span class="o">-</span><span class="mi">2</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="c1">// Sign extension (source type is signed).</span>
@@ -3093,7 +3248,7 @@ the MSbs of the resulting value.</p>
 <span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">cast_to_array</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_cast_to_array</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">a_value</span>: <span class="nc">u6</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">u6</span>:<span class="mb">0b011011</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">a</span>: <span class="nc">u2</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cast_to_array</span><span class="p">(</span><span class="n">a_value</span><span class="p">);</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">a_array</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">u2</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span>:<span class="p">[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">];</span><span class="w"></span>
@@ -3128,16 +3283,18 @@ the MSbs of the resulting value.</p>
 <h3 id="bit-slice-expressions">Bit Slice Expressions</h3>
 <p>DSLX supports Python-style bit slicing over bits types. Note that bits are
 numbered 0..N starting "from the right (as you would write it on paper)" --
-least significant bit, AKA LSb -- for example:</p>
+least significant bit, AKA LSb -- for example, for the value <code>u7:0b100_0111</code>:</p>
 <div class="highlight"><pre><span></span><code>    Bit    6 5 4 3 2 1 0
   Value    1 0 0 0 1 1 1
 </code></pre></div>
 
-<p>A slice expression <code>[n:m]</code> means to get from bit <code>n</code> (inclusive) to bit 'm'
-exclusive. This can be confusing, because the <code>n</code> stands to the left of <code>m</code> in
-the expression, but bit <code>n</code> would be to the 'right' of <code>m</code> in the classical bit
-numbering (note: Not in the classical array visualization, where element 0 is
-usually drawn to the left).</p>
+<p>A slice expression <code>[N:M]</code> means to get from bit <code>N</code> (inclusive) to bit <code>M</code>
+exclusive. The start and limit in the slice expression must be signed integral
+values.</p>
+<p>Aside: This can be confusing, because the <code>N</code> stands to the left of <code>M</code> in the
+expression, but bit <code>N</code> would be to the 'right' of <code>M</code> in the classical bit
+numbering. Additionally, this is not the case in the classical array
+visualization, where element 0 is usually drawn on the left.</p>
 <p>For example, the expression <code>[0:2]</code> would yield:</p>
 <div class="highlight"><pre><span></span><code>    Bit    6 5 4 3 2 1 0
   Value    1 0 0 0 1 1 1
@@ -3147,33 +3304,49 @@ usually drawn to the left).</p>
   Result:  0b11
 </code></pre></div>
 
-<p>Note that, as of now, the indices for this <code>[n:m]</code> form must be literal numbers
+<p>Note that, as of now, the indices for this <code>[N:M]</code> form must be literal numbers
 (so the compiler can determine the width of the result). To perform a slice with
 a non-literal-number start position, see the <code>+:</code> form described below.</p>
 <p>The slicing operation also support the python style slices with offsets from
 start or end. To visualize, one can think of <code>x[ : -1]</code> as the equivalent of
 <code>x[from the start : bitwidth - 1]</code>. Correspondingly, <code>x[-1 : ]</code> can be
 visualized as <code>[ bitwidth - 1 : to the end]</code>.</p>
-<p>For example, to get all bits, except the MSb (from the beginning, until the top
-element minus 1):</p>
+<p>For example, to get all bits, <em>except</em> the MSb (from the beginning, until the
+top element minus 1):</p>
 <div class="highlight"><pre><span></span><code><span class="n">x</span><span class="p">[</span>:<span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="w"></span>
 </code></pre></div>
 
-<p>Or to get the left-most 2 bits (from bitwidth - 2, all the way to the end):</p>
+<p>Or to get the two most significant bits:</p>
 <div class="highlight"><pre><span></span><code><span class="n">x</span><span class="p">[</span><span class="o">-</span><span class="mi">2</span>:<span class="p">]</span><span class="w"></span>
 </code></pre></div>
 
-<p>There is also a "counted" form <code>x[start +: bits[N]]</code> - starting from a specified
-bit, slice out the next <code>N</code> bits. This is equivalent to: <code>bits[N]:(x &gt;&gt; start)</code>.
-The type can be specified as either signed or unsigned; e.g. <code>[start +: s8]</code>
-will produce an 8-bit signed value starting at <code>start</code>, whereas <code>[start +: u4]</code>
-will produce a 4-bit unsigned number starting at <code>start</code>.</p>
+<p>This results in the nice property that a the original complete value can be
+sliced into complementary slices such as <code>:-2</code> (all but the two most significant
+bits) and <code>-2:</code> (the two most significant bits):</p>
+<div class="highlight"><pre><span></span><code><span class="cp">#![test]</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">slice_into_two_pieces</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">u5</span>:<span class="mb">0b11000</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="p">(</span><span class="n">lo</span><span class="p">,</span><span class="w"> </span><span class="n">hi</span><span class="p">)</span>: <span class="p">(</span><span class="n">u3</span><span class="p">,</span><span class="w"> </span><span class="n">u2</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="p">[</span>:<span class="o">-</span><span class="mi">2</span><span class="p">],</span><span class="w"> </span><span class="n">x</span><span class="p">[</span><span class="o">-</span><span class="mi">2</span>:<span class="p">]);</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">hi</span><span class="p">,</span><span class="w"> </span><span class="n">u2</span>:<span class="mb">0b11</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">lo</span><span class="p">,</span><span class="w"> </span><span class="n">u3</span>:<span class="mb">0b000</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<h4 id="width-slice">Width Slice</h4>
+<p>There is also a "width slice" form <code>x[start +: bits[N]]</code> - starting from a
+specified bit, slice out the next <code>N</code> bits. This is equivalent to:
+<code>bits[N]:(x &gt;&gt; start)</code>. The type can be specified as either signed or unsigned;
+e.g. <code>[start +: s8]</code> will produce an 8-bit signed value starting at <code>start</code>,
+whereas <code>[start +: u4]</code> will produce a 4-bit unsigned number starting at
+<code>start</code>.</p>
 <p><a href="https://github.com/google/xls/tree/main/xls/dslx/tests/bit_slice_syntax.x">Here are many more examples</a>:</p>
+<h4 id="bit-slice-examples">Bit Slice Examples</h4>
 <div class="highlight"><pre><span></span><code><span class="c1">// Identity function helper.</span>
 <span class="k">fn</span> <span class="nf">id</span><span class="o">&lt;</span><span class="n">N</span>: <span class="kt">u32</span><span class="o">&gt;</span><span class="p">(</span><span class="n">x</span>: <span class="nc">bits</span><span class="p">[</span><span class="n">N</span><span class="p">])</span><span class="w"> </span>-&gt; <span class="nc">bits</span><span class="p">[</span><span class="n">N</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
 
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">bit_slice_syntax</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_bit_slice_syntax</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">u6</span>:<span class="mb">0b100111</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="c1">// Slice out two bits.</span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">u2</span>:<span class="mb">0b11</span><span class="p">,</span><span class="w"> </span><span class="n">x</span><span class="p">[</span><span class="mi">0</span>:<span class="mi">2</span><span class="p">]);</span><span class="w"></span>
@@ -3390,15 +3563,6 @@ value (MSb) becomes set.</p>
 <a href="https://github.com/google/xls/tree/main/xls/dslx/tests/one_hot.x"><code>dslx/tests/one_hot.x</code></a>.</p>
 <p>See also the
 <a href="../ir_semantics/#one_hot">IR semantics for the <code>one_hot</code> op</a>.</p>
-<h3 id="explicitly-signed-comparison-builtins-sge-sgt-sle-slt">Explicitly-signed comparison builtins: sge, sgt, sle, slt</h3>
-<p>Explicitly-signed comparison operations, that can be conveniently used on
-unsigned values as well (to avoid casting back and forth to signed). Has the
-following signature:</p>
-<div class="highlight"><pre><span></span><code>fn sgt&lt;N&gt;(x: xN[N], y: xN[N]) -&gt; bool
-</code></pre></div>
-
-<p>Note that <code>xN</code> in the above signifies that the operand types must be the same,
-but may be, as a pair, either signed or unsigned (either uN or sN).</p>
 <h3 id="signex">signex</h3>
 <p>Casting has well-defined extension rules, but in some cases it is necessary to
 be explicit about sign-extensions, if just for code readability. For this, there
@@ -3412,7 +3576,7 @@ only its type is used to determine the result type of the sign extension.</p>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">u8</span>:<span class="o">-</span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">s</span>: <span class="nc">s32</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">signex</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="n">s32</span>:<span class="mi">0</span><span class="p">);</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">u</span>: <span class="kt">u32</span> <span class="o">=</span><span class="w"> </span><span class="n">signex</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">0</span><span class="p">);</span><span class="w"></span>
-<span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="kt">u32</span>:<span class="nc">s</span><span class="p">,</span><span class="w"> </span><span class="n">u</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">s</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="n">u</span><span class="p">)</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 </code></pre></div>
 
@@ -3441,7 +3605,7 @@ result, and so on.</p>
 
 <span class="c1">// Reverse examples.</span>
 <span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">reverse</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_reverse</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">u3</span>:<span class="mb">0b100</span><span class="p">,</span><span class="w"> </span><span class="n">main</span><span class="p">(</span><span class="n">u3</span>:<span class="mb">0b001</span><span class="p">));</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">u3</span>:<span class="mb">0b001</span><span class="p">,</span><span class="w"> </span><span class="n">main</span><span class="p">(</span><span class="n">u3</span>:<span class="mb">0b100</span><span class="p">));</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">bits</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>:<span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">rev</span><span class="p">(</span><span class="n">bits</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>:<span class="mi">0</span><span class="p">));</span><span class="w"></span>
@@ -3473,7 +3637,7 @@ ignored. Example usage:
 <p>These functions return the identity element of the respective operation for
 trivial (0 bit wide) inputs:</p>
 <div class="highlight"><pre><span></span><code><span class="cp">#![test]</span><span class="w"></span>
-<span class="k">fn</span> <span class="nf">trivial_reduce</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">test_trivial_reduce</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">and_reduce</span><span class="p">(</span><span class="n">bits</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>:<span class="mi">0</span><span class="p">),</span><span class="w"> </span><span class="kc">true</span><span class="p">);</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">or_reduce</span><span class="p">(</span><span class="n">bits</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>:<span class="mi">0</span><span class="p">),</span><span class="w"> </span><span class="kc">false</span><span class="p">);</span><span class="w"></span>
 <span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assert_eq</span><span class="p">(</span><span class="n">xor_reduce</span><span class="p">(</span><span class="n">bits</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>:<span class="mi">0</span><span class="p">),</span><span class="w"> </span><span class="kc">false</span><span class="p">);</span><span class="w"></span>
@@ -3515,15 +3679,15 @@ recommended to use it within <code>test</code> constructs (interpretation) only.
 <p>DSLX supports printf-style debugging via the <code>trace!</code> builtin, which allows
 dumping of current values to stdout. For example:</p>
 <div class="highlight"><pre><span></span><code><span class="k">fn</span> <span class="nf">decode_s_instruction</span><span class="p">(</span><span class="n">ins</span>: <span class="kt">u32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="p">(</span><span class="n">u12</span><span class="p">,</span><span class="w"> </span><span class="n">u5</span><span class="p">,</span><span class="w"> </span><span class="n">u5</span><span class="p">,</span><span class="w"> </span><span class="n">u3</span><span class="p">,</span><span class="w"> </span><span class="n">u7</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
-<span class="w">   </span><span class="kd">let</span><span class="w"> </span><span class="n">imm_11_5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">ins</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">25</span><span class="p">);</span><span class="w"></span>
-<span class="w">   </span><span class="kd">let</span><span class="w"> </span><span class="n">rs2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">ins</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mh">0x1F</span><span class="p">;</span><span class="w"></span>
-<span class="w">   </span><span class="kd">let</span><span class="w"> </span><span class="n">rs1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">ins</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">15</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mh">0x1F</span><span class="p">;</span><span class="w"></span>
-<span class="w">   </span><span class="kd">let</span><span class="w"> </span><span class="n">funct3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">ins</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">12</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mh">0x07</span><span class="p">;</span><span class="w"></span>
-<span class="w">   </span><span class="kd">let</span><span class="w"> </span><span class="n">imm_4_0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">ins</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">7</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mh">0x1F</span><span class="p">;</span><span class="w"></span>
-<span class="w">   </span><span class="kd">let</span><span class="w"> </span><span class="n">opcode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ins</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mh">0x7F</span><span class="p">;</span><span class="w"></span>
-<span class="w">   </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">trace</span><span class="o">!</span><span class="p">(</span><span class="n">imm_11_5</span><span class="p">);</span><span class="w"></span>
-<span class="w">   </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">trace</span><span class="o">!</span><span class="p">(</span><span class="n">imm_4_0</span><span class="p">);</span><span class="w"></span>
-<span class="w">   </span><span class="p">(</span><span class="n">u12</span>:<span class="p">(</span><span class="n">u7</span>:<span class="nc">imm_11_5</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="n">u5</span>:<span class="nc">imm_4_0</span><span class="p">),</span><span class="w"> </span><span class="n">u5</span>:<span class="nc">rs2</span><span class="p">,</span><span class="w"> </span><span class="n">u5</span>:<span class="nc">rs1</span><span class="p">,</span><span class="w"> </span><span class="n">u3</span>:<span class="nc">funct3</span><span class="p">,</span><span class="w"> </span><span class="n">u7</span>:<span class="nc">opcode</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">imm_11_5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">ins</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">25</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">rs2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">ins</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mh">0x1F</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">rs1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">ins</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">15</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mh">0x1F</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">funct3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">ins</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">12</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mh">0x07</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">imm_4_0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">ins</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">7</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mh">0x1F</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">opcode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ins</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mh">0x7F</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">trace</span><span class="o">!</span><span class="p">(</span><span class="n">imm_11_5</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">trace</span><span class="o">!</span><span class="p">(</span><span class="n">imm_4_0</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">(((</span><span class="n">imm_11_5</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">u7</span><span class="p">)</span><span class="w"> </span><span class="o">++</span><span class="w"> </span><span class="p">(</span><span class="n">imm_4_0</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">u5</span><span class="p">))</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">u12</span><span class="p">,</span><span class="w"> </span><span class="n">rs2</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">u5</span><span class="p">,</span><span class="w"> </span><span class="n">rs1</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">u5</span><span class="p">,</span><span class="w"> </span><span class="n">funct3</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">u3</span><span class="p">,</span><span class="w"> </span><span class="n">opcode</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">u7</span><span class="p">)</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 </code></pre></div>
 
@@ -3570,7 +3734,7 @@ trace of () @ clz.x:6:3-6:5: ()
 node make sense), so any <code>trace!</code> builtin invocations are silently dropped
 during conversion to XLS IR.</p>
 <h3 id="fail">fail!</h3>
-<p>Note: this section describes work-in-progress functionality, currently <code>fail!</code>
+<p>NOTE: this section describes work-in-progress functionality, currently <code>fail!</code>
 will only trigger in DSL interpretation (it is discarded in IR conversion).
 Support for converting <code>fail!</code> to XLS <code>assert</code> IR is tracked in
 <a href="https://github.com/google/xls/issues/232">#232</a> -- support for indicating the
@@ -3594,7 +3758,12 @@ even when fatal assertion hardware is not present.</p>
 <p>Example: if only these two enum values shown should be possible (say, as a
 documented <a href="https://en.wikipedia.org/wiki/Precondition">precondition</a> for
 <code>main</code>):</p>
-<div class="highlight"><pre><span></span><code><span class="k">fn</span> <span class="nf">main</span><span class="p">(</span><span class="n">x</span>: <span class="nc">EnumType</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">u32</span> <span class="p">{</span><span class="w"></span>
+<div class="highlight"><pre><span></span><code><span class="k">enum</span> <span class="nc">EnumType</span>: <span class="nc">u2</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">FIRST</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">SECOND</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">fn</span> <span class="nf">main</span><span class="p">(</span><span class="n">x</span>: <span class="nc">EnumType</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">u32</span> <span class="p">{</span><span class="w"></span>
 <span class="w">  </span><span class="k">match</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">    </span><span class="n">EnumType</span>::<span class="n">FIRST</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">0</span><span class="p">,</span><span class="w"></span>
 <span class="w">    </span><span class="n">EnumType</span>::<span class="n">SECOND</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="kt">u32</span>:<span class="mi">1</span><span class="p">,</span><span class="w"></span>
@@ -3608,6 +3777,22 @@ reached (and if it is in the JIT or RTL simulation it will cause an error status
 or assertion failure respectively), but b) provides a fallback value to use (of
 the appropriate type) in case it were to happen in synthesized gates which did
 not insert fatal-error-indicating hardware.</p>
+<h3 id="cover">cover!</h3>
+<p>NOTE: This section describes work-in-progress functionality. Currently, <code>cover!</code>
+has no effect. Progress is being tracked in
+<a href="https://github.com/google/xls/issues/436">#436</a>.</p>
+<p>The <code>cover!</code> builtin tracks how often some condition is satisfied. Its signature
+is:</p>
+<div class="highlight"><pre><span></span><code>cover!(&lt;name&gt;, &lt;condition&gt;);
+</code></pre></div>
+
+<p>Where <code>name</code> is a function-unique literal string identifying the coverpoint and
+<code>condition</code> is a boolean element. When <code>condition</code> is true, a counter with the
+given name is incremented that can be inspected upon program termination.
+Coverpoints can be used to give an indication of code "coverage", i.e. to see
+what paths of a design are exercised in practice. The name of the coverpoint
+must begin with either a letter or underscore, and its remainder must consist of
+letters, digits, underscores, or dollar signs.</p>
 <h2 id="testing-and-debugging">Testing and Debugging</h2>
 <p>DSLX allows specifying tests right in the implementation file via the <code>test</code> and
 <code>quickcheck</code> directives.</p>
@@ -3698,13 +3883,13 @@ production can be found in the execution log.</p>
           </a>
         
         
-          <a href="../dslx_intro_example1/" title="CRC32" class="md-footer-nav__link md-footer-nav__link--next" rel="next">
+          <a href="../dslx_std/" title="Standard Library" class="md-footer-nav__link md-footer-nav__link--next" rel="next">
             <div class="md-footer-nav__title">
               <div class="md-ellipsis">
                 <span class="md-footer-nav__direction">
                   Next
                 </span>
-                CRC32
+                Standard Library
               </div>
             </div>
             <div class="md-footer-nav__button md-icon">
@@ -3743,6 +3928,10 @@ production can be found in the execution log.</p>
           }, typeof search !== "undefined" && search)
         })
       </script>
+      
+        <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
       
     
   </body>

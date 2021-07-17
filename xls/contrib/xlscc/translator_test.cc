@@ -24,8 +24,12 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "absl/strings/str_format.h"
+#include "xls/codegen/block_conversion.h"
+#include "xls/codegen/block_generator.h"
+#include "xls/codegen/codegen_options.h"
 #include "xls/codegen/combinational_generator.h"
 #include "xls/common/file/temp_file.h"
+#include "xls/common/logging/logging.h"
 #include "xls/common/status/matchers.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
@@ -35,6 +39,7 @@
 #include "xls/interpreter/ir_interpreter.h"
 #include "xls/interpreter/proc_interpreter.h"
 #include "xls/ir/bits.h"
+#include "xls/ir/block.h"
 #include "xls/ir/ir_test_base.h"
 #include "xls/ir/nodes.h"
 #include "xls/ir/value.h"
@@ -218,7 +223,7 @@ TEST_F(TranslatorTest, ArrayParam) {
   args["arr"] = in_arr;
   XLS_ASSERT_OK_AND_ASSIGN(xls::Function * entry, package->EntryFunction());
 
-  auto x = xls::IrInterpreter::RunKwargs(
+  auto x = xls::InterpretFunctionKwargs(
       entry, {{"arr", xls::Value::UBitsArray({55, 20}, 64).value()}});
 
   ASSERT_THAT(x, IsOkAndHolds(xls::Value(xls::UBits(75, 64))));
@@ -357,6 +362,67 @@ TEST_F(TranslatorTest, ArrayInitLoop) {
          return y.vv[0].ss;
        })";
   Run({{"a", 110}}, 110, content);
+}
+
+TEST_F(TranslatorTest, StringConstantArray) {
+  const std::string content = R"(
+       long long my_package(long long a) {
+         const char foo[] = "A";
+         return a+foo[0];
+       })";
+  Run({{"a", 11}}, 11 + 'A', content);
+}
+
+TEST_F(TranslatorTest, StaticConst) {
+  const std::string content = R"(
+       long long my_package(long long a) {
+         static const int off = 6;
+         return a+off;
+       })";
+  Run({{"a", 11}}, 11 + 6, content);
+}
+
+TEST_F(TranslatorTest, GlobalInt) {
+  const std::string content = R"(
+       const int off = 60;
+       int foo() {
+         // Reference it from another function to test context management
+         return off;
+       }
+       long long my_package(long long a) {
+         // Reference it twice to test global value re-use
+         long long ret = a+foo();
+         // Check context pop
+         {
+           ret += off;
+         }
+         ret += off;
+         return ret;
+       })";
+  Run({{"a", 11}}, 11 + 60 + 60 + 60, content);
+}
+
+TEST_F(TranslatorTest, GlobalEnum) {
+  const std::string content = R"(
+       enum BlahE {
+         A=2,B,C
+       };
+       long long my_package(long long a) {
+         return a+B+B;
+       })";
+  Run({{"a", 11}}, 11 + 3 + 3, content);
+}
+
+TEST_F(TranslatorTest, SetGlobal) {
+  const std::string content = R"(
+       int off = 60;
+       long long my_package(long long a) {
+         off = 5;
+         long long ret = a;
+         ret += off;
+         return ret;
+       })";
+  ASSERT_FALSE(SourceToIr(content).ok());
 }
 
 TEST_F(TranslatorTest, UnsequencedAssign) {
@@ -1266,7 +1332,7 @@ TEST_F(TranslatorTest, CapitalizeFirstLetter) {
     args["st"] = state;
     args["c"] = xls::Value(xls::UBits(inc, 8));
     XLS_ASSERT_OK_AND_ASSIGN(xls::Value actual,
-                             xls::IrInterpreter::RunKwargs(entry, args));
+                             xls::InterpretFunctionKwargs(entry, args));
     XLS_ASSERT_OK_AND_ASSIGN(std::vector<xls::Value> returns,
                              actual.GetElements());
     ASSERT_EQ(returns.size(), 2);
@@ -1310,6 +1376,7 @@ TEST_F(TranslatorTest, ShadowAssigment) {
         {
           int r = 22;
           r = 55;
+          (void)r;
         }
         return r;
       })";
@@ -1478,6 +1545,30 @@ TEST_F(TranslatorTest, NoTupleMultiFieldBlockComment) {
          return s.x;
        })";
   Run({{"a", 311}}, 311, content);
+}
+
+TEST_F(TranslatorTest, StructMemberOrder) {
+  const std::string content = R"(
+       struct Test {
+         int x;
+         int y;
+       };
+       Test my_package(int a, int b) {
+         Test s;
+         s.x=a;
+         s.y=b;
+         return s;
+       })";
+
+  xls::Value tuple_values[2] = {xls::Value(xls::SBits(50, 32)),
+                                xls::Value(xls::SBits(311, 32))};
+  xls::Value expected = xls::Value::Tuple(tuple_values);
+
+  absl::flat_hash_map<std::string, xls::Value> args = {
+      {"a", xls::Value(xls::SBits(311, 32))},
+      {"b", xls::Value(xls::SBits(50, 32))}};
+
+  Run(args, expected, content);
 }
 
 TEST_F(TranslatorTest, ImplicitConversion) {
@@ -2722,168 +2813,6 @@ TEST_F(TranslatorTest, IOProcChainedConditionalRead) {
 
     ProcTest(content, block_spec, inputs, outputs);
   }
-}
-
-// What's being tested here is that the IR produced is generatable
-//  by the combinational generator. For example, it will fail without
-//  InlineAllInvokes(). Simulation tests already occur in the
-//  combinational_generator_test
-TEST_F(TranslatorTest, IOProcComboGenOneToNMux) {
-  const std::string content = R"(
-    #include "/xls_builtin.h"
-
-    #pragma hls_top
-    void foo(int& dir,
-              __xls_channel<int>& in,
-              __xls_channel<int>& out1,
-              __xls_channel<int> &out2) {
-
-
-      const int ctrl = in.read();
-
-      if (dir == 0) {
-        out1.write(ctrl);
-      } else {
-        out2.write(ctrl);
-      }
-    })";
-
-  HLSBlock block_spec;
-  {
-    block_spec.set_name("foo");
-
-    HLSChannel* dir_in = block_spec.add_channels();
-    dir_in->set_name("dir");
-    dir_in->set_is_input(true);
-    dir_in->set_type(DIRECT_IN);
-
-    HLSChannel* ch_in = block_spec.add_channels();
-    ch_in->set_name("in");
-    ch_in->set_is_input(true);
-    ch_in->set_type(FIFO);
-
-    HLSChannel* ch_out1 = block_spec.add_channels();
-    ch_out1->set_name("out1");
-    ch_out1->set_is_input(false);
-    ch_out1->set_type(FIFO);
-
-    HLSChannel* ch_out2 = block_spec.add_channels();
-    ch_out2->set_name("out2");
-    ch_out2->set_is_input(false);
-    ch_out2->set_type(FIFO);
-  }
-
-  XLS_ASSERT_OK(ScanFile(content));
-
-  xls::Package package("my_package");
-  XLS_ASSERT_OK_AND_ASSIGN(
-      xls::Proc * proc,
-      translator_->GenerateIR_Block(&package, block_spec,
-                                    xlscc::XLSChannelMode::kAllSingleValue));
-
-  std::cerr << "Simplifying IR..." << std::endl;
-  XLS_ASSERT_OK(translator_->InlineAllInvokes(&package));
-
-  XLS_ASSERT_OK_AND_ASSIGN(xls::Channel * dir_ch, package.GetChannel("dir"));
-  XLS_ASSERT_OK_AND_ASSIGN(xls::Channel * in_ch, package.GetChannel("in"));
-  XLS_ASSERT_OK_AND_ASSIGN(xls::Channel * out1_ch, package.GetChannel("out1"));
-  XLS_ASSERT_OK_AND_ASSIGN(xls::Channel * out2_ch, package.GetChannel("out2"));
-
-  XLS_ASSERT_OK_AND_ASSIGN(
-      xls::verilog::ModuleGeneratorResult result,
-      xls::verilog::GenerateCombinationalModuleFromProc(
-          proc,
-          {
-              {dir_ch, xls::verilog::ProcPortType::kSimple},
-              {in_ch, xls::verilog::ProcPortType::kReadyValid},
-              {out1_ch, xls::verilog::ProcPortType::kReadyValid},
-              {out2_ch, xls::verilog::ProcPortType::kReadyValid},
-          },
-          false /*UseSystemVerilog*/));
-
-  std::cerr << package.DumpIr() << std::endl;
-
-  std::cerr << result.verilog_text << std::endl;
-}
-
-TEST_F(TranslatorTest, IOProcComboGenNToOneMux) {
-  const std::string content = R"(
-    #include "/xls_builtin.h"
-
-    #pragma hls_top
-    void foo(int& dir,
-              __xls_channel<int>& in1,
-              __xls_channel<int>& in2,
-              __xls_channel<int>& out) {
-
-
-      int x;
-
-      if (dir == 0) {
-        x = in1.read();
-      } else {
-        x = in2.read();
-      }
-
-      out.write(x);
-    })";
-
-  HLSBlock block_spec;
-  {
-    block_spec.set_name("foo");
-
-    HLSChannel* dir_in = block_spec.add_channels();
-    dir_in->set_name("dir");
-    dir_in->set_is_input(true);
-    dir_in->set_type(DIRECT_IN);
-
-    HLSChannel* ch_in1 = block_spec.add_channels();
-    ch_in1->set_name("in1");
-    ch_in1->set_is_input(true);
-    ch_in1->set_type(FIFO);
-
-    HLSChannel* ch_in2 = block_spec.add_channels();
-    ch_in2->set_name("in2");
-    ch_in2->set_is_input(true);
-    ch_in2->set_type(FIFO);
-
-    HLSChannel* ch_out1 = block_spec.add_channels();
-    ch_out1->set_name("out");
-    ch_out1->set_is_input(false);
-    ch_out1->set_type(FIFO);
-  }
-
-  XLS_ASSERT_OK(ScanFile(content));
-
-  xls::Package package("my_package");
-  XLS_ASSERT_OK_AND_ASSIGN(
-      xls::Proc * proc,
-      translator_->GenerateIR_Block(&package, block_spec,
-                                    xlscc::XLSChannelMode::kAllSingleValue));
-
-  std::cerr << "Simplifying IR..." << std::endl;
-  XLS_ASSERT_OK(translator_->InlineAllInvokes(&package));
-
-  XLS_ASSERT_OK_AND_ASSIGN(xls::Channel * dir_ch, package.GetChannel("dir"));
-  XLS_ASSERT_OK_AND_ASSIGN(xls::Channel * in1_ch, package.GetChannel("in1"));
-  XLS_ASSERT_OK_AND_ASSIGN(xls::Channel * in2_ch, package.GetChannel("in2"));
-  XLS_ASSERT_OK_AND_ASSIGN(xls::Channel * out_ch, package.GetChannel("out"));
-
-  XLS_ASSERT_OK_AND_ASSIGN(
-      xls::verilog::ModuleGeneratorResult result,
-      xls::verilog::GenerateCombinationalModuleFromProc(
-          proc,
-          {
-              {dir_ch, xls::verilog::ProcPortType::kSimple},
-              {in1_ch, xls::verilog::ProcPortType::kReadyValid},
-              {in2_ch, xls::verilog::ProcPortType::kReadyValid},
-              {out_ch, xls::verilog::ProcPortType::kReadyValid},
-          },
-          false /*UseSystemVerilog*/));
-
-  std::cerr << package.DumpIr() << std::endl;
-
-  std::cerr << result.verilog_text << std::endl;
 }
 
 std::string NativeOperatorTestIr(std::string op) {

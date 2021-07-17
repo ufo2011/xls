@@ -13,41 +13,131 @@
 # limitations under the License.
 
 # Build rules for DSLX modules.
-load("//xls/build_rules:build_defs.bzl", "dslx_jit_wrapper", "dslx_test")
+load(
+    "//xls/build_rules:xls_build_defs.bzl",
+    "cc_xls_ir_jit_wrapper",
+    "xls_benchmark_ir",
+    "xls_dslx_library",
+    "xls_dslx_module_library",
+    "xls_dslx_opt_ir",
+    "xls_dslx_opt_ir_test",
+    "xls_dslx_test",
+    "xls_eval_ir_test",
+)
 
 package(
     default_visibility = ["//xls:xls_internal"],
     licenses = ["notice"],  # Apache 2.0
 )
 
+xls_dslx_library(
+    name = "apfloat_add_2_dslx",
+    srcs = ["apfloat_add_2.x"],
+)
+
+xls_dslx_library(
+    name = "apfloat_sub_2_dslx",
+    srcs = ["apfloat_sub_2.x"],
+    deps = [":apfloat_add_2_dslx"],
+)
+
+xls_dslx_library(
+    name = "fpadd_2x32_dslx",
+    srcs = ["fpadd_2x32.x"],
+    deps = [":apfloat_add_2_dslx"],
+)
+
+xls_dslx_library(
+    name = "fpsub_2x32_dslx",
+    srcs = ["fpsub_2x32.x"],
+    deps = [
+        ":apfloat_add_2_dslx",
+        ":apfloat_sub_2_dslx",
+        ":fpadd_2x32_dslx",
+    ],
+)
+
+xls_dslx_library(
+    name = "fpldexp_32_dslx",
+    srcs = ["fpldexp_32.x"],
+)
+
+xls_dslx_module_library(
+    name = "apfloat_sub_2_dslx_module",
+    src = "apfloat_sub_2.x",
+    deps = ["apfloat_add_2_dslx"],
+)
+
+xls_dslx_test(
+    name = "apfloat_sub_2",
+    dep = ":apfloat_sub_2_dslx_module",
+    dslx_test_args = {
+        "compare": "none",
+    },
+)
+
 filegroup(
     name = "ir_examples",
     srcs = [
-        ":fpadd_2x32_all_ir",
-        ":fpmul_2x32_all_ir",
+        ":fpadd_2x32.ir",
+        ":fpadd_2x32.opt.ir",
+        ":fpmul_2x32.ir",
+        ":fpmul_2x32.opt.ir",
     ],
+)
+
+xls_dslx_library(
+    name = "apfloat_fma_dslx",
+    srcs = ["apfloat_fma.x"],
+)
+
+xls_dslx_module_library(
+    name = "fma_32_dslx_module",
+    src = "fma_32.x",
+    deps = [":apfloat_fma_dslx"],
 )
 
 # TODO(rspringer): 2021-04-09: Make a macro to handle creating the three
 # related rules. Consider also doing this for multiple widths (32, 64, bf16).
-dslx_test(
+xls_dslx_opt_ir(
     name = "fma_32",
-    srcs = ["fma_32.x"],
-    # TODO(b/152546795): 2021-03-08 Takes too long (~5 minutes).
-    prove_unopt_eq_opt = False,
-    deps = ["apfloat_fma.x"],
+    dep = ":fma_32_dslx_module",
+    ir_file = "fma_32.ir",
+    opt_ir_file = "fma_32.opt.ir",
 )
 
-dslx_jit_wrapper(
+xls_dslx_test(
+    name = "fma_32_dslx_test",
+    dep = ":fma_32_dslx_module",
+)
+
+# TODO(b/152546795): 2021-03-08 Takes too long (~5 minutes). Add
+# xls_ir_equivalence_test.
+xls_eval_ir_test(
+    name = "fma_32_eval_ir_test",
+    src = ":fma_32.ir",
+)
+
+xls_benchmark_ir(
+    name = "fma_32_benchmark_ir",
+    src = ":fma_32.ir",
+)
+
+cc_xls_ir_jit_wrapper(
     name = "fma_32_jit_wrapper",
-    dslx_name = "fma_32",
-    deps = [":fma_32_opt_ir"],
+    src = ":fma_32.opt.ir",
+    jit_wrapper_args = {
+        "class_name": "fma_32",
+    },
 )
 
 cc_test(
     name = "fma_32_test",
     srcs = ["fma_32_test.cc"],
-    data = [":fma_32_all_ir"],
+    data = [
+        ":fma_32.ir",
+        ":fma_32.opt.ir",
+    ],
     tags = ["optonly"],
     deps = [
         ":fma_32_jit_wrapper",
@@ -58,27 +148,55 @@ cc_test(
         "//xls/common:math_util",
         "//xls/common/logging",
         "//xls/tools:testbench",
+        "//xls/tools:testbench_builder",
     ],
 )
 
-dslx_test(
-    name = "fma_64",
-    srcs = ["fma_64.x"],
-    # TODO(b/152546795): 2021-03-08 Takes too long (~5 minutes).
-    prove_unopt_eq_opt = False,
-    deps = ["apfloat_fma.x"],
+xls_dslx_module_library(
+    name = "fma_64_dslx_module",
+    src = "fma_64.x",
+    deps = [":apfloat_fma_dslx"],
 )
 
-dslx_jit_wrapper(
+xls_dslx_opt_ir(
+    name = "fma_64",
+    dep = ":fma_64_dslx_module",
+    ir_file = "fma_64.ir",
+    opt_ir_file = "fma_64.opt.ir",
+)
+
+xls_dslx_test(
+    name = "fma_64_dslx_test",
+    dep = ":fma_64_dslx_module",
+)
+
+# TODO(b/152546795): 2021-03-08 Takes too long (~5 minutes). Add
+# xls_ir_equivalence_test.
+xls_eval_ir_test(
+    name = "fma_64_eval_ir_test",
+    src = ":fma_64.ir",
+)
+
+xls_benchmark_ir(
+    name = "fma_64_benchmark_ir",
+    src = ":fma_64.ir",
+)
+
+cc_xls_ir_jit_wrapper(
     name = "fma_64_jit_wrapper",
-    dslx_name = "fma_64",
-    deps = [":fma_64_opt_ir"],
+    src = ":fma_64.opt.ir",
+    jit_wrapper_args = {
+        "class_name": "fma_64",
+    },
 )
 
 cc_test(
     name = "fma_64_test",
     srcs = ["fma_64_test.cc"],
-    data = [":fma_64_all_ir"],
+    data = [
+        ":fma_64.ir",
+        ":fma_64.opt.ir",
+    ],
     tags = ["optonly"],
     deps = [
         ":fma_64_jit_wrapper",
@@ -89,39 +207,120 @@ cc_test(
         "//xls/common:math_util",
         "//xls/common/logging",
         "//xls/tools:testbench",
+        "//xls/tools:testbench_builder",
     ],
 )
 
-dslx_test(
+xls_dslx_module_library(
+    name = "fpadd_2x32_dslx_module",
+    src = "fpadd_2x32.x",
+    deps = [":apfloat_add_2_dslx"],
+)
+
+xls_dslx_opt_ir(
     name = "fpadd_2x32",
-    srcs = ["fpadd_2x32.x"],
-    # TODO(b/152546795): 2021-03-08 Takes too long (~5 minutes).
-    prove_unopt_eq_opt = False,
-    deps = [":apfloat_add_2.x"],
+    dep = ":fpadd_2x32_dslx_module",
+    ir_file = "fpadd_2x32.ir",
+    opt_ir_file = "fpadd_2x32.opt.ir",
 )
 
-dslx_test(
-    name = "fpsub_2x32",
-    srcs = ["fpsub_2x32.x"],
-    # TODO(b/152546795): 2021-03-08 Takes too long (~5 minutes).
-    prove_unopt_eq_opt = False,
+xls_dslx_test(
+    name = "fpadd_2x32_dslx_test",
+    dep = ":fpadd_2x32_dslx_module",
+)
+
+# TODO(b/152546795): 2021-03-08 Takes too long (~5 minutes). Add
+# xls_ir_equivalence_test.
+xls_eval_ir_test(
+    name = "fpadd_2x32_eval_ir_test",
+    src = ":fpadd_2x32.ir",
+)
+
+xls_benchmark_ir(
+    name = "fpadd_2x32_benchmark_ir",
+    src = ":fpadd_2x32.ir",
+)
+
+xls_dslx_module_library(
+    name = "fpsub_2x32_dslx_module",
+    src = "fpsub_2x32.x",
     deps = [
-        ":apfloat_add_2.x",
-        ":fpadd_2x32.x",
+        ":apfloat_sub_2_dslx_module",
+        ":fpadd_2x32_dslx_module",
     ],
 )
 
-dslx_jit_wrapper(
+xls_dslx_opt_ir(
+    name = "fpsub_2x32",
+    dep = ":fpsub_2x32_dslx_module",
+    ir_file = "fpsub_2x32.ir",
+)
+
+xls_dslx_test(
+    name = "fpsub_2x32_dslx_test",
+    dep = ":fpsub_2x32_dslx_module",
+)
+
+# TODO(b/152546795): 2021-03-08 Takes too long (~5 minutes). Add
+# xls_ir_equivalence_test.
+xls_eval_ir_test(
+    name = "fpsub_2x32_eval_ir_test",
+    src = ":fpsub_2x32.ir",
+)
+
+xls_benchmark_ir(
+    name = "fpsub_2x32_benchmark_ir",
+    src = ":fpsub_2x32.ir",
+)
+
+xls_dslx_module_library(
+    name = "fpsub_2x64_dslx_module",
+    src = "fpsub_2x64.x",
+    deps = [
+        "apfloat_sub_2_dslx_module",
+        ":fpadd_2x64_dslx_module",
+    ],
+)
+
+xls_dslx_opt_ir(
+    name = "fpsub_2x64",
+    dep = ":fpsub_2x64_dslx_module",
+    ir_file = "fpsub_2x64.ir",
+)
+
+xls_dslx_test(
+    name = "fpsub_2x64_dslx_test",
+    dep = ":fpsub_2x64_dslx_module",
+)
+
+# TODO(b/152546795): 2021-03-08 Takes too long (~5 minutes). Add
+# xls_ir_equivalence_test.
+xls_eval_ir_test(
+    name = "fpsub_2x64_eval_ir_test",
+    src = ":fpsub_2x64.ir",
+)
+
+xls_benchmark_ir(
+    name = "fpsub_2x64_benchmark_ir",
+    src = ":fpsub_2x64.ir",
+)
+
+cc_xls_ir_jit_wrapper(
     name = "fpadd_2x32_jit_wrapper",
-    dslx_name = "fpadd_2x32",
-    deps = [":fpadd_2x32_opt_ir"],
+    src = ":fpadd_2x32.opt.ir",
+    jit_wrapper_args = {
+        "class_name": "fpadd_2x32",
+    },
 )
 
 # TODO(rspringer): Takes too long to run in normal testing.
 cc_binary(
     name = "fpadd_2x32_bounds",
     srcs = ["fpadd_2x32_bounds.cc"],
-    data = [":fpadd_2x32_all_ir"],
+    data = [
+        ":fpadd_2x32.ir",
+        ":fpadd_2x32.opt.ir",
+    ],
     deps = [
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/flags:flag",
@@ -142,7 +341,7 @@ cc_binary(
 )
 
 cc_test(
-    name = "fpadd_2x32_test",
+    name = "fpadd_2x32_test_cc",
     srcs = ["fpadd_2x32_test.cc"],
     tags = ["optonly"],
     deps = [
@@ -157,30 +356,60 @@ cc_test(
         "//xls/ir:value_helpers",
         "//xls/ir:value_view_helpers",
         "//xls/tools:testbench",
+        "//xls/tools:testbench_builder",
     ],
 )
 
-dslx_test(
-    name = "fpadd_2x64",
-    srcs = ["fpadd_2x64.x"],
-    # 2021-03-08 Takes too long (> 15 minutes).
-    prove_unopt_eq_opt = False,
-    deps = [":apfloat_add_2.x"],
+xls_dslx_module_library(
+    name = "fpadd_2x64_dslx_module",
+    src = "fpadd_2x64.x",
+    deps = [
+        ":apfloat_add_2_dslx",
+    ],
 )
 
-dslx_jit_wrapper(
+xls_dslx_opt_ir(
+    name = "fpadd_2x64",
+    dep = ":fpadd_2x64_dslx_module",
+    ir_file = "fpadd_2x64.ir",
+    opt_ir_file = "fpadd_2x64.opt.ir",
+)
+
+xls_dslx_test(
+    name = "fpadd_2x64_dslx_test",
+    dep = ":fpadd_2x64_dslx_module",
+)
+
+# TODO: 2021-03-08 Takes too long (> 15 minutes). Add xls_ir_equivalence_test.
+xls_eval_ir_test(
+    name = "fpadd_2x64_eval_ir_test",
+    src = ":fpadd_2x64.ir",
+)
+
+xls_benchmark_ir(
+    name = "fpadd_2x64_benchmark_ir",
+    src = ":fpadd_2x64.ir",
+)
+
+cc_xls_ir_jit_wrapper(
     name = "fpadd_2x64_jit_wrapper",
-    dslx_name = "fpadd_2x64",
-    deps = [":fpadd_2x64_opt_ir"],
+    src = ":fpadd_2x64.opt.ir",
+    jit_wrapper_args = {
+        "class_name": "fpadd_2x64",
+    },
 )
 
 cc_test(
-    name = "fpadd_2x64_test",
+    name = "fpadd_2x64_test_cc",
     srcs = ["fpadd_2x64_test.cc"],
-    data = [":fpadd_2x64_all_ir"],
+    data = [
+        ":fpadd_2x64.ir",
+        ":fpadd_2x64.opt.ir",
+    ],
     tags = ["optonly"],
     deps = [
         ":fpadd_2x64_jit_wrapper",
+        "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/random",
         "@com_google_absl//absl/status",
         "//xls/common:init_xls",
@@ -191,35 +420,138 @@ cc_test(
         "//xls/ir:value_helpers",
         "//xls/ir:value_view_helpers",
         "//xls/tools:testbench",
+        "//xls/tools:testbench_builder",
     ],
 )
 
-dslx_test(
+xls_dslx_module_library(
+    name = "fpadd_2xbf16_dslx_module",
+    src = "fpadd_2xbf16.x",
+    deps = [
+        ":apfloat_add_2_dslx",
+    ],
+)
+
+xls_dslx_opt_ir(
     name = "fpadd_2xbf16",
-    srcs = ["fpadd_2xbf16.x"],
-    # 2021-03-08: Takes too long (> 15 minutes).
-    prove_unopt_eq_opt = False,
-    deps = [":apfloat_add_2.x"],
+    dep = ":fpadd_2xbf16_dslx_module",
+    ir_file = "fpadd_2xbf16.ir",
 )
 
-dslx_test(
-    name = "fpmul_2x32",
-    srcs = ["fpmul_2x32.x"],
-    # 2021-03-08: Takes too long (> 15 minutes).
-    prove_unopt_eq_opt = False,
-    deps = [":apfloat_mul_2.x"],
+xls_dslx_test(
+    name = "fpadd_2xbf16_dslx_test",
+    dep = ":fpadd_2xbf16_dslx_module",
 )
 
-dslx_jit_wrapper(
-    name = "fpmul_2x32_jit_wrapper",
-    dslx_name = "fpmul_2x32",
-    deps = [":fpmul_2x32_opt_ir"],
+# TODO: 2021-03-08 Takes too long (> 15 minutes). Add xls_ir_equivalence_test.
+xls_eval_ir_test(
+    name = "fpadd_2xbf16_eval_ir_test",
+    src = ":fpadd_2xbf16.ir",
+)
+
+xls_benchmark_ir(
+    name = "fpadd_2xbf16_benchmark_ir",
+    src = ":fpadd_2xbf16.ir",
+)
+
+xls_dslx_module_library(
+    name = "fpldexp_32_dslx_module",
+    src = "fpldexp_32.x",
+)
+
+xls_dslx_opt_ir(
+    name = "fpldexp_32",
+    dep = ":fpldexp_32_dslx_module",
+    ir_file = "fpldexp_32.ir",
+    opt_ir_file = "fpldexp_32.opt.ir",
+)
+
+xls_dslx_opt_ir_test(
+    name = "fpldexp_32_test",
+    dep = ":fpldexp_32",
+)
+
+cc_xls_ir_jit_wrapper(
+    name = "fpldexp_32_jit_wrapper",
+    src = ":fpldexp_32.opt.ir",
+    jit_wrapper_args = {
+        "class_name": "fpldexp_32",
+    },
 )
 
 cc_test(
-    name = "fpmul_2x32_test",
+    name = "fpldexp_32_test_cc",
+    srcs = ["fpldexp_32_test.cc"],
+    data = [
+        ":fpldexp_32.ir",
+        ":fpldexp_32.opt.ir",
+    ],
+    tags = ["optonly"],
+    deps = [
+        ":fpldexp_32_jit_wrapper",
+        "@com_google_absl//absl/random",
+        "@com_google_absl//absl/status",
+        "//xls/common:init_xls",
+        "//xls/common:math_util",
+        "//xls/common/file:get_runfile_path",
+        "//xls/common/logging",
+        "//xls/common/status:status_macros",
+        "//xls/ir:value_helpers",
+        "//xls/ir:value_view_helpers",
+        "//xls/tools:testbench",
+        "//xls/tools:testbench_builder",
+    ],
+)
+
+xls_dslx_library(
+    name = "apfloat_mul_2_dslx",
+    srcs = ["apfloat_mul_2.x"],
+)
+
+xls_dslx_module_library(
+    name = "fpmul_2x32_dslx_module",
+    src = "fpmul_2x32.x",
+    deps = [":apfloat_mul_2_dslx"],
+)
+
+xls_dslx_opt_ir(
+    name = "fpmul_2x32",
+    dep = ":fpmul_2x32_dslx_module",
+    ir_file = "fpmul_2x32.ir",
+    opt_ir_file = "fpmul_2x32.opt.ir",
+)
+
+xls_dslx_test(
+    name = "fpmul_2x32_dslx_test",
+    dep = ":fpmul_2x32_dslx_module",
+)
+
+# TODO: 2021-03-08 Takes too long (> 15 minutes). Add xls_ir_equivalence_test.
+xls_eval_ir_test(
+    name = "fpmul_2x32_eval_ir_test",
+    src = ":fpmul_2x32.ir",
+)
+
+xls_benchmark_ir(
+    name = "fpmul_2x32_benchmark_ir",
+    src = ":fpmul_2x32.ir",
+)
+
+cc_xls_ir_jit_wrapper(
+    name = "fpmul_2x32_jit_wrapper",
+    src = ":fpmul_2x32.opt.ir",
+    jit_wrapper_args = {
+        "class_name": "fpmul_2x32",
+    },
+)
+
+cc_test(
+    name = "fpmul_2x32_test_cc",
     srcs = ["fpmul_2x32_test.cc"],
-    data = [":fpmul_2x32_all_ir"],
+    data = [
+        ":fpmul_2x32.ir",
+        ":fpmul_2x32.opt.ir",
+    ],
     deps = [
         ":fpmul_2x32_jit_wrapper",
         "@com_google_absl//absl/random",
@@ -231,6 +563,7 @@ cc_test(
         "//xls/ir:value_helpers",
         "//xls/ir:value_view_helpers",
         "//xls/tools:testbench",
+        "//xls/tools:testbench_builder",
     ],
 )
 
@@ -247,24 +580,52 @@ cc_test(
     ],
 )
 
-dslx_test(
-    name = "fpmul_2x64",
-    srcs = ["fpmul_2x64.x"],
-    # TODO(rspringer): Currently takes too long.
-    prove_unopt_eq_opt = False,
-    deps = [":apfloat_mul_2.x"],
+xls_dslx_module_library(
+    name = "fpmul_2x64_dslx_module",
+    src = "fpmul_2x64.x",
+    deps = [":apfloat_mul_2_dslx"],
 )
 
-dslx_jit_wrapper(
+xls_dslx_opt_ir(
+    name = "fpmul_2x64",
+    dep = ":fpmul_2x64_dslx_module",
+    ir_file = "fpmul_2x64.ir",
+    opt_ir_file = "fpmul_2x64.opt.ir",
+)
+
+xls_dslx_test(
+    name = "fpmul_2x64_dslx_test",
+    dep = ":fpmul_2x64_dslx_module",
+)
+
+# TODO(rspringer): Currently takes too long. Add xls_ir_equivalence_test.
+xls_eval_ir_test(
+    name = "fpmul_2x64_eval_ir_test",
+    src = ":fpmul_2x64.ir",
+)
+
+xls_benchmark_ir(
+    name = "fpmul_2x64_benchmark_ir",
+    src = ":fpmul_2x64.ir",
+)
+
+cc_xls_ir_jit_wrapper(
     name = "fpmul_2x64_jit_wrapper",
-    dslx_name = "fpmul_2x64",
-    deps = [":fpmul_2x64_opt_ir"],
+    src = ":fpmul_2x64.opt.ir",
+    jit_wrapper_args = {
+        "class_name": "fpmul_2x64",
+    },
 )
 
 cc_test(
     name = "fpmul_2x64_test",
     srcs = ["fpmul_2x64_test.cc"],
-    data = [":fpmul_2x64_all_ir"],
+    data = [
+        ":fpmul_2x64.ir",
+        ":fpmul_2x64.opt.ir",
+    ],
+    # Flakes in fastbuild seen on 2021-06-04.
+    tags = ["optonly"],
     deps = [
         ":fpmul_2x64_jit_wrapper",
         "@com_google_absl//absl/random",
@@ -276,32 +637,67 @@ cc_test(
         "//xls/ir:value_helpers",
         "//xls/ir:value_view_helpers",
         "//xls/tools:testbench",
+        "//xls/tools:testbench_builder",
     ],
 )
 
-dslx_test(
-    name = "fp_fast_rsqrt_32",
-    srcs = ["fp_fast_rsqrt_32.x"],
-    # 2021-03-22 Takes too long.
-    prove_unopt_eq_opt = False,
+xls_dslx_library(
+    name = "fpmul_2x32_dslx",
+    srcs = ["fpmul_2x32.x"],
     deps = [
-        ":apfloat_add_2.x",
-        ":apfloat_mul_2.x",
-        ":fpadd_2x32.x",
-        ":fpmul_2x32.x",
+        ":apfloat_mul_2_dslx",
     ],
 )
 
-dslx_jit_wrapper(
+xls_dslx_module_library(
+    name = "fp_fast_rsqrt_32_dslx_module",
+    src = "fp_fast_rsqrt_32.x",
+    deps = [
+        ":apfloat_add_2_dslx",
+        ":apfloat_mul_2_dslx",
+        ":fpadd_2x32_dslx_module",
+        ":fpmul_2x32_dslx",
+    ],
+)
+
+xls_dslx_opt_ir(
+    name = "fp_fast_rsqrt_32",
+    dep = ":fp_fast_rsqrt_32_dslx_module",
+    ir_file = "fp_fast_rsqrt_32.ir",
+    opt_ir_file = "fp_fast_rsqrt_32.opt.ir",
+)
+
+xls_dslx_test(
+    name = "fp_fast_rsqrt_32_dslx_test",
+    dep = ":fp_fast_rsqrt_32_dslx_module",
+)
+
+# TODO(rspringer): Currently takes too long. Add xls_ir_equivalence_test.
+xls_eval_ir_test(
+    name = "fp_fast_rsqrt_32_eval_ir_test",
+    src = ":fp_fast_rsqrt_32.ir",
+)
+
+xls_benchmark_ir(
+    name = "fp_fast_rsqrt_32_benchmark_ir",
+    src = ":fp_fast_rsqrt_32.ir",
+)
+
+cc_xls_ir_jit_wrapper(
     name = "fp_fast_rsqrt_32_jit_wrapper",
-    dslx_name = "fp_fast_rsqrt_32",
-    deps = [":fp_fast_rsqrt_32_opt_ir"],
+    src = ":fp_fast_rsqrt_32.opt.ir",
+    jit_wrapper_args = {
+        "class_name": "fp_fast_rsqrt_32",
+    },
 )
 
 cc_test(
-    name = "fp_fast_rsqrt_32_test",
+    name = "fp_fast_rsqrt_32_test_cc",
     srcs = ["fp_fast_rsqrt_32_test.cc"],
-    data = [":fp_fast_rsqrt_32_all_ir"],
+    data = [
+        ":fp_fast_rsqrt_32.ir",
+        ":fp_fast_rsqrt_32.opt.ir",
+    ],
     tags = ["optonly"],
     deps = [
         ":fp_fast_rsqrt_32_jit_wrapper",
@@ -315,7 +711,6 @@ cc_test(
         "//xls/ir:value_helpers",
         "//xls/ir:value_view_helpers",
         "//xls/tools:testbench",
+        "//xls/tools:testbench_builder",
     ],
 )
-
-exports_files(glob(["*.x"]))

@@ -25,6 +25,7 @@
 #include "xls/dslx/ast.h"
 #include "xls/dslx/concrete_type.h"
 #include "xls/dslx/deduce_ctx.h"
+#include "xls/dslx/parametric_instantiator.h"
 #include "xls/dslx/type_and_bindings.h"
 
 namespace xls::dslx {
@@ -41,16 +42,18 @@ const absl::flat_hash_set<std::string>& GetUnaryParametricBuiltinNames();
 struct SignatureData {
   // Argument types for the parametric builtin.
   const std::vector<const ConcreteType*>& arg_types;
+  const std::vector<dslx::Span>& arg_spans;
   // Name of the builtin.
   absl::string_view name;
   // Span that we're invoking the builtin from (span for the entire invocation).
   const Span& span;
   // Any "higher order" parametric bindings e.g. for the callee in the case of
   // map.
-  absl::optional<std::vector<ParametricBinding*>> parametric_bindings;
+  absl::optional<std::vector<ParametricConstraint>> parametric_bindings;
   // Callback that can be used to perform constexpr evaluation on one of the
   // function arguments; which is requested is given by argno.
-  const std::function<absl::Status(int64_t argno)>& constexpr_eval;
+  const std::function<absl::StatusOr<InterpValue>(int64_t argno)>&
+      constexpr_eval;
 };
 
 // Deduction rule that determines the FunctionType and any associated symbolic

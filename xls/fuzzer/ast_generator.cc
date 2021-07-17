@@ -153,6 +153,22 @@ absl::StatusOr<TypedExpr> AstGenerator::GenerateCompare(Env* env) {
   return TypedExpr{binop, MakeTypeAnnotation(false, 1)};
 }
 
+absl::StatusOr<TypedExpr> AstGenerator::GenerateCompareArray(Env* env) {
+  XLS_ASSIGN_OR_RETURN(TypedExpr lhs, ChooseEnvValueArray(env));
+  XLS_ASSIGN_OR_RETURN(TypedExpr rhs, ChooseEnvValue(env, lhs.type));
+  BinopKind op = RandomBool() ? BinopKind::kEq : BinopKind::kNe;
+  return TypedExpr{module_->Make<Binop>(fake_span_, op, lhs.expr, rhs.expr),
+                   MakeTypeAnnotation(false, 1)};
+}
+
+absl::StatusOr<TypedExpr> AstGenerator::GenerateCompareTuple(Env* env) {
+  XLS_ASSIGN_OR_RETURN(TypedExpr lhs, ChooseEnvValueTuple(env));
+  XLS_ASSIGN_OR_RETURN(TypedExpr rhs, ChooseEnvValue(env, lhs.type));
+  BinopKind op = RandomBool() ? BinopKind::kEq : BinopKind::kNe;
+  return TypedExpr{module_->Make<Binop>(fake_span_, op, lhs.expr, rhs.expr),
+                   MakeTypeAnnotation(false, 1)};
+}
+
 absl::StatusOr<TypedExpr> AstGenerator::GenerateShift(Env* env) {
   BinopKind op = RandomSetChoice<BinopKind>(GetBinopShifts());
   XLS_ASSIGN_OR_RETURN(TypedExpr lhs, ChooseEnvValueBits(env));
@@ -239,7 +255,7 @@ int64_t AstGenerator::GetTypeBitCount(TypeAnnotation* type) {
   return type_bit_counts_.at(type_str);
 }
 
-int64_t AstGenerator::GetArraySize(ArrayTypeAnnotation* type) {
+int64_t AstGenerator::GetArraySize(const ArrayTypeAnnotation* type) {
   Expr* dim = type->dim();
   if (auto* number = dynamic_cast<Number*>(dim)) {
     return number->GetAsUint64().value();
@@ -251,11 +267,17 @@ int64_t AstGenerator::GetArraySize(ArrayTypeAnnotation* type) {
   return number->GetAsUint64().value();
 }
 
-ConstRef* AstGenerator::GetOrCreateConstRef(int64_t value) {
+ConstRef* AstGenerator::GetOrCreateConstRef(
+    int64_t value, absl::optional<int64_t> want_width) {
   // We use a canonical naming scheme so we can detect duplicate requests for
   // the same value.
-  int64_t width = std::max(
-      int64_t{1}, static_cast<int64_t>(std::ceil(std::log2(value + 1))));
+  int64_t width;
+  if (want_width.has_value()) {
+    width = want_width.value();
+  } else {
+    width = std::max(int64_t{1},
+                     static_cast<int64_t>(std::ceil(std::log2(value + 1))));
+  }
   std::string identifier = absl::StrFormat("W%d_V%d", width, value);
   ConstantDef* constant_def;
   if (auto it = constants_.find(identifier); it != constants_.end()) {
@@ -281,7 +303,7 @@ ArrayTypeAnnotation* AstGenerator::MakeArrayType(TypeAnnotation* element_type,
   Expr* dim;
   if (RandomBool()) {
     // Get-or-create a module level constant for the array size.
-    dim = GetOrCreateConstRef(array_size);
+    dim = GetOrCreateConstRef(array_size, /*want_width=*/32);
   } else {
     dim = MakeNumber(array_size);
   }
@@ -630,7 +652,12 @@ absl::StatusOr<TypedExpr> AstGenerator::GenerateCountedFor(Env* env) {
       fake_span_, std::vector<NameDefTree*>{i_ndt, x_ndt});
   XLS_ASSIGN_OR_RETURN(TypedExpr e, ChooseEnvValueNotArray(env));
   NameRef* body = MakeNameRef(x_def);
-  TupleTypeAnnotation* tree_type = MakeTupleType({ivar_type, e.type});
+
+  // Randomly decide to use or not-use the type annotation on the loop.
+  TupleTypeAnnotation* tree_type = nullptr;
+  if (RandomBool()) {
+    tree_type = MakeTupleType({ivar_type, e.type});
+  }
   For* for_ = module_->Make<For>(fake_span_, name_def_tree, tree_type, iterable,
                                  body, /*init=*/e.expr);
   return TypedExpr{for_, e.type};
@@ -932,18 +959,61 @@ absl::StatusOr<TypedExpr> AstGenerator::GenerateBitSliceUpdate(Env* env) {
   return TypedExpr{invocation, arg.type};
 }
 
+absl::StatusOr<TypedExpr> AstGenerator::GenerateArraySlice(Env* env) {
+  // JIT/codegen for array_slice don't currently support zero-sized types
+  auto is_not_zst = [this](ArrayTypeAnnotation* array_type) -> bool {
+    return this->GetTypeBitCount(array_type) != 0;
+  };
+
+  XLS_ASSIGN_OR_RETURN(TypedExpr arg, ChooseEnvValueArray(env, is_not_zst));
+
+  auto arg_type = dynamic_cast<ArrayTypeAnnotation*>(arg.type);
+  XLS_CHECK_NE(arg_type, nullptr)
+      << "Postcondition of ChooseEnvValueArray violated";
+
+  XLS_ASSIGN_OR_RETURN(TypedExpr start, ChooseEnvValueUBits(env));
+
+  int64_t slice_width;
+
+  if (RandomBool()) {
+    slice_width = RandomIntWithExpectedValue(1.0);
+  } else {
+    slice_width = RandomIntWithExpectedValue(10.0);
+  }
+
+  slice_width = std::max(int64_t{1}, slice_width);
+  slice_width = std::min(int64_t{1000}, slice_width);
+
+  std::vector<Expr*> width_array_elements = {module_->Make<Index>(
+      fake_span_, arg.expr, MakeNumber(0, MakeTypeAnnotation(false, 32)))};
+  Array* width_expr = module_->Make<Array>(fake_span_, width_array_elements,
+                                           /*has_ellipsis=*/true);
+  TypeAnnotation* width_type = module_->Make<ArrayTypeAnnotation>(
+      fake_span_, arg_type->element_type(), MakeNumber(slice_width));
+  width_expr->set_type_annotation(width_type);
+
+  TypedExpr width{width_expr, width_type};
+  auto* invocation = module_->Make<Invocation>(
+      fake_span_, MakeBuiltinNameRef("slice"),
+      std::vector<Expr*>{arg.expr, start.expr, width.expr});
+  return TypedExpr{invocation, width_type};
+}
+
 namespace {
 
 enum OpChoice {
   kArray,
   kArrayIndex,
   kArrayUpdate,
+  kArraySlice,
   kBinop,
   kBitSlice,
   kBitSliceUpdate,
   kBitwiseReduction,
   kCastToBitsArray,
   kCompareOp,
+  kCompareArrayOp,
+  kCompareTupleOp,
   kConcat,
   kCountedFor,
   kLogical,
@@ -968,6 +1038,8 @@ int OpProbability(OpChoice op) {
       return 2;
     case kArrayUpdate:
       return 2;
+    case kArraySlice:
+      return 2;
     case kBinop:
       return 10;
     case kBitSlice:
@@ -980,6 +1052,10 @@ int OpProbability(OpChoice op) {
       return 1;
     case kCompareOp:
       return 3;
+    case kCompareArrayOp:
+      return 2;
+    case kCompareTupleOp:
+      return 2;
     case kConcat:
       return 5;
     case kCountedFor:
@@ -1046,6 +1122,9 @@ absl::StatusOr<TypedExpr> AstGenerator::GenerateExpr(int64_t expr_size,
       case kArrayUpdate:
         generated = GenerateArrayUpdate(env);
         break;
+      case kArraySlice:
+        generated = GenerateArraySlice(env);
+        break;
       case kCountedFor:
         generated = GenerateCountedFor(env);
         break;
@@ -1060,6 +1139,12 @@ absl::StatusOr<TypedExpr> AstGenerator::GenerateExpr(int64_t expr_size,
         break;
       case kCompareOp:
         generated = GenerateCompare(env);
+        break;
+      case kCompareArrayOp:
+        generated = GenerateCompareArray(env);
+        break;
+      case kCompareTupleOp:
+        generated = GenerateCompareTuple(env);
         break;
       case kShiftOp:
         generated = GenerateShift(env);
@@ -1191,7 +1276,7 @@ absl::StatusOr<TypedExpr> AstGenerator::GenerateBody(
   Env env;
   for (Param* param : params) {
     env[param->identifier()] =
-        TypedExpr{MakeNameRef(param->name_def()), param->type()};
+        TypedExpr{MakeNameRef(param->name_def()), param->type_annotation()};
   }
   return GenerateExpr(/*expr_size=*/0, call_depth, &env);
 }

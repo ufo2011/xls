@@ -409,10 +409,11 @@ TEST(FunctionBuilderTest, SendAndReceive) {
   XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, b.Build(after_all, next_state));
 
   EXPECT_THAT(proc->NextToken(),
-              m::AfterAll(m::Send(), m::TupleIndex(m::Receive()), m::SendIf(),
-                          m::TupleIndex(m::ReceiveIf())));
-  EXPECT_THAT(proc->NextState(), m::Add(m::TupleIndex(m::Receive()),
-                                        m::TupleIndex(m::ReceiveIf())));
+              m::AfterAll(m::Send(), m::TupleIndex(m::Receive()),
+                          m::Send(m::Param(), m::Param(), m::Literal(1)),
+                          m::TupleIndex(m::Receive())));
+  EXPECT_THAT(proc->NextState(),
+              m::Add(m::TupleIndex(m::Receive()), m::TupleIndex(m::Receive())));
 
   EXPECT_EQ(proc->InitValue(), Value(UBits(42, 32)));
   EXPECT_EQ(proc->StateParam()->GetName(), "my_state");
@@ -652,20 +653,6 @@ TEST(FunctionBuilderTest, DynamicCountedForTest) {
               m::DynamicCountedFor(
                   m::Param("init"), m::Param("trip_count"), m::Param("stride"),
                   body, {m::Param("invariant_1"), m::Param("invariant_2")}));
-}
-
-TEST(FunctionBuilderTest, AddSendToFunction) {
-  Package p("p");
-  XLS_ASSERT_OK_AND_ASSIGN(
-      Channel * ch0, p.CreateStreamingChannel("ch0", ChannelOps::kSendReceive,
-                                              p.GetBitsType(32)));
-
-  FunctionBuilder b("send_function", &p);
-  b.Send(ch0, b.AfterAll({}), b.Param("x", p.GetBitsType(32)));
-  EXPECT_THAT(
-      b.Build().status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("Send operations not supported in functions")));
 }
 
 TEST(FunctionBuilderTest, AddParamToProc) {

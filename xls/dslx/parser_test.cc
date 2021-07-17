@@ -26,9 +26,11 @@ using testing::HasSubstr;
 
 class ParserTest : public ::testing::Test {
  public:
+  static constexpr absl::string_view kFilename = "test.x";
+
   void RoundTrip(std::string program,
                  absl::optional<absl::string_view> target = absl::nullopt) {
-    scanner_.emplace("test.x", program);
+    scanner_.emplace(std::string(kFilename), program);
     parser_.emplace("test", &*scanner_);
     XLS_ASSERT_OK_AND_ASSIGN(auto module, parser_->ParseModule());
     if (target.has_value()) {
@@ -40,19 +42,23 @@ class ParserTest : public ::testing::Test {
 
   // Note: given expression text should have no free variables other than those
   // in "predefine": those are defined a builtin name definitions (like the DSLX
-  // builtins are)..
-  void RoundTripExpr(std::string expr_text,
-                     absl::Span<const std::string> predefine = {},
-                     absl::optional<std::string> target = absl::nullopt,
-                     Expr** parsed = nullptr) {
-    scanner_.emplace("test.x", expr_text);
+  // builtins are).
+  absl::StatusOr<Expr*> ParseExpr(
+      std::string expr_text, absl::Span<const std::string> predefine = {}) {
+    scanner_.emplace(std::string(kFilename), expr_text);
     parser_.emplace("test", &*scanner_);
     Bindings b;
     for (const std::string& s : predefine) {
       b.Add(s, parser_->module_->Make<BuiltinNameDef>(s));
     }
-    XLS_ASSERT_OK_AND_ASSIGN(Expr * e,
-                             parser_->ParseExpression(/*bindings=*/&b));
+    return parser_->ParseExpression(/*bindings=*/&b);
+  }
+
+  void RoundTripExpr(std::string expr_text,
+                     absl::Span<const std::string> predefine = {},
+                     absl::optional<std::string> target = absl::nullopt,
+                     Expr** parsed = nullptr) {
+    XLS_ASSERT_OK_AND_ASSIGN(Expr * e, ParseExpr(expr_text, predefine));
     if (target.has_value()) {
       EXPECT_EQ(e->ToString(), *target);
     } else {
@@ -150,7 +156,7 @@ TEST_F(ParserTest, ParseLetExpression) {
   ASSERT_TRUE(let != nullptr) << e->ToString();
   NameDef* name_def = absl::get<NameDef*>(let->name_def_tree()->leaf());
   EXPECT_EQ(name_def->identifier(), "x");
-  EXPECT_EQ(let->type()->ToString(), "u32");
+  EXPECT_EQ(let->type_annotation()->ToString(), "u32");
   EXPECT_EQ(let->rhs()->ToString(), "2");
   EXPECT_EQ(let->body()->ToString(), "x");
 }
@@ -376,6 +382,15 @@ let accum: u32 = for (i, accum): (u32, u32) in range(u32:0, u32:4) {
 }(accum);
 accum)",
                 {"range"});
+}
+
+TEST_F(ParserTest, ForSansTypeAnnotation) {
+  RoundTripExpr(
+      R"(let init = ();
+for (i, accum) in range(u32:0, u32:4) {
+  accum
+}(init))",
+      {"range"});
 }
 
 TEST_F(ParserTest, MatchWithConstPattern) {
@@ -611,9 +626,38 @@ TEST_F(ParserTest, LogicalEqualityPrecedence) {
   EXPECT_EQ(unop->kind(), UnopKind::kInvert);
 }
 
+TEST_F(ParserTest, CastVsComparatorPrecedence) {
+  Expr* e;
+  RoundTripExpr("x >= y as u32", {"x", "y"}, "(x) >= (((y) as u32))", &e);
+  auto* binop = dynamic_cast<Binop*>(e);
+  EXPECT_EQ(binop->kind(), BinopKind::kGe);
+  auto* cast = dynamic_cast<Cast*>(binop->rhs());
+  ASSERT_NE(cast, nullptr);
+  auto* casted_name_ref = dynamic_cast<NameRef*>(cast->expr());
+  ASSERT_NE(casted_name_ref, nullptr);
+  EXPECT_EQ(casted_name_ref->identifier(), "y");
+}
+
+TEST_F(ParserTest, CastVsUnaryPrecedence) {
+  Expr* e;
+  RoundTripExpr("-x as s32", {"x", "y"}, "((-(x)) as s32)", &e);
+  auto* cast = dynamic_cast<Cast*>(e);
+  ASSERT_NE(cast, nullptr);
+  EXPECT_EQ(cast->type_annotation()->ToString(), "s32");
+}
+
 TEST_F(ParserTest, NameDefTree) {
   RoundTripExpr(R"(let (a, (b, (c, d), e), f) = x;
 a)",
+                {"x"});
+}
+
+TEST_F(ParserTest, Strings) {
+  RoundTripExpr(R"(let x = "dummy --> \" <-- string";
+x)",
+                {"x"});
+  RoundTripExpr(R"(let x = "dummy --> \"";
+x)",
                 {"x"});
 }
 
@@ -635,6 +679,16 @@ fn my_fun() -> MyEnum {
   ASSERT_THAT(module_status, StatusIs(absl::StatusCode::kInvalidArgument,
                                       "ParseError: test.x:7:3-7:6 Cannot find "
                                       "a definition for name: 'FOO'"));
+}
+
+TEST_F(ParserTest, NumberSpan) {
+  XLS_ASSERT_OK_AND_ASSIGN(Expr * e, ParseExpr("u32:42"));
+  auto* number = dynamic_cast<Number*>(e);
+  ASSERT_NE(number, nullptr);
+  // TODO(https://github.com/google/xls/issues/438): 2021-05-24 Fix the
+  // parsing/reporting of number spans so that the span starts at 0,0.
+  EXPECT_EQ(number->span(), Span(Pos(std::string(kFilename), 0, 4),
+                                 Pos(std::string(kFilename), 0, 6)));
 }
 
 }  // namespace xls::dslx

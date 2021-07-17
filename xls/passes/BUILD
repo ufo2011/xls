@@ -259,6 +259,7 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "//xls/common/status:status_macros",
         "//xls/ir",
+        "//xls/ir:op",
     ],
 )
 
@@ -424,6 +425,8 @@ cc_library(
         "//xls/common/logging",
         "//xls/common/status:status_macros",
         "//xls/ir",
+        "//xls/ir:op",
+        "//xls/ir:type",
     ],
 )
 
@@ -953,6 +956,7 @@ cc_test(
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
         "//xls/ir",
+        "//xls/ir:function_builder",
         "//xls/ir:ir_test_base",
         "@com_google_googletest//:gtest",
     ],

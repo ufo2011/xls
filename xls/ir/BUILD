@@ -49,7 +49,6 @@ cc_library(
     name = "bits",
     srcs = ["bits.cc"],
     hdrs = ["bits.h"],
-    visibility = ["//xls:xls_users"],
     deps = [
         ":bit_push_buffer",
         ":format_preference",
@@ -98,7 +97,7 @@ cc_library(
     name = "type",
     srcs = ["type.cc"],
     hdrs = ["type.h"],
-    visibility = ["//xls:xls_users"],
+    visibility = ["//xls:xls_best_effort_users"],
     deps = [
         ":xls_type_cc_proto",
         "//xls/common:casts",
@@ -145,6 +144,7 @@ xls_py_proto_library(
 cc_library(
     name = "ir",
     srcs = [
+        "block.cc",
         "dfs_visitor.cc",
         "function.cc",
         "function_base.cc",
@@ -156,6 +156,7 @@ cc_library(
         "verifier.cc",
     ],
     hdrs = [
+        "block.h",
         "dfs_visitor.h",
         "function.h",
         "function_base.h",
@@ -167,11 +168,12 @@ cc_library(
         "proc.h",
         "verifier.h",
     ],
-    visibility = ["//xls:xls_users"],
+    visibility = ["//xls:xls_best_effort_users"],
     deps = [
         ":bits",
         ":channel",
         ":channel_cc_proto",
+        ":channel_ops",
         ":name_uniquer",
         ":op",
         ":source_location",
@@ -189,6 +191,7 @@ cc_library(
         "//xls/common/status:status_macros",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:btree",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/container:inlined_vector",
@@ -218,9 +221,10 @@ cc_library(
     name = "function_builder",
     srcs = ["function_builder.cc"],
     hdrs = ["function_builder.h"],
-    visibility = ["//xls:xls_users"],
     deps = [
+        ":channel",
         ":ir",
+        ":op",
         ":source_location",
         ":value",
         "//xls/common:symbolized_stacktrace",
@@ -291,11 +295,13 @@ cc_test(
     ],
 )
 
+# TODO(leary): 2021-05-06 Eliminate need for IR parser direct visibility with a
+# public XLS "MakeExecutable" API.
 cc_library(
     name = "ir_parser",
     srcs = ["ir_parser.cc"],
     hdrs = ["ir_parser.h"],
-    visibility = ["//xls:xls_users"],
+    visibility = ["//xls:xls_best_effort_users"],
     deps = [
         ":bits_ops",
         ":channel",
@@ -340,6 +346,8 @@ cc_test(
     srcs = ["package_test.cc"],
     deps = [
         "ir",
+        ":channel",
+        ":function_builder",
         ":ir_test_base",
         ":type",
         ":xls_type_cc_proto",
@@ -433,7 +441,6 @@ cc_library(
     name = "value",
     srcs = ["value.cc"],
     hdrs = ["value.h"],
-    visibility = ["//xls:xls_users"],
     deps = [
         ":bits",
         ":xls_type_cc_proto",
@@ -457,6 +464,7 @@ cc_library(
         ":type",
         ":value",
         "//xls/common/logging",
+        "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -692,6 +700,7 @@ cc_library(
     hdrs = ["node_util.h"],
     deps = [
         ":bits_ops",
+        ":channel",
         ":ir",
         "//xls/common/logging",
         "//xls/common/status:ret_check",
@@ -855,7 +864,6 @@ cc_library(
 cc_library(
     name = "value_view",
     hdrs = ["value_view.h"],
-    visibility = ["//xls:xls_users"],
     deps = [
         ":ir",
         ":type",
@@ -875,11 +883,23 @@ cc_library(
 )
 
 cc_library(
+    name = "channel_ops",
+    srcs = ["channel_ops.cc"],
+    hdrs = ["channel_ops.h"],
+    deps = [
+        "//xls/common/logging",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_library(
     name = "channel",
     srcs = ["channel.cc"],
     hdrs = ["channel.h"],
     deps = [
         ":channel_cc_proto",
+        ":channel_ops",
         ":type",
         ":value",
         "//xls/common/status:ret_check",
@@ -941,6 +961,8 @@ cc_test(
         ":big_int",
         ":bits",
         "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
+        "//xls/tools:testbench_builder",
         "@com_google_googletest//:gtest",
     ],
 )
@@ -1006,6 +1028,20 @@ cc_test(
     deps = [
         ":name_uniquer",
         "//xls/common:xls_gunit_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_test(
+    name = "block_test",
+    srcs = ["block_test.cc"],
+    deps = [
+        ":ir",
+        ":ir_matcher",
+        ":ir_test_base",
+        "//xls/common:visitor",
+        "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
         "@com_google_googletest//:gtest",
     ],
 )

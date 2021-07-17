@@ -32,13 +32,13 @@ using ::testing::HasSubstr;
 
 class ChannelQueueTest : public IrTestBase {};
 
-TEST_F(ChannelQueueTest, SingleDataElementEnqueueDequeue) {
+TEST_F(ChannelQueueTest, FifoChannelQueueTest) {
   Package package(TestName());
   XLS_ASSERT_OK_AND_ASSIGN(
       Channel * channel,
       package.CreateStreamingChannel("my_channel", ChannelOps::kSendReceive,
                                      package.GetBitsType(32)));
-  ChannelQueue queue(channel);
+  FifoChannelQueue queue(channel);
   EXPECT_EQ(queue.channel(), channel);
   EXPECT_EQ(queue.size(), 0);
   EXPECT_TRUE(queue.empty());
@@ -67,7 +67,7 @@ TEST_F(ChannelQueueTest, ErrorConditions) {
       package.CreateStreamingChannel("my_channel", ChannelOps::kSendReceive,
                                      package.GetBitsType(1)));
 
-  ChannelQueue queue(channel);
+  FifoChannelQueue queue(channel);
 
   EXPECT_THAT(
       queue.Dequeue(),
@@ -89,21 +89,19 @@ TEST_F(ChannelQueueTest, InputQueue) {
       package.CreateStreamingChannel("my_channel", ChannelOps::kReceiveOnly,
                                      package.GetBitsType(32)));
   int64_t counter = 42;
-  RxOnlyChannelQueue queue(channel, &package, [&]() -> absl::StatusOr<Value> {
-    return Value(UBits(counter++, 32));
-  });
+  GeneratedChannelQueue queue(
+      channel, &package,
+      [&]() -> absl::StatusOr<Value> { return Value(UBits(counter++, 32)); });
   EXPECT_FALSE(queue.empty());
   EXPECT_THAT(queue.Dequeue(), IsOkAndHolds(Value(UBits(42, 32))));
   EXPECT_THAT(queue.Dequeue(), IsOkAndHolds(Value(UBits(43, 32))));
   EXPECT_THAT(queue.Dequeue(), IsOkAndHolds(Value(UBits(44, 32))));
   EXPECT_FALSE(queue.empty());
 
-  EXPECT_THAT(
-      queue.Enqueue(Value(UBits(22, 32))),
-      StatusIs(
-          absl::StatusCode::kUnimplemented,
-          HasSubstr(
-              "Cannot enqueue to RxOnlyChannelQueue on channel my_channel")));
+  EXPECT_THAT(queue.Enqueue(Value(UBits(22, 32))),
+              StatusIs(absl::StatusCode::kUnimplemented,
+                       HasSubstr("Cannot enqueue to GeneratedChannelQueue on "
+                                 "channel my_channel")));
 }
 
 TEST_F(ChannelQueueTest, FixedInputQueue) {
@@ -112,7 +110,7 @@ TEST_F(ChannelQueueTest, FixedInputQueue) {
       Channel * channel,
       package.CreateStreamingChannel("my_channel", ChannelOps::kReceiveOnly,
                                      package.GetBitsType(32)));
-  FixedRxOnlyChannelQueue queue(
+  FixedChannelQueue queue(
       channel, &package,
       {Value(UBits(22, 32)), Value(UBits(44, 32)), Value(UBits(55, 32))});
   EXPECT_EQ(queue.size(), 3);
@@ -129,7 +127,7 @@ TEST_F(ChannelQueueTest, EmptyFixedInputQueue) {
       Channel * channel,
       package.CreateStreamingChannel("my_channel", ChannelOps::kReceiveOnly,
                                      package.GetBitsType(32)));
-  FixedRxOnlyChannelQueue queue(channel, &package, {});
+  FixedChannelQueue queue(channel, &package, {});
   EXPECT_EQ(queue.size(), 0);
   EXPECT_TRUE(queue.empty());
 }
@@ -149,18 +147,18 @@ TEST_F(ChannelQueueTest, SimpleChannelQueueManager) {
       package.CreateStreamingChannel("c", ChannelOps::kSendReceive,
                                      package.GetBitsType(32)));
 
-  std::vector<std::unique_ptr<RxOnlyChannelQueue>> rx_only_queues;
-  rx_only_queues.push_back(absl::make_unique<RxOnlyChannelQueue>(
+  std::vector<std::unique_ptr<ChannelQueue>> queues;
+  queues.push_back(absl::make_unique<GeneratedChannelQueue>(
       channel_a, &package,
       []() -> absl::StatusOr<Value> { return Value(UBits(42, 32)); }));
   std::vector<Value> fixed_input = {Value(UBits(1, 32)), Value(UBits(2, 32)),
                                     Value(UBits(3, 32))};
-  rx_only_queues.push_back(absl::make_unique<FixedRxOnlyChannelQueue>(
-      channel_b, &package, fixed_input));
+  queues.push_back(
+      absl::make_unique<FixedChannelQueue>(channel_b, &package, fixed_input));
 
   XLS_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<ChannelQueueManager> manager,
-      ChannelQueueManager::Create(std::move(rx_only_queues), &package));
+      ChannelQueueManager::Create(std::move(queues), &package));
   EXPECT_EQ(manager->queues().size(), 3);
   EXPECT_THAT(manager->GetQueue(channel_a).Dequeue(),
               IsOkAndHolds(Value(UBits(42, 32))));
@@ -179,20 +177,8 @@ TEST_F(ChannelQueueTest, ChannelQueueManagerNoChannels) {
   Package package(TestName());
   XLS_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<ChannelQueueManager> manager,
-      ChannelQueueManager::Create(/*rx_only_queues=*/{}, &package));
+      ChannelQueueManager::Create(/*user_defined_queues=*/{}, &package));
   EXPECT_EQ(manager->queues().size(), 0);
-}
-
-TEST_F(ChannelQueueTest, ChannelQueueManagerPortChannel) {
-  Package package(TestName());
-  XLS_ASSERT_OK(package
-                    .CreatePortChannel("ch", ChannelOps::kSendReceive,
-                                       package.GetBitsType(32))
-                    .status());
-  EXPECT_THAT(
-      ChannelQueueManager::Create(/*rx_only_queues=*/{}, &package).status(),
-      StatusIs(absl::StatusCode::kUnimplemented,
-               HasSubstr("Only streaming channels are supported.")));
 }
 
 TEST_F(ChannelQueueTest, ChannelQueueManagerErrorConditions) {
@@ -210,70 +196,102 @@ TEST_F(ChannelQueueTest, ChannelQueueManagerErrorConditions) {
       package.CreateStreamingChannel("c", ChannelOps::kSendReceive,
                                      package.GetBitsType(32)));
 
-  EXPECT_THAT(
-      ChannelQueueManager::Create(/*rx_only_queues=*/{}, &package).status(),
-      StatusIs(
-          absl::StatusCode::kInvalidArgument,
-          HasSubstr(
-              "No receive-only queue specified for receive_only channel a")));
-
-  EXPECT_THAT(
-      ChannelQueueManager::Create(/*rx_only_queues=*/{}, &package).status(),
-      StatusIs(
-          absl::StatusCode::kInvalidArgument,
-          HasSubstr(
-              "No receive-only queue specified for receive_only channel a")));
   {
-    std::vector<std::unique_ptr<RxOnlyChannelQueue>> rx_only_queues;
-    rx_only_queues.push_back(absl::make_unique<RxOnlyChannelQueue>(
-        channel_a, &package,
-        []() -> absl::StatusOr<Value> { return Value(UBits(42, 32)); }));
-    EXPECT_THAT(
-        ChannelQueueManager::Create(std::move(rx_only_queues), &package)
-            .status(),
-        StatusIs(
-            absl::StatusCode::kInvalidArgument,
-            HasSubstr(
-                "No receive-only queue specified for receive_only channel b")));
+    // If no user-defined queues are defined. The factory should build queues
+    // for each channel.
+    XLS_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<ChannelQueueManager> manager,
+        ChannelQueueManager::Create(/*user_defined_queues=*/{}, &package));
+    XLS_EXPECT_OK(manager->GetQueueByName("a").status());
+    XLS_EXPECT_OK(manager->GetQueueByName("b").status());
+    XLS_EXPECT_OK(manager->GetQueueByName("c").status());
+    EXPECT_THAT(manager->GetQueueByName("d").status(),
+                StatusIs(absl::StatusCode::kNotFound,
+                         HasSubstr("No channel with name 'd'")));
   }
 
   {
-    std::vector<std::unique_ptr<RxOnlyChannelQueue>> rx_only_queues;
-    rx_only_queues.push_back(absl::make_unique<RxOnlyChannelQueue>(
+    std::vector<std::unique_ptr<ChannelQueue>> queues;
+    queues.push_back(absl::make_unique<GeneratedChannelQueue>(
         channel_a, &package,
         []() -> absl::StatusOr<Value> { return Value(UBits(42, 32)); }));
-    rx_only_queues.push_back(absl::make_unique<RxOnlyChannelQueue>(
+    queues.push_back(absl::make_unique<GeneratedChannelQueue>(
         channel_a, &package,
         []() -> absl::StatusOr<Value> { return Value(UBits(42, 32)); }));
-    rx_only_queues.push_back(absl::make_unique<RxOnlyChannelQueue>(
+    queues.push_back(absl::make_unique<GeneratedChannelQueue>(
         channel_b, &package,
         []() -> absl::StatusOr<Value> { return Value(UBits(42, 32)); }));
     EXPECT_THAT(
-        ChannelQueueManager::Create(std::move(rx_only_queues), &package)
-            .status(),
+        ChannelQueueManager::Create(std::move(queues), &package).status(),
         StatusIs(
             absl::StatusCode::kInvalidArgument,
             HasSubstr("More than one receive-only queue given for channel a")));
   }
 
   {
-    std::vector<std::unique_ptr<RxOnlyChannelQueue>> rx_only_queues;
-    rx_only_queues.push_back(absl::make_unique<RxOnlyChannelQueue>(
+    std::vector<std::unique_ptr<ChannelQueue>> queues;
+    queues.push_back(absl::make_unique<GeneratedChannelQueue>(
         channel_a, &package,
         []() -> absl::StatusOr<Value> { return Value(UBits(42, 32)); }));
-    rx_only_queues.push_back(absl::make_unique<RxOnlyChannelQueue>(
+    queues.push_back(absl::make_unique<GeneratedChannelQueue>(
         channel_b, &package,
         []() -> absl::StatusOr<Value> { return Value(UBits(42, 32)); }));
-    rx_only_queues.push_back(absl::make_unique<RxOnlyChannelQueue>(
+    queues.push_back(absl::make_unique<GeneratedChannelQueue>(
         channel_c, &package,
         []() -> absl::StatusOr<Value> { return Value(UBits(42, 32)); }));
     EXPECT_THAT(
-        ChannelQueueManager::Create(std::move(rx_only_queues), &package)
-            .status(),
-        StatusIs(
-            absl::StatusCode::kInvalidArgument,
-            HasSubstr("receive-only queues only can be used with receive_only "
-                      "channels, used with send_receive channel c")));
+        ChannelQueueManager::Create(std::move(queues), &package).status(),
+        StatusIs(absl::StatusCode::kInvalidArgument,
+                 HasSubstr("User-defined queues can only be used with "
+                           "receive_only channels")));
+  }
+}
+
+TEST_F(ChannelQueueTest, ChannelKindMatching) {
+  Package package(TestName());
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Channel * channel_a,
+      package.CreateStreamingChannel("a", ChannelOps::kReceiveOnly,
+                                     package.GetBitsType(32)));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Channel * channel_b,
+      package.CreateSingleValueChannel("b", ChannelOps::kReceiveOnly,
+                                       package.GetBitsType(32)));
+
+  {
+    std::vector<std::unique_ptr<ChannelQueue>> queues;
+    queues.push_back(absl::make_unique<GeneratedChannelQueue>(
+        channel_a, &package,
+        []() -> absl::StatusOr<Value> { return Value(UBits(42, 32)); }));
+    queues.push_back(absl::make_unique<SingleValueChannelQueue>(channel_b));
+    XLS_EXPECT_OK(
+        ChannelQueueManager::Create(std::move(queues), &package).status());
+  }
+
+  {
+    std::vector<std::unique_ptr<ChannelQueue>> queues;
+    queues.push_back(absl::make_unique<GeneratedChannelQueue>(
+        channel_a, &package,
+        []() -> absl::StatusOr<Value> { return Value(UBits(42, 32)); }));
+    queues.push_back(absl::make_unique<GeneratedChannelQueue>(
+        channel_b, &package,
+        []() -> absl::StatusOr<Value> { return Value(UBits(42, 32)); }));
+    EXPECT_THAT(
+        ChannelQueueManager::Create(std::move(queues), &package).status(),
+        StatusIs(absl::StatusCode::kInvalidArgument,
+                 HasSubstr("Non-single-value channel queue cannot be used for "
+                           "single-value channel")));
+  }
+
+  {
+    std::vector<std::unique_ptr<ChannelQueue>> queues;
+    queues.push_back(absl::make_unique<SingleValueChannelQueue>(channel_a));
+    queues.push_back(absl::make_unique<SingleValueChannelQueue>(channel_b));
+    EXPECT_THAT(
+        ChannelQueueManager::Create(std::move(queues), &package).status(),
+        StatusIs(absl::StatusCode::kInvalidArgument,
+                 HasSubstr("Single-value channel queue cannot be used for "
+                           "non-single-value channel")));
   }
 }
 

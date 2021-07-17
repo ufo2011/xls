@@ -21,13 +21,14 @@
 #include "xls/common/logging/logging.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/interpreter/function_interpreter.h"
 #include "xls/ir/bits.h"
 #include "xls/ir/bits_ops.h"
 #include "xls/ir/dfs_visitor.h"
 #include "xls/ir/function.h"
-#include "xls/ir/keyword_args.h"
 #include "xls/ir/node_iterator.h"
 #include "xls/ir/package.h"
+#include "xls/ir/value_helpers.h"
 
 namespace xls {
 
@@ -46,58 +47,17 @@ uint64_t BitsToBoundedUint64(const Bits& bits, uint64_t upper_limit) {
 
 }  // namespace
 
-/* static */ absl::StatusOr<Value> IrInterpreter::Run(
-    Function* function, absl::Span<const Value> args, InterpreterStats* stats) {
-  XLS_VLOG(3) << "Interpreting function " << function->name();
-  if (args.size() != function->params().size()) {
-    return absl::InvalidArgumentError(absl::StrFormat(
-        "Function %s wants %d arguments, got %d.", function->name(),
-        function->params().size(), args.size()));
-  }
-  for (int64_t argno = 0; argno < args.size(); ++argno) {
-    Param* param = function->param(argno);
-    const Value& value = args[argno];
-    Type* param_type = param->GetType();
-    Type* value_type = function->package()->GetTypeForValue(value);
-    if (value_type != param_type) {
-      return absl::InvalidArgumentError(absl::StrFormat(
-          "Got argument %s for parameter %d which is not of type %s",
-          value.ToString(), argno, param_type->ToString()));
-    }
-  }
-  IrInterpreter visitor(args, stats);
-  XLS_RETURN_IF_ERROR(function->return_value()->Accept(&visitor));
-  Value result = visitor.ResolveAsValue(function->return_value());
-  XLS_VLOG(2) << "Result = " << result;
-  return std::move(result);
-}
-
-/* static */
-absl::StatusOr<Value> IrInterpreter::RunKwargs(
-    Function* function, const absl::flat_hash_map<std::string, Value>& args,
-    InterpreterStats* stats) {
-  XLS_VLOG(2) << "Interpreting function " << function->name()
-              << " with arguments:";
-  XLS_ASSIGN_OR_RETURN(std::vector<Value> positional_args,
-                       KeywordArgsToPositional(*function, args));
-  return Run(function, positional_args, stats);
-}
-
-/* static */ absl::StatusOr<Value>
-IrInterpreter::EvaluateNodeWithLiteralOperands(Node* node) {
-  XLS_RET_CHECK(std::all_of(node->operands().begin(), node->operands().end(),
-                            [](Node* n) { return n->Is<Literal>(); }));
-  IrInterpreter visitor({}, /*stats=*/nullptr);
-  XLS_RETURN_IF_ERROR(node->Accept(&visitor));
-  return visitor.ResolveAsValue(node);
-}
-
-/* static */ absl::StatusOr<Value> IrInterpreter::EvaluateNode(
-    Node* node, absl::Span<const Value* const> operand_values) {
+absl::StatusOr<Value> InterpretNode(Node* node,
+                                    absl::Span<const Value> operand_values) {
   XLS_RET_CHECK_EQ(node->operand_count(), operand_values.size());
-  IrInterpreter visitor({}, /*stats=*/nullptr);
+  IrInterpreter visitor;
   for (int64_t i = 0; i < operand_values.size(); ++i) {
-    visitor.node_values_[node->operand(i)] = *operand_values[i];
+    // Operands may be duplicated so check to see if the operand value has
+    // already been set.
+    if (!visitor.HasResult(node->operand(i))) {
+      XLS_RETURN_IF_ERROR(
+          visitor.SetValueResult(node->operand(i), operand_values[i]));
+    }
   }
   XLS_RETURN_IF_ERROR(node->VisitSingleNode(&visitor));
   return visitor.ResolveAsValue(node);
@@ -163,18 +123,19 @@ absl::Status IrInterpreter::HandleReceive(Receive* receive) {
   return absl::UnimplementedError("Receive not implemented in IrInterpreter");
 }
 
-absl::Status IrInterpreter::HandleReceiveIf(ReceiveIf* receive_if) {
-  return absl::UnimplementedError("ReceiveIf not implemented in IrInterpreter");
+absl::Status IrInterpreter::HandleRegisterRead(RegisterRead* reg_read) {
+  return absl::UnimplementedError(
+      "RegisterRead not implemented in IrInterpreter");
+}
+
+absl::Status IrInterpreter::HandleRegisterWrite(RegisterWrite* reg_write) {
+  return absl::UnimplementedError(
+      "RegisterWrite not implemented in IrInterpreter");
 }
 
 absl::Status IrInterpreter::HandleSend(Send* send) {
   return absl::UnimplementedError(
       "Channel send not implemented in IrInterpreter");
-}
-
-absl::Status IrInterpreter::HandleSendIf(SendIf* send_if) {
-  return absl::UnimplementedError(
-      "Channel send_if not implemented in IrInterpreter");
 }
 
 absl::Status IrInterpreter::HandleArray(Array* array) {
@@ -184,6 +145,19 @@ absl::Status IrInterpreter::HandleArray(Array* array) {
   }
   XLS_ASSIGN_OR_RETURN(Value result, Value::Array(operand_values));
   return SetValueResult(array, result);
+}
+
+absl::Status IrInterpreter::HandleInputPort(InputPort* input_port) {
+  return absl::UnimplementedError("InputPort not implemented in IrInterpreter");
+}
+
+absl::Status IrInterpreter::HandleOutputPort(OutputPort* output_port) {
+  return absl::UnimplementedError(
+      "OutputPort not implemented in IrInterpreter");
+}
+
+absl::Status IrInterpreter::HandleGate(Gate* gate) {
+  return absl::UnimplementedError("Gate not implemented in IrInterpreter");
 }
 
 absl::Status IrInterpreter::HandleBitSlice(BitSlice* bit_slice) {
@@ -256,7 +230,7 @@ absl::Status IrInterpreter::HandleCountedFor(CountedFor* counted_for) {
     for (const auto& value : invariant_args) {
       args_for_body.push_back(value);
     }
-    XLS_ASSIGN_OR_RETURN(loop_state, Run(body, args_for_body, stats_));
+    XLS_ASSIGN_OR_RETURN(loop_state, InterpretFunction(body, args_for_body));
   }
   return SetValueResult(counted_for, loop_state);
 }
@@ -306,7 +280,7 @@ absl::Status IrInterpreter::HandleDynamicCountedFor(
     for (const auto& value : invariant_args) {
       args_for_body.push_back(value);
     }
-    XLS_ASSIGN_OR_RETURN(loop_state, Run(body, args_for_body, stats_));
+    XLS_ASSIGN_OR_RETURN(loop_state, InterpretFunction(body, args_for_body));
 
     index = bits_ops::Add(index, extended_stride);
   }
@@ -480,13 +454,18 @@ absl::Status IrInterpreter::HandleAssert(Assert* assert_op) {
   return SetValueResult(assert_op, Value::Token());
 }
 
+absl::Status IrInterpreter::HandleCover(Cover* cover) {
+  // TODO(rspringer): 2021-05-25: Implement.
+  return absl::OkStatus();
+}
+
 absl::Status IrInterpreter::HandleInvoke(Invoke* invoke) {
   Function* to_apply = invoke->to_apply();
   std::vector<Value> args;
   for (int64_t i = 0; i < to_apply->params().size(); ++i) {
     args.push_back(ResolveAsValue(invoke->operand(i)));
   }
-  XLS_ASSIGN_OR_RETURN(Value result, Run(to_apply, args, stats_));
+  XLS_ASSIGN_OR_RETURN(Value result, InterpretFunction(to_apply, args));
   return SetValueResult(invoke, result);
 }
 
@@ -524,7 +503,7 @@ absl::Status IrInterpreter::HandleMap(Map* map) {
   for (const Value& operand_element :
        ResolveAsValue(map->operand(0)).elements()) {
     XLS_ASSIGN_OR_RETURN(Value result,
-                         Run(to_apply, {operand_element}, stats_));
+                         InterpretFunction(to_apply, {operand_element}));
     results.push_back(result);
   }
   XLS_ASSIGN_OR_RETURN(Value result_array, Value::Array(results));
@@ -601,14 +580,7 @@ absl::Status IrInterpreter::HandleOneHotSel(OneHotSelect* sel) {
 }
 
 absl::Status IrInterpreter::HandleParam(Param* param) {
-  XLS_ASSIGN_OR_RETURN(int64_t index,
-                       param->function_base()->GetParamIndex(param));
-  if (index >= args_.size()) {
-    return absl::InternalError(absl::StrFormat(
-        "Parameter %s at index %d does not exist in args (of length %d)",
-        param->ToString(), index, args_.size()));
-  }
-  return SetValueResult(param, args_[index]);
+  return absl::UnimplementedError("Param not implemented in IrInterpreter");
 }
 
 absl::Status IrInterpreter::HandleReverse(UnOp* reverse) {
@@ -730,23 +702,30 @@ absl::Status IrInterpreter::SetUint64Result(Node* node, uint64_t result) {
 absl::Status IrInterpreter::SetBitsResult(Node* node, const Bits& result) {
   XLS_RET_CHECK(node->GetType()->IsBits());
   XLS_RET_CHECK_EQ(node->BitCountOrDie(), result.bit_count());
-  if (stats_ != nullptr) {
-    stats_->NoteNodeBits(node->ToString(), result);
-  }
   return SetValueResult(node, Value(result));
 }
 
 absl::Status IrInterpreter::SetValueResult(Node* node, Value result) {
-  XLS_VLOG(4) << absl::StreamFormat("%s operands:", node->GetName());
-  for (int64_t i = 0; i < node->operand_count(); ++i) {
-    XLS_VLOG(4) << absl::StreamFormat(
-        "  operand %d (%s): %s", i, node->operand(i)->GetName(),
-        ResolveAsValue(node->operand(i)).ToString());
+  if (XLS_VLOG_IS_ON(4) &&
+      std::all_of(node->operands().begin(), node->operands().end(),
+                  [this](Node* o) { return node_values_.contains(o); })) {
+    XLS_VLOG(4) << absl::StreamFormat("%s operands:", node->GetName());
+    for (int64_t i = 0; i < node->operand_count(); ++i) {
+      XLS_VLOG(4) << absl::StreamFormat(
+          "  operand %d (%s): %s", i, node->operand(i)->GetName(),
+          ResolveAsValue(node->operand(i)).ToString());
+    }
   }
   XLS_VLOG(3) << absl::StreamFormat("Result of %s: %s", node->ToString(),
                                     result.ToString());
+
   XLS_RET_CHECK(!node_values_.contains(node));
-  node_values_[node] = result;
+  if (!ValueConformsToType(result, node->GetType())) {
+    return absl::InternalError(absl::StrFormat(
+        "Expected value %s to match type %s of node %s", result.ToString(),
+        node->GetType()->ToString(), node->GetName()));
+  }
+  node_values_[node] = std::move(result);
   return absl::OkStatus();
 }
 

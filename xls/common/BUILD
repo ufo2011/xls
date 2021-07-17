@@ -48,6 +48,15 @@ cc_test(
 )
 
 cc_library(
+    name = "case_converters",
+    srcs = ["case_converters.cc"],
+    hdrs = ["case_converters.h"],
+    deps = [
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_library(
     name = "casts",
     hdrs = ["casts.h"],
 )
@@ -361,6 +370,7 @@ cc_library(
     name = "xls_gunit_main",
     testonly = True,
     srcs = ["xls_gunit_main.cc"],
+    visibility = ["//xls:xls_utility_users"],
     deps = [
         ":init_xls",
         "@com_google_googletest//:gtest",

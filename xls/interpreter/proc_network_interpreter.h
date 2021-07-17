@@ -31,22 +31,22 @@ namespace xls {
 class ProcNetworkInterpreter {
  public:
   // Creates and returns an proc network interpreter for the given
-  // package. rx_only_queues must contain a queue for each receive-only
+  // package. user_defined_queues must contain a queue for each receive-only
   // channel in the package.
   static absl::StatusOr<std::unique_ptr<ProcNetworkInterpreter>> Create(
       Package* package,
-      std::vector<std::unique_ptr<RxOnlyChannelQueue>>&& rx_only_queues);
+      std::vector<std::unique_ptr<ChannelQueue>>&& user_defined_queues);
 
   // Execute (up to) a single iteration of every proc in the package. In a
   // round-robin fashion each proc is executed until no further progress can be
-  // made. If no conditional send/receive nodes (send_if or receive_if) exist in
-  // the package then calling Tick will execute exactly one iteration for all
-  // procs in the package. If conditional send/receive nodes do exist, then some
-  // procs may be blocked in a state where the iteration is partially
-  // complete. In this case, the call to Tick() will not execute a complete
-  // iteration of the proc. Calling Tick() again will resume these procs from
-  // their partially executed state. Returns an error if no progress can be made
-  // due to a deadlock.
+  // made. If no conditional send/receive nodes exist in the package then
+  // calling Tick will execute exactly one iteration for all procs in the
+  // package. If conditional send/receive nodes do exist, then some procs may be
+  // blocked in a state where the iteration is partially complete. In this case,
+  // the call to Tick() will not execute a complete iteration of the
+  // proc. Calling Tick() again will resume these procs from their partially
+  // executed state. Returns an error if no progress can be made due to a
+  // deadlock.
   absl::Status Tick();
 
   ChannelQueueManager& queue_manager() { return *queue_manager_; }

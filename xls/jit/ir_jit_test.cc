@@ -25,7 +25,7 @@
 #include "xls/common/status/matchers.h"
 #include "xls/common/status/status_macros.h"
 #include "xls/interpreter/channel_queue.h"
-#include "xls/interpreter/ir_evaluator_test.h"
+#include "xls/interpreter/ir_evaluator_test_base.h"
 #include "xls/ir/function_builder.h"
 #include "xls/ir/random_value.h"
 #include "re2/re2.h"
@@ -38,7 +38,7 @@ using status_testing::IsOkAndHolds;
 using status_testing::StatusIs;
 
 INSTANTIATE_TEST_SUITE_P(
-    IrJitTest, IrEvaluatorTest,
+    IrJitTest, IrEvaluatorTestBase,
     testing::Values(IrEvaluatorTestParam(
         [](Function* function,
            const std::vector<Value>& args) -> absl::StatusOr<Value> {
@@ -145,7 +145,7 @@ absl::Status TestPackedBits(std::minstd_rand& bitgen) {
   return absl::OkStatus();
 }
 
-// Tests sanity of PackedBitsViews in the JIT.
+// Smoke test of PackedBitsViews in the JIT.
 TEST(IrJitTest, PackedBits) {
   std::minstd_rand bitgen;
 
@@ -453,6 +453,42 @@ TEST(IrJitTest, Assert) {
                        testing::HasSubstr("the assertion error message")));
 }
 
+TEST(IrJitTest, FunAssert) {
+  Package p("fun_assert_test");
+
+  FunctionBuilder fun_builder("fun", &p);
+  auto x = fun_builder.Param("x", p.GetBitsType(5));
+
+  auto seven = fun_builder.Literal(Value(UBits(7, 5)));
+  auto test = fun_builder.ULe(x, seven);
+
+  auto token = fun_builder.Literal(Value::Token());
+  fun_builder.Assert(token, test, "x is more than 7");
+
+  auto one = fun_builder.Literal(Value(UBits(1, 5)));
+  fun_builder.Add(x, one);
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * fun, fun_builder.Build());
+
+  FunctionBuilder top_builder("top", &p);
+  auto y = top_builder.Param("y", p.GetBitsType(5));
+
+  std::vector<BValue> args = {y};
+  top_builder.Invoke(args, fun);
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * top, top_builder.Build());
+
+  XLS_ASSERT_OK_AND_ASSIGN(auto jit, IrJit::Create(top));
+
+  std::vector<Value> ok_args = {Value(UBits(6, 5))};
+  EXPECT_THAT(jit->Run(ok_args), IsOkAndHolds(Value(UBits(7, 5))));
+
+  std::vector<Value> fail_args = {Value(UBits(8, 5))};
+  EXPECT_THAT(jit->Run(fail_args),
+              StatusIs(absl::StatusCode::kAborted,
+                       testing::HasSubstr("x is more than 7")));
+}
+
 TEST(IrJitTest, TwoAssert) {
   Package p("assert_test");
   FunctionBuilder b("fun", &p);
@@ -496,5 +532,38 @@ TEST(IrJitTest, TwoAssert) {
                        testing::HasSubstr("first assertion error message")));
 }
 
+TEST(IrJitTest, TokenCompareError) {
+  Package p("token_eq");
+  FunctionBuilder b("fun", &p);
+  auto p0 = b.Param("tkn", p.GetTokenType());
+
+  b.Eq(p0, p0);
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, b.Build());
+
+  EXPECT_THAT(IrJit::Create(f),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       testing::HasSubstr("Tokens are incomparable")));
+}
+
+// Make sure the token comparison error is still reported when the token is
+// inside a larger structure.
+TEST(IrJitTest, CompoundTokenCompareError) {
+  Package p("compound_token_eq");
+  FunctionBuilder b("fun", &p);
+
+  auto p0 = b.Param("tkn", p.GetTokenType());
+  BValue two = b.Literal(Value(UBits(2, 32)));
+
+  BValue tup = b.Tuple({p0, two});
+
+  b.Eq(tup, tup);
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, b.Build());
+
+  EXPECT_THAT(IrJit::Create(f),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       testing::HasSubstr("Tokens are incomparable")));
+}
 }  // namespace
 }  // namespace xls

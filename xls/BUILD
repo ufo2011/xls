@@ -36,6 +36,30 @@ package_group(
     packages = ["//..."],
 )
 
+# Users of various XLS utility helpers, e.g. things like logging, testing
+# targets. Some of these will likely be eliminated when logging is
+# no longer XLS specific.
+#
+# We call this out to distinguish it from properly public headers that expose
+# fundamental XLS functionality.
+package_group(
+    name = "xls_utility_users",
+    # Everything utility users can see is also visible internally.
+    includes = [":xls_internal"],
+    packages = ["//..."],
+)
+
+# "Best effort" users are ones that are using some XLS internals
+# (ideally temporarily) and are agreeing to be broken at any
+# time if we can't figure out how to fix them, since we need to
+# be able to evolve XLS innards as necessary.
+package_group(
+    name = "xls_best_effort_users",
+    # Everything best effort users can see is also visible internally.
+    includes = [":xls_internal"],
+    packages = ["//..."],
+)
+
 package(
     default_visibility = [":xls_internal"],
     licenses = ["notice"],  # Apache 2.0

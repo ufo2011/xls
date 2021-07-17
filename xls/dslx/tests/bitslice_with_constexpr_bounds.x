@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-const START = u8:1;
-const LIMIT = u8:9;
-const WIDTH = LIMIT-START;
+const START = s8:1;
+const LIMIT = s8:9;
+const WIDTH = (LIMIT-START) as u32;
 
 fn main(x: u32) -> bits[WIDTH] {
   x[START:LIMIT]
@@ -22,5 +22,5 @@ fn main(x: u32) -> bits[WIDTH] {
 
 #![test]
 fn main_test() {
-  assert_eq(main(u32:0b1010_1010_1), u32:0b1010_1010)
+  assert_eq(main(u32:0b1010_1010_1), u8:0b1010_1010)
 }

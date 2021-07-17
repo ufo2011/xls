@@ -70,7 +70,8 @@ bool NodeMatcher::MatchAndExplain(
     return false;
   }
   if (node->op() != op_) {
-    *listener << " has incorrect op, expected: " << OpToString(op_);
+    *listener << " has incorrect op (" << OpToString(node->op())
+              << "), expected: " << OpToString(op_);
     return false;
   }
 
@@ -303,12 +304,8 @@ static int64_t GetChannelId(const Node* node) {
   switch (node->op()) {
     case Op::kReceive:
       return node->As<::xls::Receive>()->channel_id();
-    case Op::kReceiveIf:
-      return node->As<::xls::ReceiveIf>()->channel_id();
     case Op::kSend:
       return node->As<::xls::Send>()->channel_id();
-    case Op::kSendIf:
-      return node->As<::xls::SendIf>()->channel_id();
     default:
       XLS_LOG(FATAL) << "Node is not a channel node: " << node->ToString();
   }
@@ -338,20 +335,129 @@ void ChannelNodeMatcher::DescribeTo(::std::ostream* os) const {
 
 bool InputPortMatcher::MatchAndExplain(
     const Node* node, ::testing::MatchResultListener* listener) const {
-  return matcher_.MatchAndExplain(node, listener);
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (name_.has_value() && node->GetName() != *name_) {
+    *listener << " has incorrect name, expected: " << *name_;
+    return false;
+  }
+  return true;
 }
 
 void InputPortMatcher::DescribeTo(::std::ostream* os) const {
-  matcher_.DescribeTo(os);
+  if (name_.has_value()) {
+    DescribeToHelper(os, {absl::StrFormat("name=\"%s\"", name_.value())});
+  } else {
+    DescribeToHelper(os, {});
+  }
 }
 
 bool OutputPortMatcher::MatchAndExplain(
     const Node* node, ::testing::MatchResultListener* listener) const {
-  return matcher_.MatchAndExplain(node, listener);
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (name_.has_value() && node->GetName() != *name_) {
+    *listener << " has incorrect name, expected: " << *name_;
+    return false;
+  }
+  return true;
 }
 
 void OutputPortMatcher::DescribeTo(::std::ostream* os) const {
-  matcher_.DescribeTo(os);
+  if (name_.has_value()) {
+    DescribeToHelper(os, {absl::StrFormat("name=\"%s\"", name_.value())});
+  } else {
+    DescribeToHelper(os, {});
+  }
+}
+
+bool RegisterReadMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (register_name_.has_value() &&
+      node->As<xls::RegisterRead>()->register_name() != *register_name_) {
+    *listener << " has incorrect register ("
+              << node->As<xls::RegisterRead>()->register_name()
+              << "), expected: " << *register_name_;
+    return false;
+  }
+  return true;
+}
+
+void RegisterReadMatcher::DescribeTo(::std::ostream* os) const {
+  if (register_name_.has_value()) {
+    DescribeToHelper(
+        os, {absl::StrFormat("register=\"%s\"", register_name_.value())});
+  } else {
+    DescribeToHelper(os, {});
+  }
+}
+
+bool RegisterWriteMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (register_name_.has_value() &&
+      node->As<xls::RegisterWrite>()->register_name() != *register_name_) {
+    *listener << " has incorrect register ("
+              << node->As<xls::RegisterWrite>()->register_name()
+              << "), expected: " << *register_name_;
+    return false;
+  }
+  return true;
+}
+
+void RegisterWriteMatcher::DescribeTo(::std::ostream* os) const {
+  if (register_name_.has_value()) {
+    DescribeToHelper(
+        os, {absl::StrFormat("register=\"%s\"", register_name_.value())});
+  } else {
+    DescribeToHelper(os, {});
+  }
+}
+
+bool RegisterMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  // First match the output of the register. It should be a tuple-index of a
+  // receive operation.
+  if (!d_matcher_.MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (q_matcher_.has_value()) {
+    const std::string& register_name =
+        node->As<::xls::RegisterRead>()->register_name();
+    xls::RegisterWrite* reg_write;
+    for (Node* node : node->function_base()->nodes()) {
+      if (node->Is<::xls::RegisterWrite>() &&
+          node->As<::xls::RegisterWrite>()->register_name() == register_name) {
+        reg_write = node->As<::xls::RegisterWrite>();
+        break;
+      }
+    }
+    if (reg_write == nullptr) {
+      *listener << " has no associated register write operation. IR may be "
+                   "malformed.";
+      return false;
+    }
+
+    if (!q_matcher_->MatchAndExplain(reg_write, listener)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void RegisterMatcher::DescribeTo(::std::ostream* os) const {
+  *os << "register(";
+  if (q_matcher_.has_value()) {
+    q_matcher_->DescribeTo(os);
+  }
+  *os << ")";
 }
 
 }  // namespace op_matchers

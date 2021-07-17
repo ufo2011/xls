@@ -191,9 +191,15 @@ class AstGenerator {
     auto is_ubits = [&](const TypedExpr& e) -> bool { return IsUBits(e.type); };
     return ChooseEnvValue(env, is_ubits);
   }
-  absl::StatusOr<TypedExpr> ChooseEnvValueArray(Env* env) {
-    auto is_array = [&](const TypedExpr& e) -> bool { return IsArray(e.type); };
-    return ChooseEnvValue(env, is_array);
+
+  absl::StatusOr<TypedExpr> ChooseEnvValueArray(
+      Env* env, std::function<bool(ArrayTypeAnnotation*)> take =
+                    [](auto _) { return true; }) {
+    auto predicate = [&](const TypedExpr& e) -> bool {
+      return IsArray(e.type) &&
+             take(dynamic_cast<ArrayTypeAnnotation*>(e.type));
+    };
+    return ChooseEnvValue(env, predicate);
   }
 
   // Chooses a random tuple from the environment (if one exists). 'min_size',
@@ -232,6 +238,9 @@ class AstGenerator {
 
   // Generates a bit_slice_update builtin call.
   absl::StatusOr<TypedExpr> GenerateBitSliceUpdate(Env* env);
+
+  // Generates a slice builtin call.
+  absl::StatusOr<TypedExpr> GenerateArraySlice(Env* env);
 
   // Generate an operand count for a nary (variadic) instruction. lower_limit is
   // the inclusive lower limit of the distribution.
@@ -321,6 +330,12 @@ class AstGenerator {
 
   // Generates a comparison operation AST node.
   absl::StatusOr<TypedExpr> GenerateCompare(Env* env);
+
+  // Generates an Eq or Neq comparison on arrays.
+  absl::StatusOr<TypedExpr> GenerateCompareArray(Env* env);
+
+  // Generates an Eq or Neq comparison on tuples.
+  absl::StatusOr<TypedExpr> GenerateCompareTuple(Env* env);
 
   // Generates a shift operation AST node.
   absl::StatusOr<TypedExpr> GenerateShift(Env* env);
@@ -416,11 +431,12 @@ class AstGenerator {
   // Note: uN[42] is an ArrayTypeAnnotation, and this function will return 42
   // for it, since it's just evaluating-to-int the value in the "dim" field of
   // the ArrayTypeAnnotation.
-  int64_t GetArraySize(ArrayTypeAnnotation* type);
+  int64_t GetArraySize(const ArrayTypeAnnotation* type);
 
   // Gets-or-creates a top level constant with the given value, using the
   // minimum number of bits required to make that constant.
-  ConstRef* GetOrCreateConstRef(int64_t value);
+  ConstRef* GetOrCreateConstRef(
+      int64_t value, absl::optional<int64_t> want_width = absl::nullopt);
 
   template <typename T>
   T RandomSetChoice(const absl::btree_set<T>& choices) {

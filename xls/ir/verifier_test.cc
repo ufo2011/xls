@@ -87,7 +87,23 @@ fn graph(a: bits[16]) -> bits[16] {
   EXPECT_THAT(
       VerifyPackage(p.get()),
       StatusIs(absl::StatusCode::kInternal,
-               HasSubstr("Function or proc with name graph is not unique")));
+               HasSubstr("Function/proc/block with name graph is not unique")));
+}
+
+TEST_F(VerifierTest, NonUniqueFunctionAndBlockName) {
+  std::string input = R"(
+package NonUniqueFunctionName
+
+fn graph(p: bits[42], q: bits[42]) -> bits[42] {
+  and.1: bits[42] = and(p, q)
+  add.2: bits[42] = add(and.1, q)
+  ret sub.3: bits[42] = sub(add.2, add.2)
+}
+
+block graph() {}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(auto p, ParsePackageNoVerify(input));
+  XLS_ASSERT_OK(VerifyPackage(p.get()));
 }
 
 TEST_F(VerifierTest, BinOpOperandTypeMismatch) {
@@ -188,9 +204,9 @@ TEST_F(VerifierTest, ProcMissingReceive) {
   std::string input = R"(
 package test_package
 
-chan ch(bits[32], id=42, kind=streaming, ops=send_receive, metadata="""module_port { flopped: true }""")
+chan ch(bits[32], id=42, kind=streaming, ops=send_receive, flow_control=none, metadata="""module_port { flopped: true }""")
 
-proc my_proc(t: token, s: bits[42], init=45) {
+proc my_proc(t: token, s: bits[32], init=45) {
   send.1: token = send(t, s, channel_id=42)
   next (send.1, s)
 }
@@ -208,9 +224,9 @@ TEST_F(VerifierTest, MultipleSendNodes) {
   std::string input = R"(
 package test_package
 
-chan ch(bits[32], id=42, kind=streaming, ops=send_only, metadata="""module_port { flopped: true }""")
+chan ch(bits[32], id=42, kind=streaming, ops=send_only, flow_control=none, metadata="""module_port { flopped: true }""")
 
-proc my_proc(t: token, s: bits[42], init=45) {
+proc my_proc(t: token, s: bits[32], init=45) {
   send.1: token = send(t, s, channel_id=42)
   send.2: token = send(send.1, s, channel_id=42)
   next (send.2, s)
@@ -228,9 +244,9 @@ TEST_F(VerifierTest, DisconnectedSendNode) {
   std::string input = R"(
 package test_package
 
-chan ch(bits[32], id=42, kind=streaming, ops=send_only, metadata="""module_port { flopped: true }""")
+chan ch(bits[32], id=42, kind=streaming, ops=send_only, flow_control=none, metadata="""module_port { flopped: true }""")
 
-proc my_proc(t: token, s: bits[42], init=45) {
+proc my_proc(t: token, s: bits[32], init=45) {
   after_all.1: token = after_all()
   send.2: token = send(after_all.1, s, channel_id=42)
   next (send.2, s)
@@ -238,18 +254,17 @@ proc my_proc(t: token, s: bits[42], init=45) {
 
 )";
   XLS_ASSERT_OK_AND_ASSIGN(auto p, ParsePackageNoVerify(input));
-  EXPECT_THAT(
-      VerifyPackage(p.get()),
-      StatusIs(absl::StatusCode::kInternal,
-               HasSubstr("Send and receive nodes must be connected to the "
-                         "token parameter via a path of tokens: send.2")));
+  EXPECT_THAT(VerifyPackage(p.get()),
+              StatusIs(absl::StatusCode::kInternal,
+                       HasSubstr("Token-typed nodes must be connected to the "
+                                 "sink token value via a path of tokens")));
 }
 
 TEST_F(VerifierTest, DisconnectedReceiveNode) {
   std::string input = R"(
 package test_package
 
-chan ch(bits[32], id=42, kind=streaming, ops=receive_only, metadata="""module_port { flopped: true }""")
+chan ch(bits[32], id=42, kind=streaming, ops=receive_only, flow_control=none, metadata="""module_port { flopped: true }""")
 
 proc my_proc(t: token, s: bits[42], init=45) {
   receive.1: (token, bits[32]) = receive(t, channel_id=42)
@@ -258,11 +273,10 @@ proc my_proc(t: token, s: bits[42], init=45) {
 
 )";
   XLS_ASSERT_OK_AND_ASSIGN(auto p, ParsePackageNoVerify(input));
-  EXPECT_THAT(
-      VerifyPackage(p.get()),
-      StatusIs(absl::StatusCode::kInternal,
-               HasSubstr("Send and receive nodes must be connected to the "
-                         "next token value via a path of tokens: receive.")));
+  EXPECT_THAT(VerifyPackage(p.get()),
+              StatusIs(absl::StatusCode::kInternal,
+                       HasSubstr("Token-typed nodes must be connected to the "
+                                 "sink token value via a path of tokens")));
 }
 
 TEST_F(VerifierTest, DisconnectedReturnValueInProc) {
@@ -276,19 +290,17 @@ proc my_proc(t: token, s: bits[42], init=45) {
 
 )";
   XLS_ASSERT_OK_AND_ASSIGN(auto p, ParsePackageNoVerify(input));
-  EXPECT_THAT(
-      VerifyPackage(p.get()),
-      StatusIs(
-          absl::StatusCode::kInternal,
-          HasSubstr("Next token value of proc must be connected to the token "
-                    "parameter via a path of tokens")));
+  EXPECT_THAT(VerifyPackage(p.get()),
+              StatusIs(absl::StatusCode::kInternal,
+                       HasSubstr("Token-typed nodes must be connected to the "
+                                 "sink token value via a path of tokens")));
 }
 
 TEST_F(VerifierTest, SendOnReceiveOnlyChannel) {
   std::string input = R"(
 package test_package
 
-chan ch(bits[32], id=42, kind=streaming, ops=receive_only, metadata="""module_port { flopped: true }""")
+chan ch(bits[32], id=42, kind=streaming, ops=receive_only, flow_control=none, metadata="""module_port { flopped: true }""")
 
 proc my_proc(t: token, s: bits[42], init=45) {
   send.1: token = send(t, s, channel_id=42)
@@ -499,6 +511,23 @@ fn top(invariant_1: bits[48], invariant_2: bits[64], stride: bits[33], trip_coun
                HasSubstr(
                    "Operand 2 / stride of dynamic_counted_for should have <= "
                    "the number of bits of the function body index parameter")));
+}
+
+TEST_F(VerifierTest, SimpleBlock) {
+  std::string input = R"(
+package test_package
+
+block my_block(a: bits[32], b: bits[32], out: bits[32]) {
+  a: bits[32] = input_port(name=a)
+  b: bits[32] = input_port(name=b)
+  sum: bits[32] = add(a, b)
+  out: () = output_port(sum, name=out)
+}
+
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(auto p, ParsePackageNoVerify(input));
+  XLS_ASSERT_OK(VerifyPackage(p.get()));
+  XLS_ASSERT_OK(VerifyBlock(FindBlock("my_block", p.get())));
 }
 
 }  // namespace

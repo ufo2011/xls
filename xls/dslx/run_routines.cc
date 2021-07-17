@@ -23,7 +23,7 @@
 #include "xls/dslx/mangle.h"
 #include "xls/dslx/parse_and_typecheck.h"
 #include "xls/dslx/typecheck.h"
-#include "xls/interpreter/ir_interpreter.h"
+#include "xls/interpreter/function_interpreter.h"
 #include "xls/ir/random_value.h"
 
 namespace xls::dslx {
@@ -47,14 +47,17 @@ absl::StatusOr<IrJit*> RunComparator::GetOrCompileJitFunction(
 }
 
 absl::Status RunComparator::RunComparison(
-    Package* ir_package, dslx::Function* f, absl::Span<InterpValue const> args,
+    Package* ir_package, bool requires_implicit_token, dslx::Function* f,
+    absl::Span<InterpValue const> args,
     const SymbolicBindings* symbolic_bindings, const InterpValue& got) {
   XLS_RET_CHECK(ir_package != nullptr);
 
   XLS_ASSIGN_OR_RETURN(
       std::string ir_name,
-      MangleDslxName(f->identifier(), f->GetFreeParametricKeySet(), f->owner(),
-                     symbolic_bindings));
+      MangleDslxName(f->owner()->name(), f->identifier(),
+                     requires_implicit_token ? CallingConvention::kImplicitToken
+                                             : CallingConvention::kTypical,
+                     f->GetFreeParametricKeySet(), symbolic_bindings));
 
   auto get_result = ir_package->GetFunction(ir_name);
 
@@ -71,25 +74,39 @@ absl::Status RunComparator::RunComparison(
 
   xls::Function* ir_function = get_result.value();
 
-  XLS_ASSIGN_OR_RETURN(IrJit * jit,
-                       GetOrCompileJitFunction(ir_name, ir_function));
-
   XLS_ASSIGN_OR_RETURN(std::vector<Value> ir_args,
                        InterpValue::ConvertValuesToIr(args));
+
+  // We need to know if the function-that-we're-doing-a-comparison-for needs an
+  // implicit token.
+  if (requires_implicit_token) {
+    ir_args.insert(ir_args.begin(), Value::Bool(true));
+    ir_args.insert(ir_args.begin(), Value::Token());
+  }
 
   const char* mode_str = nullptr;
   Value ir_result;
   switch (mode_) {
     case CompareMode::kJit: {
+      XLS_ASSIGN_OR_RETURN(IrJit * jit,
+                           GetOrCompileJitFunction(ir_name, ir_function));
       XLS_ASSIGN_OR_RETURN(ir_result, jit->Run(ir_args));
       mode_str = "JIT";
       break;
     }
     case CompareMode::kInterpreter: {
-      XLS_ASSIGN_OR_RETURN(ir_result, IrInterpreter::Run(ir_function, ir_args));
+      XLS_ASSIGN_OR_RETURN(ir_result, InterpretFunction(ir_function, ir_args));
       mode_str = "interpreter";
       break;
     }
+  }
+
+  if (requires_implicit_token) {
+    // Slice off the first value.
+    XLS_RET_CHECK(ir_result.element(0).IsToken());
+    XLS_RET_CHECK_EQ(ir_result.size(), 2);
+    Value real_ir_result = std::move(ir_result.element(1));
+    ir_result = std::move(real_ir_result);
   }
 
   // Convert the interpreter value to an IR value so we can compare it.
@@ -148,10 +165,10 @@ static absl::Status RunQuickCheck(RunComparator* run_comparator,
                                   Package* ir_package, QuickCheck* quickcheck,
                                   TypeInfo* type_info, int64_t seed) {
   Function* fn = quickcheck->f();
-  XLS_ASSIGN_OR_RETURN(
-      std::string ir_name,
-      MangleDslxName(fn->identifier(), fn->GetFreeParametricKeySet(),
-                     fn->owner()));
+  XLS_ASSIGN_OR_RETURN(std::string ir_name,
+                       MangleDslxName(fn->owner()->name(), fn->identifier(),
+                                      CallingConvention::kTypical,
+                                      fn->GetFreeParametricKeySet()));
   XLS_ASSIGN_OR_RETURN(xls::Function * ir_function,
                        ir_package->GetFunction(ir_name));
 
@@ -227,10 +244,10 @@ static absl::Status RunQuickChecksIfJitEnabled(
   return absl::OkStatus();
 }
 
-absl::StatusOr<bool> ParseAndTest(absl::string_view program,
-                                  absl::string_view module_name,
-                                  absl::string_view filename,
-                                  const ParseAndTestOptions& options) {
+absl::StatusOr<TestResult> ParseAndTest(absl::string_view program,
+                                        absl::string_view module_name,
+                                        absl::string_view filename,
+                                        const ParseAndTestOptions& options) {
   int64_t ran = 0;
   int64_t failed = 0;
   int64_t skipped = 0;
@@ -264,14 +281,14 @@ absl::StatusOr<bool> ParseAndTest(absl::string_view program,
       program, filename, module_name, &import_data, options.dslx_paths);
   if (!tm_or.ok()) {
     if (TryPrintError(tm_or.status())) {
-      return true;
+      return TestResult::kSomeFailed;
     }
     return tm_or.status();
   }
 
-  // If not executing tests and quickchecks, then return
+  // If not executing tests and quickchecks, then return vacuous success.
   if (!options.execute) {
-    return false;
+    return TestResult::kAllPassed;
   }
 
   Module* entry_module = tm_or.value().module;
@@ -281,15 +298,30 @@ absl::StatusOr<bool> ParseAndTest(absl::string_view program,
   std::unique_ptr<Package> ir_package;
   Interpreter::PostFnEvalHook post_fn_eval_hook;
   if (options.run_comparator != nullptr) {
-    XLS_ASSIGN_OR_RETURN(ir_package,
-                         ConvertModuleToPackage(entry_module, &import_data,
-                                                /*emit_positions=*/true,
-                                                /*traverse_tests=*/true));
-    post_fn_eval_hook = [&ir_package, &options](
+    absl::StatusOr<std::unique_ptr<Package>> ir_package_or =
+        ConvertModuleToPackage(entry_module, &import_data,
+                               options.convert_options,
+                               /*traverse_tests=*/true);
+    if (!ir_package_or.ok()) {
+      if (TryPrintError(ir_package_or.status())) {
+        return TestResult::kSomeFailed;
+      }
+      return ir_package_or.status();
+    }
+    ir_package = std::move(ir_package_or).value();
+    post_fn_eval_hook = [&ir_package, &import_data, &options](
                             Function* f, absl::Span<const InterpValue> args,
                             const SymbolicBindings* symbolic_bindings,
-                            const InterpValue& got) {
-      return options.run_comparator->RunComparison(ir_package.get(), f, args,
+                            const InterpValue& got) -> absl::Status {
+      absl::optional<bool> requires_implicit_token =
+          import_data.GetRootTypeInfoForNode(f)
+              .value()
+              ->GetRequiresImplicitToken(f);
+      XLS_RET_CHECK(requires_implicit_token.has_value());
+      bool use_implicit_token = options.convert_options.emit_fail_as_assert &&
+                                *requires_implicit_token;
+      return options.run_comparator->RunComparison(ir_package.get(),
+                                                   use_implicit_token, f, args,
                                                    symbolic_bindings, got);
     };
   }
@@ -331,7 +363,7 @@ absl::StatusOr<bool> ParseAndTest(absl::string_view program,
         ir_package.get(), options.seed, handle_error));
   }
 
-  return failed != 0;
+  return failed == 0 ? TestResult::kAllPassed : TestResult::kSomeFailed;
 }
 
 }  // namespace xls::dslx

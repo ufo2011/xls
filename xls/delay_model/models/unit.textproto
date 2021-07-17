@@ -21,6 +21,7 @@ op_models { op: "kAnd" estimator { fixed: 1 } }
 op_models { op: "kAndReduce" estimator { fixed: 1 } }
 op_models { op: "kArray" estimator { fixed: 1 } }
 op_models { op: "kArrayConcat" estimator { fixed: 1 } }
+op_models { op: "kArraySlice" estimator { fixed: 1 } }
 op_models { op: "kBitSlice" estimator { fixed: 1 } }
 op_models { op: "kBitSliceUpdate" estimator { fixed: 1 } }
 op_models { op: "kConcat" estimator { fixed: 1 } }
@@ -68,3 +69,8 @@ op_models { op: "kUMod" estimator { fixed: 1 } }
 op_models { op: "kXor" estimator { fixed: 1 } }
 op_models { op: "kXorReduce" estimator { fixed: 1 } }
 op_models { op: "kZeroExt" estimator { fixed: 1 } }
+
+# Always-free ops.
+op_models { op: "kAssert" estimator { fixed: 0 } }
+op_models { op: "kAfterAll" estimator { fixed: 0 } }
+op_models { op: "kCover" estimator { fixed: 0 } }

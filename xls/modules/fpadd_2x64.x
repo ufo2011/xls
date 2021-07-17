@@ -24,7 +24,7 @@ import xls.modules.apfloat_add_2
 import float64
 
 type F64 = float64::F64;
-fn fpadd_2x64(x: F64, y: F64) -> F64 {
+pub fn fpadd_2x64(x: F64, y: F64) -> F64 {
   apfloat_add_2::add<u32:11, u32:52>(x, y)
 }
 

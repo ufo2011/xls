@@ -39,11 +39,14 @@ namespace xls::dslx {
 class BitsType;
 class TupleType;
 
-// See comment on ConcreteType below.
-// TODO(rspringer): 2020-03-25: Some users of ConcreteTypeDim use it to
-// represent signed values (think array slicing with a negative index). Type
-// dimensions, though, don't make sense as negative values, so we need to find
-// all such uses and convert them to another abstraction.
+// Represents a parametric binding in a ConcreteType, which is either a) a
+// parametric expression or b) evaluated to an InterpValue. When type
+// annotations from the AST are evaluated in type inference, some of the
+// "concrete types" that result from deduction may still be parametric. When the
+// parametric code is instantiated, the concrete types then have concrete
+// `InterpValues` as their dimensions.
+//
+// See comment on `ConcreteType` below for more details.
 class ConcreteTypeDim {
  public:
   using OwnedParametric = std::unique_ptr<ParametricExpression>;
@@ -51,51 +54,20 @@ class ConcreteTypeDim {
   // integral or ParametricExpression variants (a "Variant").
   // An accepted InterpValue input variant must be convertable to a uint64_t.
   using InputVariant = absl::variant<int64_t, InterpValue, OwnedParametric>;
-  using Variant = absl::variant<int64_t, OwnedParametric>;
 
   // Evaluates the given value to a 64-bit quantity.
-  // TODO(rspringer): 2021-03-25: Eliminate the InputVariant...variant. Once
-  // done, consider eliminating the Variant alias.
-  static absl::StatusOr<int64_t> GetAs64Bits(const Variant& variant) {
-    if (absl::holds_alternative<int64_t>(variant)) {
-      return absl::get<int64_t>(variant);
-    }
+  static absl::StatusOr<int64_t> GetAs64Bits(
+      const absl::variant<InterpValue, OwnedParametric>& variant);
+  static absl::StatusOr<int64_t> GetAs64Bits(const InputVariant& variant);
 
-    return absl::InvalidArgumentError(
-        "Can't evaluate a ParametricExpression to an integer.");
+  // Creates a u32 `InterpValue`-based ConcreteTypeDim with the given "value".
+  static ConcreteTypeDim CreateU32(uint32_t value) {
+    return ConcreteTypeDim(InterpValue::MakeU32(value));
   }
 
-  static absl::StatusOr<int64_t> GetAs64Bits(const InputVariant& variant) {
-    if (absl::holds_alternative<InterpValue>(variant)) {
-      return absl::get<InterpValue>(variant).GetBitValueCheckSign();
-    }
+  explicit ConcreteTypeDim(absl::variant<InterpValue, OwnedParametric> value)
+      : value_(std::move(value)) {}
 
-    if (absl::holds_alternative<int64_t>(variant)) {
-      return absl::get<int64_t>(variant);
-    }
-
-    return absl::InvalidArgumentError(
-        "Can't evaluate a ParametricExpression to an integer.");
-  }
-
-  static absl::StatusOr<ConcreteTypeDim> Create(InputVariant variant) {
-    if (absl::holds_alternative<InterpValue>(variant)) {
-      XLS_ASSIGN_OR_RETURN(
-          int64_t int_value,
-          absl::get<InterpValue>(variant).GetBitValueCheckSign());
-      return ConcreteTypeDim(int_value);
-    }
-
-    if (auto ptr = absl::get_if<int64_t>(&variant)) {
-      return ConcreteTypeDim(*ptr);
-    }
-
-    OwnedParametric op = std::move(absl::get<OwnedParametric>(variant));
-    return ConcreteTypeDim(std::move(op));
-  }
-
-  explicit ConcreteTypeDim(const ParametricExpression& value)
-      : value_(value.Clone()) {}
   ConcreteTypeDim(const ConcreteTypeDim& other);
   ConcreteTypeDim& operator=(ConcreteTypeDim&& other) {
     value_ = std::move(other.value_);
@@ -104,16 +76,13 @@ class ConcreteTypeDim {
 
   ConcreteTypeDim Clone() const;
 
+  // Arithmetic operators used in e.g. calculating total bit counts.
   absl::StatusOr<ConcreteTypeDim> Mul(const ConcreteTypeDim& rhs) const;
   absl::StatusOr<ConcreteTypeDim> Add(const ConcreteTypeDim& rhs) const;
 
   // Returns a string representation of this dimension, which is either the
   // integral string or the parametric expression string conversion.
   std::string ToString() const;
-
-  // Returns a Python-style "representation" string that shows the construction
-  // of this value; e.g. "ConcreteTypeDim(42)".
-  std::string ToRepr() const;
 
   bool operator==(const ConcreteTypeDim& other) const;
   bool operator==(
@@ -123,7 +92,9 @@ class ConcreteTypeDim {
     return !(*this == other);
   }
 
-  const Variant& value() const { return value_; }
+  const absl::variant<InterpValue, OwnedParametric>& value() const {
+    return value_;
+  }
 
   bool IsParametric() const {
     return absl::holds_alternative<OwnedParametric>(value_);
@@ -132,9 +103,11 @@ class ConcreteTypeDim {
     return *absl::get<OwnedParametric>(value_);
   }
 
+  // Retrieves the bit value of the underlying InterpValue as an int64_t.
+  absl::StatusOr<int64_t> GetAsInt64() const;
+
  private:
-  explicit ConcreteTypeDim(Variant value) : value_(std::move(value)) {}
-  Variant value_;
+  absl::variant<InterpValue, OwnedParametric> value_;
 };
 
 // Represents a 'concrete' (evaluated) type, as determined by evaluating a
@@ -147,13 +120,13 @@ class ConcreteTypeDim {
 // resolved result.
 //
 // Note: During typechecking the dimension members may be either symbols (like
-// the 'N' in bits[N,3]) or integers. Once parametric symbols are instantiated
-// the symbols (such as 'N') will have resolved into ints, and we will only be
-// dealing with ConcreteTypeDims that hold ints.
+// the 'N' in `bits[N][3]`) or integers. Once parametric symbols are
+// instantiated the symbols (such as 'N') will have resolved into ints, and we
+// will only be dealing with ConcreteTypeDims that hold ints.
 class ConcreteType {
  public:
-  // Creates a "nil tuple" type (a tuple type with no members).
-  static std::unique_ptr<ConcreteType> MakeNil();
+  // Creates a "unit" tuple type (a tuple type with no members).
+  static std::unique_ptr<ConcreteType> MakeUnit();
 
   // Creates a concrete type matching that of the given InterpValue.
   static absl::StatusOr<std::unique_ptr<ConcreteType>> FromInterpValue(
@@ -165,7 +138,6 @@ class ConcreteType {
   bool operator!=(const ConcreteType& other) const { return !(*this == other); }
 
   virtual std::string ToString() const = 0;
-  virtual std::string ToRepr() const { return ToString(); }
 
   // Variation on `ToString()` to be used in user-facing error reporting.
   virtual std::string ToErrorString() const { return ToString(); }
@@ -198,8 +170,15 @@ class ConcreteType {
   // Type equality, but ignores tuple member naming discrepancies.
   bool CompatibleWith(const ConcreteType& other) const;
 
-  bool IsNil() const;
+  bool IsUnit() const;
   bool IsToken() const;
+
+ protected:
+  static std::vector<std::unique_ptr<ConcreteType>> Clone(
+      absl::Span<const std::unique_ptr<ConcreteType>> ts);
+
+  static bool Equal(absl::Span<const std::unique_ptr<ConcreteType>> a,
+                    absl::Span<const std::unique_ptr<ConcreteType>> b);
 };
 
 inline std::ostream& operator<<(std::ostream& os, const ConcreteType& t) {
@@ -226,7 +205,7 @@ class TokenType : public ConcreteType {
   std::string ToString() const override { return "token"; }
   std::vector<ConcreteTypeDim> GetAllDims() const override { return {}; }
   absl::StatusOr<ConcreteTypeDim> GetTotalBitCount() const override {
-    return ConcreteTypeDim::Create(0);
+    return ConcreteTypeDim(InterpValue::MakeU32(0));
   }
   std::string GetDebugTypeName() const override { return "token"; }
 
@@ -242,24 +221,74 @@ class TokenType : public ConcreteType {
   }
 };
 
-// Represents a tuple type.
-//
-// Tuples can have unnamed members or named members. In any case, you can
-// request `tuple_type.GetUnnamedMembers()`.
-//
-// When the members are named the `nominal_type` may refer to the struct
-// definition that led to those named members.
+// Represents a struct type -- these are similar in spirit to "tuples with named
+// fields", but they also identify the nominal struct that they correspond to --
+// things like type comparisons
+class StructType : public ConcreteType {
+ public:
+  // Note: members must correspond to struct_def's members (same length and
+  // order).
+  StructType(std::vector<std::unique_ptr<ConcreteType>> members,
+             StructDef* struct_def);
+
+  absl::StatusOr<std::unique_ptr<ConcreteType>> MapSize(
+      const std::function<absl::StatusOr<ConcreteTypeDim>(ConcreteTypeDim)>& f)
+      const override;
+
+  bool operator==(const ConcreteType& other) const override;
+  std::string ToString() const override;
+  std::vector<ConcreteTypeDim> GetAllDims() const override;
+  absl::StatusOr<ConcreteTypeDim> GetTotalBitCount() const override;
+  std::string GetDebugTypeName() const override { return "struct"; }
+
+  bool HasEnum() const override;
+
+  std::unique_ptr<ConcreteType> CloneToUnique() const override {
+    return absl::make_unique<StructType>(Clone(members_), &struct_def_);
+  }
+
+  // For user-level error reporting, we also note the name of the struct
+  // definition if one is available.
+  std::string ToErrorString() const override;
+
+  // Returns an InvalidArgument error status if this TupleType does not have
+  // named members.
+  absl::StatusOr<std::vector<std::string>> GetMemberNames() const;
+
+  absl::string_view GetMemberName(int64_t i) const {
+    return struct_def_.GetMemberName(i);
+  }
+
+  const ConcreteType& GetMemberType(int64_t i) const { return *members_.at(i); }
+
+  // Returns the index of the member with name "name" -- returns a NotFound
+  // error if the member is not found (i.e. it is generally expected that the
+  // caller knows the name is present), and an InvalidArgument error status if
+  // this TupleType does not have named members.
+  absl::StatusOr<int64_t> GetMemberIndex(absl::string_view name) const;
+
+  absl::optional<const ConcreteType*> GetMemberTypeByName(
+      absl::string_view target) const;
+
+  StructDef& nominal_type() const { return struct_def_; }
+
+  bool HasNamedMember(absl::string_view target) const;
+
+  int64_t size() const { return members_.size(); }
+
+  const std::vector<std::unique_ptr<ConcreteType>>& members() const {
+    return members_;
+  }
+
+ private:
+  std::vector<std::unique_ptr<ConcreteType>> members_;
+  StructDef& struct_def_;
+};
+
+// Represents a tuple type. Tuples have unnamed members.
 class TupleType : public ConcreteType {
  public:
-  using UnnamedMembers = std::vector<std::unique_ptr<ConcreteType>>;
-  struct NamedMember {
-    std::string name;
-    std::unique_ptr<ConcreteType> type;
-  };
-  using NamedMembers = std::vector<NamedMember>;
-  using Members = std::variant<UnnamedMembers, NamedMembers>;
-
-  TupleType(Members members, StructDef* struct_def = nullptr);
+  TupleType(std::vector<std::unique_ptr<ConcreteType>> members);
 
   absl::StatusOr<std::unique_ptr<ConcreteType>> MapSize(
       const std::function<absl::StatusOr<ConcreteTypeDim>(ConcreteTypeDim)>& f)
@@ -271,14 +300,10 @@ class TupleType : public ConcreteType {
   absl::StatusOr<ConcreteTypeDim> GetTotalBitCount() const override;
   std::string GetDebugTypeName() const override { return "tuple"; }
 
-  // For user-level error reporting, we also note the name of the struct
-  // definition if one is available.
-  std::string ToErrorString() const override;
-
   bool HasEnum() const override;
 
   std::unique_ptr<ConcreteType> CloneToUnique() const override {
-    return absl::make_unique<TupleType>(CloneMembers(), struct_def_);
+    return absl::make_unique<TupleType>(Clone(members_));
   }
 
   bool empty() const;
@@ -286,63 +311,14 @@ class TupleType : public ConcreteType {
 
   bool CompatibleWith(const TupleType& other) const;
 
-  bool is_named() const {
-    return absl::holds_alternative<NamedMembers>(members_);
+  ConcreteType& GetMemberType(int64_t i) { return *members_.at(i); }
+  const ConcreteType& GetMemberType(int64_t i) const { return *members_.at(i); }
+  const std::vector<std::unique_ptr<ConcreteType>>& members() const {
+    return members_;
   }
-  StructDef* nominal_type() const { return struct_def_; }
-
-  const Members& members() const { return members_; }
-
-  // Precondition: this TupleType must have named members and i must be <
-  // members().size().
-  const std::string& GetMemberName(int64_t i) const {
-    XLS_CHECK(absl::holds_alternative<NamedMembers>(members_));
-    return absl::get<NamedMembers>(members_).at(i).name;
-  }
-  ConcreteType& GetMemberType(int64_t i) {
-    if (absl::holds_alternative<NamedMembers>(members_)) {
-      return *absl::get<NamedMembers>(members_).at(i).type;
-    } else {
-      return *absl::get<UnnamedMembers>(members_).at(i);
-    }
-  }
-  const ConcreteType& GetMemberType(int64_t i) const {
-    return const_cast<TupleType*>(this)->GetMemberType(i);
-  }
-
-  // Returns an InvalidArgument error status if this TupleType does not have
-  // named members.
-  absl::StatusOr<std::vector<std::string>> GetMemberNames() const;
-
-  // Returns the index of the member with name "name" -- returns a NotFound
-  // error if the member is not found (i.e. it is generally expected that the
-  // caller knows the name is present), and an InvalidArgument error status if
-  // this TupleType does not have named members.
-  absl::StatusOr<int64_t> GetMemberIndex(absl::string_view name) const;
-
-  std::vector<const ConcreteType*> GetUnnamedMembers() const;
-  const ConcreteType& GetUnnamedMember(int64_t i) const {
-    const ConcreteType* result = GetUnnamedMembers()[i];
-    XLS_CHECK(result != nullptr);
-    return *result;
-  }
-
-  absl::optional<const ConcreteType*> GetMemberTypeByName(
-      absl::string_view target) const;
-
-  bool HasNamedMember(absl::string_view target) const;
 
  private:
-  static bool MembersEqual(const UnnamedMembers& a, const UnnamedMembers& b);
-
-  static bool MembersEqual(const NamedMembers& a, const NamedMembers& b);
-
-  static bool MembersEqual(const Members& a, const Members& b);
-
-  Members CloneMembers() const;
-
-  Members members_;
-  StructDef* struct_def_;  // Note: may be null.
+  std::vector<std::unique_ptr<ConcreteType>> members_;
 };
 
 // Represents an array type, with an element type and size.
@@ -439,7 +415,7 @@ class BitsType : public ConcreteType {
   }
 
   BitsType(bool is_signed, int64_t size)
-      : BitsType(is_signed, ConcreteTypeDim::Create(size).value()) {}
+      : BitsType(is_signed, ConcreteTypeDim(InterpValue::MakeU32(size))) {}
   BitsType(bool is_signed, ConcreteTypeDim size)
       : is_signed_(is_signed), size_(std::move(size)) {}
   ~BitsType() override = default;
@@ -455,10 +431,6 @@ class BitsType : public ConcreteType {
     return false;
   }
   std::string ToString() const override;
-  std::string ToRepr() const override {
-    return absl::StrFormat("BitsType(is_signed=%s, size=%s)",
-                           is_signed_ ? "true" : "false", size_.ToRepr());
-  }
   std::string GetDebugTypeName() const override;
   bool HasEnum() const override { return false; }
 
@@ -557,6 +529,9 @@ inline std::unique_ptr<BitsType> CloneToUnique(const BitsType& type) {
 inline std::unique_ptr<TupleType> CloneToUnique(const TupleType& type) {
   return CloneToUniqueInternal(type);
 }
+inline std::unique_ptr<StructType> CloneToUnique(const StructType& type) {
+  return CloneToUniqueInternal(type);
+}
 inline std::unique_ptr<FunctionType> CloneToUnique(const FunctionType& type) {
   return CloneToUniqueInternal(type);
 }
@@ -599,15 +574,6 @@ inline bool IsSBits(const ConcreteType& c) {
 // Returns whether the given type, which should be either a bits or an enum
 // type, is signed.
 absl::StatusOr<bool> IsSigned(const ConcreteType& c);
-
-// Parses the given string (that is expected to come from a
-// ConcreteType::ToString() invocation) back into a ConcreteType object.
-// Trailing text that is not part of the resulting parsed type is left in "s".
-//
-// Returns an error if the string cannot be parsed, and the state of s is not
-// defined (make a defensive copy if s will be used in the case of error).
-absl::StatusOr<std::unique_ptr<ConcreteType>> ConcreteTypeFromString(
-    absl::string_view* s);
 
 }  // namespace xls::dslx
 

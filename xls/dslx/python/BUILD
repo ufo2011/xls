@@ -51,67 +51,12 @@ xls_pybind_extension(
 )
 
 xls_pybind_extension(
-    name = "scanner",
-    srcs = ["scanner.cc"],
-    deps = [
-        ":errors",
-        "@com_google_absl//absl/base",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "//xls/common/status:status_macros",
-        "//xls/common/status:statusor_pybind_caster",
-        "//xls/dslx:ast_builtin_types",
-        "//xls/dslx:pos",
-        "//xls/dslx:scanner",
-    ],
-)
-
-xls_pybind_extension(
-    name = "cpp_pos",
-    srcs = ["cpp_pos.cc"],
-    deps = [
-        "@com_google_absl//absl/base",
-        "//xls/common/status:status_macros",
-        "//xls/common/status:statusor_pybind_caster",
-        "//xls/dslx:pos",
-    ],
-)
-
-xls_pybind_extension(
-    name = "cpp_parametric_expression",
-    srcs = ["cpp_parametric_expression.cc"],
-    deps = [
-        "@com_google_absl//absl/base",
-        "@com_google_absl//absl/strings",
-        "//xls/common/status:status_macros",
-        "//xls/common/status:statusor_pybind_caster",
-        "//xls/dslx:parametric_expression",
-    ],
-)
-
-xls_pybind_extension(
-    name = "cpp_concrete_type",
-    srcs = [
-        "cpp_concrete_type.cc",
-    ],
-    py_deps = [
-    ],
-    deps = [
-        "@com_google_absl//absl/base",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "//xls/common/status:status_macros",
-        "//xls/common/status:statusor_pybind_caster",
-        "//xls/dslx:concrete_type",
-    ],
-)
-
-xls_pybind_extension(
     name = "interp_value",
     srcs = [
         "interp_value.cc",
     ],
     py_deps = [
+        "//xls/ir/python:bits",
     ],
     deps = [
         "@com_google_absl//absl/base",
@@ -129,7 +74,6 @@ xls_pybind_extension(
     srcs = ["interpreter.cc"],
     py_deps = [
         ":interp_value",  # build_cleaner: keep
-        ":cpp_concrete_type",  # build_cleaner: keep
     ],
     deps = [
         ":errors",
@@ -144,11 +88,12 @@ xls_pybind_extension(
         "//xls/dslx:import_routines",
         "//xls/dslx:interp_bindings",
         "//xls/dslx:interpreter",
+        "//xls/dslx:ir_converter",
         "//xls/dslx:parse_and_typecheck",
         "//xls/dslx:parser",
-        "//xls/dslx:scanner",
         "//xls/dslx:symbolic_bindings",
         "//xls/dslx:typecheck",
+        "//xls/ir:ir_parser",
         "//xls/ir/python:wrapper_types",
     ],
 )

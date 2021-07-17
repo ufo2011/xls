@@ -92,12 +92,17 @@ class ModuleBuilder {
   // Emit an XLS assert operation as a SystemVerilog assert statement. If
   // SystemVerilog is not enabled then this is a nop. 'fmt_string' is the
   // format string used to generate the assert. Format string details
-  // described in proc_generator.h.
+  // described in codegen_options.h.
   // TODO(meheff): 2021/2/27 When format string is available at the user level,
   // put the codegen-related documentation in a common place.
   absl::Status EmitAssert(
       xls::Assert* asrt, Expression* condition,
       absl::optional<absl::string_view> fmt_string = absl::nullopt);
+
+  // Emit an XLS cover statement as a SystemVerilog `cover property` statement.
+  // If SystemVerilog is not enabled, then this is a nop. Note that the emitted
+  // statement will have no effect unless a clock is present in the module.
+  absl::Status EmitCover(xls::Cover* cover, Expression* condition);
 
   // Declares a variable with the given name and XLS type. Returns a reference
   // to the variable.
@@ -129,6 +134,9 @@ class ModuleBuilder {
     // reset signal.
     Expression* reset_value;
 
+    // The load enable signal for the register. Can be null.
+    Expression* load_enable;
+
     // Optional XLS type of this register. Can be null.
     Type* xls_type;
   };
@@ -153,13 +161,8 @@ class ModuleBuilder {
                                            int64_t bit_count, Expression* next,
                                            Expression* reset_value = nullptr);
 
-  // Construct an always block to assign values to the registers. Arguments:
-  //   registers: Registers to assign within this block.
-  //   load_enable: Optional load enable signal. The register is loaded only if
-  //     this signal is asserted.
-  //   rst: Optional reset signal.
-  absl::Status AssignRegisters(absl::Span<const Register> registers,
-                               Expression* load_enable = nullptr);
+  // Construct an always block to assign values to the registers.
+  absl::Status AssignRegisters(absl::Span<const Register> registers);
 
   // For organization (not functionality) the module is divided into several
   // sections. The emitted module has the following structure:
@@ -204,6 +207,7 @@ class ModuleBuilder {
   ModuleSection* constants_section() const { return constants_section_; }
   ModuleSection* input_section() const { return input_section_; }
   ModuleSection* assert_section() const { return assert_section_; }
+  ModuleSection* cover_section() const { return cover_section_; }
   ModuleSection* output_section() const { return output_section_; }
 
   // Return clock signal. Is null if the module does not have a clock.
@@ -324,7 +328,9 @@ class ModuleBuilder {
   std::vector<ModuleSection*> declaration_subsections_;
   std::vector<ModuleSection*> assignment_subsections_;
   ModuleSection* assert_section_;
+  ModuleSection* cover_section_;
   AlwaysComb* assert_always_comb_ = nullptr;
+  AlwaysComb* cover_always_comb_ = nullptr;
   ModuleSection* output_section_;
 
   // Verilog functions defined inside the module. Map is indexed by the function

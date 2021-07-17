@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // 32-bit floating point routines.
-import xls.dslx.stdlib.apfloat
+import apfloat
 
 // TODO(rspringer): Make u32:8 and u32:23 symbolic constants. Currently, such
 // constants don't propagate correctly and fail to resolve when in parametric
@@ -38,6 +38,9 @@ pub fn unflatten(f: u32) -> F32 { apfloat::unflatten<u32:8, u32:23>(f) }
 pub fn cast_from_fixed<NUM_SRC_BITS:u32>(s: sN[NUM_SRC_BITS]) -> F32 {
   apfloat::cast_from_fixed<u32:8, u32:23>(s)
 }
+pub fn cast_to_fixed<NUM_DST_BITS:u32>(to_cast: F32) -> sN[NUM_DST_BITS] {
+  apfloat::cast_to_fixed<NUM_DST_BITS, u32:8, u32:23>(to_cast)
+}
 pub fn subnormals_to_zero(f: F32) -> F32 {
   apfloat::subnormals_to_zero<u32:8, u32:23>(f)
 }
@@ -46,6 +49,26 @@ pub fn is_inf(f: F32) -> u1 { apfloat::is_inf<u32:8, u32:23>(f) }
 pub fn is_nan(f: F32) -> u1 { apfloat::is_nan<u32:8, u32:23>(f) }
 pub fn is_zero_or_subnormal(f: F32) -> u1 {
   apfloat::is_zero_or_subnormal<u32:8, u32:23>(f)
+}
+
+pub fn eq_2(x: F32, y: F32) -> u1 {
+  apfloat::eq_2<u32:8, u32:23>(x, y)
+}
+
+pub fn gt_2(x: F32, y: F32) -> u1 {
+  apfloat::gt_2<u32:8, u32:23>(x, y)
+}
+
+pub fn gte_2(x: F32, y: F32) -> u1 {
+  apfloat::gte_2<u32:8, u32:23>(x, y)
+}
+
+pub fn lt_2(x: F32, y: F32) -> u1 {
+  apfloat::lt_2<u32:8, u32:23>(x, y)
+}
+
+pub fn lte_2(x: F32, y: F32) -> u1 {
+  apfloat::lte_2<u32:8, u32:23>(x, y)
 }
 
 pub fn normalize(sign:u1, exp: u8, sfd_with_hidden: u24) -> F32 {
@@ -134,7 +157,7 @@ pub fn fixed_fraction(input_float: F32) -> u23 {
   let input_significand_magnitude: u25 = u2:0b01 ++ input_float.sfd;
   let unbiased_input_float_exponent: u9 = unbiased_exponent(input_float);
 
-  let input_fixed_magnitude: u25 = match sgt(unbiased_input_float_exponent, u9:0) {
+  let input_fixed_magnitude: u25 = match unbiased_input_float_exponent as s9 > s9:0 {
     true =>
       let significand_left_shift = unbiased_input_float_exponent as u3;
       input_significand_magnitude << (significand_left_shift as u25),

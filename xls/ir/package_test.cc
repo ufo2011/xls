@@ -17,6 +17,8 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "xls/common/status/matchers.h"
+#include "xls/ir/channel.h"
+#include "xls/ir/function_builder.h"
 #include "xls/ir/ir_test_base.h"
 #include "xls/ir/type.h"
 #include "xls/ir/xls_type.pb.h"
@@ -32,7 +34,7 @@ using testing::HasSubstr;
 class PackageTest : public IrTestBase {};
 
 TEST_F(PackageTest, GetBitsTypes) {
-  Package p("my_package");
+  Package p(TestName());
   EXPECT_FALSE(p.IsOwnedType(nullptr));
 
   BitsType* bits42 = p.GetBitsType(42);
@@ -56,7 +58,7 @@ TEST_F(PackageTest, GetBitsTypes) {
 }
 
 TEST_F(PackageTest, GetArrayTypes) {
-  Package p("my_package");
+  Package p(TestName());
   BitsType* bits42 = p.GetBitsType(42);
 
   ArrayType* array_bits42 = p.GetArrayType(123, bits42);
@@ -79,7 +81,7 @@ TEST_F(PackageTest, GetArrayTypes) {
 }
 
 TEST_F(PackageTest, GetTupleTypes) {
-  Package p("my_package");
+  Package p(TestName());
   BitsType* bits42 = p.GetBitsType(42);
   BitsType* bits86 = p.GetBitsType(86);
 
@@ -109,7 +111,7 @@ TEST_F(PackageTest, GetTupleTypes) {
 }
 
 TEST_F(PackageTest, GetTokenType) {
-  Package p("my_package");
+  Package p(TestName());
 
   TokenType* my_token_type = p.GetTokenType();
   EXPECT_TRUE(my_token_type->IsToken());
@@ -119,7 +121,7 @@ TEST_F(PackageTest, GetTokenType) {
 }
 
 TEST_F(PackageTest, MapTypeFromOtherPackageBitsTypes) {
-  Package p("my_package");
+  Package p(TestName());
   Package other_package("other_package");
 
   BitsType* bits42_p = p.GetBitsType(42);
@@ -156,7 +158,7 @@ TEST_F(PackageTest, MapTypeFromOtherPackageBitsTypes) {
 }
 
 TEST_F(PackageTest, MapTypeFromOtherPackageArrayTypes) {
-  Package p("my_package");
+  Package p(TestName());
   BitsType* bits42 = p.GetBitsType(42);
   Package other_package("other_package");
 
@@ -186,7 +188,7 @@ TEST_F(PackageTest, MapTypeFromOtherPackageArrayTypes) {
 }
 
 TEST_F(PackageTest, MapTypeFromOtherPackageTupleTypes) {
-  Package p("my_package");
+  Package p(TestName());
   Package other_package("other_package");
   BitsType* bits42_p = p.GetBitsType(42);
   BitsType* bits86_p = p.GetBitsType(86);
@@ -235,7 +237,7 @@ TEST_F(PackageTest, MapTypeFromOtherPackageTupleTypes) {
 }
 
 TEST_F(PackageTest, MapTypeFromOtherPackageTokenType) {
-  Package p("my_package");
+  Package p(TestName());
   Package other_package("other_package");
 
   TokenType* my_token_type_p = p.GetTokenType();
@@ -285,7 +287,7 @@ fn main(a: bits[32]) -> bits[32] {
 }
 
 TEST_F(PackageTest, CreateStreamingChannel) {
-  Package p("my_package");
+  Package p(TestName());
 
   XLS_ASSERT_OK_AND_ASSIGN(
       Channel * ch0, p.CreateStreamingChannel("ch0", ChannelOps::kSendOnly,
@@ -311,7 +313,8 @@ TEST_F(PackageTest, CreateStreamingChannel) {
   XLS_ASSERT_OK_AND_ASSIGN(
       Channel * ch42, p.CreateStreamingChannel(
                           "ch42", ChannelOps::kReceiveOnly, p.GetBitsType(44),
-                          /*initial_values=*/{}, ChannelMetadataProto(), 42));
+                          /*initial_values=*/{}, FlowControl::kReadyValid,
+                          ChannelMetadataProto(), 42));
   EXPECT_EQ(ch42->id(), 42);
   EXPECT_THAT(p.GetChannel(42), IsOkAndHolds(ch42));
 
@@ -322,9 +325,10 @@ TEST_F(PackageTest, CreateStreamingChannel) {
   EXPECT_EQ(ch43->id(), 43);
 
   // Creating a channel with a duplicate ID is an error.
-  EXPECT_THAT(p.CreateStreamingChannel("ch1_dup", ChannelOps::kReceiveOnly,
-                                       p.GetBitsType(44), /*initial_values=*/{},
-                                       ChannelMetadataProto(), 1)
+  EXPECT_THAT(p.CreateStreamingChannel(
+                   "ch1_dup", ChannelOps::kReceiveOnly, p.GetBitsType(44),
+                   /*initial_values=*/{}, FlowControl::kReadyValid,
+                   ChannelMetadataProto(), 1)
                   .status(),
               StatusIs(absl::StatusCode::kInternal,
                        HasSubstr("Channel already exists with id 1")));
@@ -334,6 +338,41 @@ TEST_F(PackageTest, CreateStreamingChannel) {
                                           HasSubstr("No channel with id 123")));
 
   EXPECT_THAT(p.channels(), ElementsAre(ch0, ch1, ch42, ch43));
+}
+
+TEST_F(PackageTest, ChannelRemoval) {
+  Package p(TestName());
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Channel * ch0, p.CreateStreamingChannel("ch0", ChannelOps::kSendOnly,
+                                              p.GetBitsType(32)));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Channel * ch1, p.CreateStreamingChannel("ch1", ChannelOps::kSendOnly,
+                                              p.GetBitsType(32)));
+  TokenlessProcBuilder b(TestName(), Value::Tuple({}), "tkn", "st", &p);
+  b.Send(ch0, b.Literal(Value(UBits(42, 32))));
+  XLS_ASSERT_OK(b.Build(b.GetStateParam()).status());
+
+  Package other_p("other");
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Channel * other_ch,
+      other_p.CreateStreamingChannel("other", ChannelOps::kSendOnly,
+                                     other_p.GetBitsType(32)));
+
+  EXPECT_EQ(p.channels().size(), 2);
+
+  XLS_ASSERT_OK(p.RemoveChannel(ch1));
+  EXPECT_EQ(p.channels().size(), 1);
+
+  // Removing a channel not owned by the package.
+  EXPECT_THAT(p.RemoveChannel(other_ch),
+              StatusIs(absl::StatusCode::kInternal,
+                       HasSubstr("Channel not owned by package")));
+
+  // Removing a channel in use should be an error.
+  EXPECT_THAT(p.RemoveChannel(ch0),
+              StatusIs(absl::StatusCode::kInternal,
+                       HasSubstr("cannot be removed because it is used")));
 }
 
 }  // namespace

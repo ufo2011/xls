@@ -21,77 +21,7 @@
 namespace xls::dslx {
 namespace {
 
-// Vector of various types to use in table-based tests.
-std::vector<std::unique_ptr<ConcreteType>> GetConcreteTypesForTesting() {
-  std::vector<std::unique_ptr<ConcreteType>> results;
-  results.push_back(BitsType::MakeU1());
-  results.push_back(BitsType::MakeU8());
-  results.push_back(BitsType::MakeU32());
-  results.push_back(std::make_unique<BitsType>(true, 8));
-  results.push_back(std::make_unique<BitsType>(true, 32));
-  results.push_back(ConcreteType::MakeNil());
-  {
-    // (u32,)
-    std::vector<std::unique_ptr<ConcreteType>> tuple_members;
-    tuple_members.push_back(BitsType::MakeU32());
-    results.push_back(absl::make_unique<TupleType>(std::move(tuple_members)));
-  }
-  {
-    // (u32, s8)
-    std::vector<std::unique_ptr<ConcreteType>> tuple_members;
-    tuple_members.push_back(BitsType::MakeU32());
-    tuple_members.push_back(std::make_unique<BitsType>(true, 8));
-    results.push_back(absl::make_unique<TupleType>(std::move(tuple_members)));
-  }
-  // u32[8]
-  results.push_back(std::make_unique<ArrayType>(
-      BitsType::MakeU32(), ConcreteTypeDim::Create(8).value()));
-  // (u32, u8)[7]
-  {
-    std::vector<std::unique_ptr<ConcreteType>> tuple_members;
-    tuple_members.push_back(BitsType::MakeU32());
-    tuple_members.push_back(std::make_unique<BitsType>(true, 8));
-    auto elem_type = absl::make_unique<TupleType>(std::move(tuple_members));
-    results.push_back(std::make_unique<ArrayType>(
-        std::move(elem_type), ConcreteTypeDim::Create(7).value()));
-  }
-  return results;
-}
-
-TEST(ConcreteTypeTest, RoundTripToString) {
-  for (auto& ct : GetConcreteTypesForTesting()) {
-    std::string s = ct->ToString();
-    absl::string_view sv = s;
-    XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<ConcreteType> parsed,
-                             ConcreteTypeFromString(&sv));
-    EXPECT_EQ(*parsed, *ct);
-    EXPECT_EQ(sv, "");
-  }
-}
-
-TEST(ConcreteTypeTest, ConcreteTypeFromString) {
-  absl::string_view s = "(uN[32], uN[8]) trailing";
-  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<ConcreteType> ct,
-                           ConcreteTypeFromString(&s));
-  EXPECT_EQ(ct->ToString(), "(uN[32], uN[8])");
-  EXPECT_EQ(s, " trailing");
-}
-
-TEST(ConcreteTypeTest, ConcreteTypeFromStringNamedTuple) {
-  absl::string_view s = "(x: uN[32], y: uN[8]) trailing";
-  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<ConcreteType> ct,
-                           ConcreteTypeFromString(&s));
-  EXPECT_EQ(ct->ToString(), "(x: uN[32], y: uN[8])");
-  EXPECT_EQ(s, " trailing");
-}
-
-TEST(ConcreteTypeTest, ConcreteTypeFromStringNamedTupleParametric) {
-  absl::string_view s = "(x: uN[M], y: uN[N]) trailing";
-  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<ConcreteType> ct,
-                           ConcreteTypeFromString(&s));
-  EXPECT_EQ(ct->ToString(), "(x: uN[M], y: uN[N])");
-  EXPECT_EQ(s, " trailing");
-}
+using status_testing::IsOkAndHolds;
 
 TEST(ConcreteTypeTest, TestU32) {
   BitsType t(false, 32);
@@ -99,13 +29,13 @@ TEST(ConcreteTypeTest, TestU32) {
   EXPECT_EQ("ubits", t.GetDebugTypeName());
   EXPECT_EQ(false, t.is_signed());
   EXPECT_EQ(false, t.HasEnum());
-  EXPECT_EQ(std::vector<ConcreteTypeDim>{ConcreteTypeDim::Create(32).value()},
+  EXPECT_EQ(std::vector<ConcreteTypeDim>{ConcreteTypeDim::CreateU32(32)},
             t.GetAllDims());
   EXPECT_EQ(t, *t.ToUBits());
   EXPECT_TRUE(IsUBits(t));
 }
 
-TEST(ConcreteTypeTest, TestNil) {
+TEST(ConcreteTypeTest, TestUnit) {
   TupleType t({});
   EXPECT_EQ("()", t.ToString());
   EXPECT_EQ("tuple", t.GetDebugTypeName());
@@ -116,12 +46,12 @@ TEST(ConcreteTypeTest, TestNil) {
 
 TEST(ConcreteTypeTest, TestArrayOfU32) {
   ArrayType t(absl::make_unique<BitsType>(false, 32),
-              ConcreteTypeDim::Create(1).value());
+              ConcreteTypeDim::CreateU32(1));
   EXPECT_EQ("uN[32][1]", t.ToString());
   EXPECT_EQ("array", t.GetDebugTypeName());
   EXPECT_EQ(false, t.HasEnum());
-  std::vector<ConcreteTypeDim> want_dims = {
-      ConcreteTypeDim::Create(1).value(), ConcreteTypeDim::Create(32).value()};
+  std::vector<ConcreteTypeDim> want_dims = {ConcreteTypeDim::CreateU32(1),
+                                            ConcreteTypeDim::CreateU32(32)};
   EXPECT_EQ(want_dims, t.GetAllDims());
   EXPECT_FALSE(IsUBits(t));
 }
@@ -135,9 +65,9 @@ TEST(ConcreteTypeTest, TestEnum) {
                             /*values=*/std::vector<EnumMember>{},
                             /*is_public=*/false);
   my_enum->set_definer(e);
-  EnumType t(e, /*bit_count=*/ConcreteTypeDim::Create(2).value());
+  EnumType t(e, /*bit_count=*/ConcreteTypeDim::CreateU32(2));
   EXPECT_TRUE(t.HasEnum());
-  EXPECT_EQ(std::vector<ConcreteTypeDim>{ConcreteTypeDim::Create(2).value()},
+  EXPECT_EQ(std::vector<ConcreteTypeDim>{ConcreteTypeDim::CreateU32(2)},
             t.GetAllDims());
   EXPECT_EQ("MyEnum", t.ToString());
 }
@@ -149,6 +79,31 @@ TEST(ConcreteTypeTest, FunctionTypeU32ToS32) {
   EXPECT_EQ(1, t.GetParams().size());
   EXPECT_EQ("uN[32]", t.GetParams()[0]->ToString());
   EXPECT_EQ("sN[32]", t.return_type().ToString());
+}
+
+TEST(ConcreteTypeDimTest, TestArithmetic) {
+  auto two = ConcreteTypeDim::CreateU32(2);
+  auto three = ConcreteTypeDim::CreateU32(3);
+  auto five = ConcreteTypeDim::CreateU32(5);
+  auto six = ConcreteTypeDim::CreateU32(6);
+  EXPECT_THAT(two.Add(three), IsOkAndHolds(five));
+  EXPECT_THAT(two.Mul(three), IsOkAndHolds(six));
+
+  const Pos fake_pos;
+  const Span fake_span(fake_pos, fake_pos);
+  ConcreteTypeDim m(absl::make_unique<ParametricSymbol>("M", fake_span));
+  ConcreteTypeDim n(absl::make_unique<ParametricSymbol>("N", fake_span));
+
+  // M+N
+  ConcreteTypeDim mpn(absl::make_unique<ParametricAdd>(m.parametric().Clone(),
+                                                       n.parametric().Clone()));
+
+  // M*N
+  ConcreteTypeDim mtn(absl::make_unique<ParametricMul>(m.parametric().Clone(),
+                                                       n.parametric().Clone()));
+
+  EXPECT_THAT(m.Add(n), IsOkAndHolds(mpn));
+  EXPECT_THAT(m.Mul(n), IsOkAndHolds(mtn));
 }
 
 }  // namespace

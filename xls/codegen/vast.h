@@ -448,7 +448,10 @@ class Expression : public VastNode {
   using VastNode::VastNode;
 
   virtual bool IsLiteral() const { return false; }
+
+  // Returns true if the node is a literal with the given unsigned value.
   virtual bool IsLiteralWithValue(int64_t target) const { return false; }
+
   Literal* AsLiteralOrDie();
 
   virtual bool IsLogicRef() const { return false; }
@@ -1007,6 +1010,28 @@ class Assert : public Statement {
   std::string error_message_;
 };
 
+// Represents a SystemVerilog cover properly statement, such as
+//
+// ```
+//   cover property <name> (clk, <condition>)
+// ```
+//
+// Such a statement will cause the simulator to count the number of times that
+// the given condition is true, and associate that value with <name>.
+class Cover : public Statement {
+ public:
+  Cover(LogicRef* clk, Expression* condition, absl::string_view label,
+        VerilogFile* file)
+      : Statement(file), clk_(clk), condition_(condition), label_(label) {}
+
+  std::string Emit() const override;
+
+ private:
+  LogicRef* clk_;
+  Expression* condition_;
+  std::string label_;
+};
+
 // Places a comment in statement position (we can think of comments as
 // meaningless expression statements that do nothing).
 class Comment : public Statement {
@@ -1230,6 +1255,8 @@ class ModuleSection : public VastNode {
 };
 
 // Represents a module port.
+// TODO(meheff): 2021/04/26 Sink this data type into Module as a nested type and
+// remove superfluous proto conversion (or even remove it).
 struct Port {
   static Port FromProto(const PortProto& proto, VerilogFile* file);
 
@@ -1240,15 +1267,6 @@ struct Port {
   Direction direction;
   Def* wire;
 };
-
-// Helper for converting a sequence of ports to a string; e.g. for debugging /
-// logging.
-std::string PortsToString(absl::Span<const Port> ports);
-
-// Returns the flattened number of input/output bits required to represent the
-// port set.
-absl::StatusOr<int64_t> GetInputBits(absl::Span<const Port> ports);
-absl::StatusOr<int64_t> GetOutputBits(absl::Span<const Port> ports);
 
 // Represents a module definition.
 class Module : public VastNode {
@@ -1538,6 +1556,11 @@ class VerilogFile {
   DataType* UnpackedArrayType(int64_t element_bit_count,
                               absl::Span<const int64_t> dims,
                               bool is_signed = false);
+
+  verilog::Cover* Cover(LogicRef* clk, Expression* condition,
+                        absl::string_view label) {
+    return Make<verilog::Cover>(clk, condition, label);
+  }
 
   // Returns whether this is a SystemVerilog or Verilog file.
   bool use_system_verilog() const { return use_system_verilog_; }

@@ -12,61 +12,79 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("//xls/build_rules:build_defs.bzl", "dslx_test")
+load(
+    "//xls/build_rules:xls_build_defs.bzl",
+    "xls_dslx_module_library",
+    "xls_dslx_test",
+)
 
 package(
     default_visibility = ["//xls:xls_internal"],
     licenses = ["notice"],  # Apache 2.0
 )
 
-filegroup(
-    name = "dslx_std_lib",
-    srcs = ["std.x"],
+xls_dslx_module_library(
+    name = "std_dslx_module",
+    src = "std.x",
 )
 
-dslx_test(
-    name = "std",
-    srcs = ["std.x"],
-    # No meaningful entry point to convert.
-    convert_ir = False,
+xls_dslx_test(
+    name = "std_dslx_test",
+    dep = "std_dslx_module",
 )
 
-dslx_test(
-    name = "acm_random",
-    srcs = ["acm_random.x"],
-    # No meaningful entry point to convert.
-    convert_ir = False,
+xls_dslx_module_library(
+    name = "acm_random_dslx_module",
+    src = "acm_random.x",
 )
 
-dslx_test(
-    name = "apfloat",
-    srcs = ["apfloat.x"],
-    # No meaningful entry point to convert.
-    convert_ir = False,
+xls_dslx_test(
+    name = "acm_random_dslx_test",
+    dep = "acm_random_dslx_module",
 )
 
-dslx_test(
-    name = "bfloat16",
-    srcs = ["bfloat16.x"],
-    # No meaningful entry point to convert.
-    convert_ir = False,
+xls_dslx_module_library(
+    name = "apfloat_dslx_module",
+    src = "apfloat.x",
 )
 
-dslx_test(
-    name = "float32",
-    srcs = ["float32.x"],
-    # No meaningful entry point to convert.
-    convert_ir = False,
+xls_dslx_test(
+    name = "apfloat_dslx_test",
+    dep = "apfloat_dslx_module",
 )
 
-dslx_test(
-    name = "float64",
-    srcs = ["float64.x"],
-    # No meaningful entry point to convert.
-    convert_ir = False,
+xls_dslx_module_library(
+    name = "bfloat16_dslx_module",
+    src = "bfloat16.x",
+)
+
+xls_dslx_test(
+    name = "bfloat16_dslx_test",
+    dep = "bfloat16_dslx_module",
+)
+
+xls_dslx_module_library(
+    name = "float32_dslx_module",
+    src = "float32.x",
+)
+
+xls_dslx_test(
+    name = "float32_dslx_test",
+    dep = "float32_dslx_module",
+)
+
+xls_dslx_module_library(
+    name = "float64_dslx_module",
+    src = "float64.x",
+)
+
+xls_dslx_test(
+    name = "float64_dslx_test",
+    dep = "float64_dslx_module",
 )
 
 filegroup(
     name = "x_files",
     srcs = glob(["*.x"]),
+    visibility = ["//xls:xls_users"],
 )

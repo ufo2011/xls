@@ -18,26 +18,18 @@ package(
 )
 
 cc_library(
-    name = "ir_interpreter_stats",
-    srcs = ["ir_interpreter_stats.cc"],
-    hdrs = ["ir_interpreter_stats.h"],
-    deps = [
-        "@com_google_absl//absl/base:core_headers",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/strings:str_format",
-        "@com_google_absl//absl/synchronization",
-        "@com_google_absl//absl/types:optional",
-        "//xls/ir",
-        "//xls/ir:ternary",
-    ],
-)
-
-cc_library(
     name = "ir_interpreter",
-    srcs = ["ir_interpreter.cc"],
-    hdrs = ["ir_interpreter.h"],
+    srcs = [
+        "block_interpreter.cc",
+        "function_interpreter.cc",
+        "ir_interpreter.cc",
+    ],
+    hdrs = [
+        "block_interpreter.h",
+        "function_interpreter.h",
+        "ir_interpreter.h",
+    ],
     deps = [
-        ":ir_interpreter_stats",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -51,6 +43,8 @@ cc_library(
         "//xls/ir:bits_ops",
         "//xls/ir:function_builder",
         "//xls/ir:keyword_args",
+        "//xls/ir:value",
+        "//xls/ir:value_helpers",
     ],
 )
 
@@ -59,7 +53,7 @@ cc_test(
     size = "small",
     srcs = ["ir_interpreter_test.cc"],
     deps = [
-        ":ir_evaluator_test",
+        ":ir_evaluator_test_base",
         ":ir_interpreter",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
@@ -140,11 +134,24 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "block_interpreter_test",
+    srcs = ["block_interpreter_test.cc"],
+    deps = [
+        ":ir_interpreter",
+        "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
+        "//xls/ir:function_builder",
+        "//xls/ir:ir_test_base",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
 cc_library(
-    name = "ir_evaluator_test",
+    name = "ir_evaluator_test_base",
     testonly = True,
-    srcs = ["ir_evaluator_test.cc"],
-    hdrs = ["ir_evaluator_test.h"],
+    srcs = ["ir_evaluator_test_base.cc"],
+    hdrs = ["ir_evaluator_test_base.h"],
     deps = [
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",

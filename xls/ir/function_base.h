@@ -121,14 +121,9 @@ class FunctionBase {
   absl::StatusOr<Node*> GetNode(absl::string_view standard_node_name);
 
   // Removes the node from the function. The node must have no users.
-  //
-  // If remove_param_ok is false and a parameter is given for removal, this
-  // method will return an error -- this is a sanity check against removing
-  // parameters and changing the type signature when that is not intended.
-  //
-  // Warning: if you remove a parameter node via this method (with
-  // remove_param_ok), you will change the function type signature.
-  absl::Status RemoveNode(Node* n, bool remove_param_ok = false);
+  // Warning: if you remove a parameter node via this method you will change the
+  // function type signature.
+  virtual absl::Status RemoveNode(Node* n);
 
   // Visit all nodes (including nodes not reachable from the root) in the
   // function using the given visitor.
@@ -141,12 +136,14 @@ class FunctionBase {
     return node_name_uniquer_.GetSanitizedUniqueName(name);
   }
 
-  // Returns whether this FunctionBase is a function or proc.
+  // Returns whether this FunctionBase is a function, proc, or block.
   bool IsFunction() const;
   bool IsProc() const;
+  bool IsBlock() const;
 
   Function* AsFunctionOrDie();
   Proc* AsProcOrDie();
+  Block* AsBlockOrDie();
 
   // Returns true if the given node has implicit uses in the function. Implicit
   // uses include return values of functions and the recurrent token/state in

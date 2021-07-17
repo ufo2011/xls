@@ -21,11 +21,13 @@ nav:
     - Formal: 'solvers.md'
   - DSLX:
     - Reference: 'dslx_reference.md'
+    - Standard Library : 'dslx_std.md'
     - Examples:
       - CRC32: 'dslx_intro_example1.md'
       - FP adder: 'fpadd_example.md'
       - Prefix Scan: 'dslx_intro_example3.md'
-    - Fuzzer: "fuzzer.md"
+    - Floating Point: 'floating_point.md'
+    - Fuzzer: 'fuzzer.md'
   - Code Generation:
     - VAST: 'vast.md'
   - Tools:
@@ -61,3 +63,11 @@ markdown_extensions:
         # dslx-bad indicates the code block is showing something wrong.
         - name: dslx-bad
           lang: rust
+  - pymdownx.arithmatex:
+        generic: true
+extra_javascript:
+  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+plugins:
+  - exclude:
+      glob: BUILD

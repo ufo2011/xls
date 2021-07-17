@@ -39,6 +39,64 @@ fn umul_test() {
   ()
 }
 
+// Calculate x / y one bit at a time. This is an alternative to using
+// the division operator '/' which may not synthesize nicely.
+pub fn iterative_div<N: u32, DN: u32 = N * u32:2>(x: uN[N], y: uN[N]) -> uN[N] {
+
+  let init_shift_amount = ((N as uN[N])-uN[N]:1);
+  let x = x as uN[DN];
+
+  let (_, _, _, div_result) =
+  for (idx, (shifted_y, shifted_index_bit, running_product, running_result))
+      in range(u32:0, N) {
+
+    // Increment running_result by current power of 2
+    // if the prodcut running_result * y < x.
+    let inc_running_result = running_result | shifted_index_bit;
+    let inc_running_product = running_product + shifted_y;
+    let (running_result, running_product) =
+            (inc_running_result, inc_running_product)
+        if (inc_running_product <= x)
+        else (running_result, running_product);
+
+    // Shift to next (lower) power of 2.
+    let shifted_y = shifted_y >> uN[N]:1;
+    let shifted_index_bit = shifted_index_bit >> uN[N]:1;
+
+    (shifted_y, shifted_index_bit, running_product, running_result)
+  } (( (y as uN[DN]) << (init_shift_amount as uN[DN]),
+       uN[N]:1 << init_shift_amount,
+       uN[DN]:0,
+       uN[N]:0));
+
+  div_result
+}
+
+#![test]
+fn iterative_div_test () {
+  // Power of 2.
+  let _ = assert_eq(u4:0, iterative_div(u4:8, u4:15));
+  let _ = assert_eq(u4:1, iterative_div(u4:8, u4:8));
+  let _ = assert_eq(u4:2, iterative_div(u4:8, u4:4));
+  let _ = assert_eq(u4:4, iterative_div(u4:8, u4:2));
+  let _ = assert_eq(u4:8, iterative_div(u4:8, u4:1));
+  let _ = assert_eq(u4:8 / u4:0, iterative_div(u4:8, u4:0));
+  let _ = assert_eq(u4:15, iterative_div(u4:8, u4:0));
+
+  // Non-powers-of-2.
+  let _ = assert_eq(u32:6, iterative_div(u32:18, u32:3));
+  let _ = assert_eq(u32:6, iterative_div(u32:36, u32:6));
+  let _ = assert_eq(u32:6, iterative_div(u32:48, u32:8));
+  let _ = assert_eq(u32:20, iterative_div(u32:900, u32:45));
+
+  // Results w/ remainder.
+  let _ = assert_eq(u32:6, iterative_div(u32:20, u32:3));
+  let _ = assert_eq(u32:6, iterative_div(u32:41, u32:6));
+  let _ = assert_eq(u32:6, iterative_div(u32:55, u32:8));
+  let _ = assert_eq(u32:20, iterative_div(u32:944, u32:45));
+  ()
+}
+
 // Returns the value of x-1 with saturation at 0.
 pub fn bounded_minus_1<N: u32>(x: uN[N]) -> uN[N] {
   x if x == uN[N]:0 else x-uN[N]:1
@@ -146,6 +204,7 @@ fn ceil_div_test() {
   _
 }
 
+// Returns `x` rounded up to the nearest multiple of `y`.
 pub fn round_up_to_nearest(x: u32, y: u32) -> u32 {
   (ceil_div(x, y) * y) as u32
 }
@@ -157,6 +216,7 @@ fn round_up_to_nearest_test() {
   _
 }
 
+// Rotate `x` right by `y` bits.
 pub fn rrot<N: u32>(x: bits[N], y: bits[N]) -> bits[N] {
   (x >> y) | (x << ((N as bits[N]) - y))
 }
@@ -166,6 +226,19 @@ fn rrot_test() {
   let _ = assert_eq(bits[3]:0b101, rrot(bits[3]:0b011, bits[3]:1));
   let _ = assert_eq(bits[3]:0b011, rrot(bits[3]:0b110, bits[3]:1));
   _
+}
+
+// Returns the maximum of two signed integers.
+pub fn smax<N: u32>(x: sN[N], y: sN[N]) -> sN[N] {
+  x if x > y else y
+}
+
+#![test]
+fn smax_test() {
+  let _ = assert_eq(s2:0, smax(s2:0, s2:0));
+  let _ = assert_eq(s2:1, smax(s2:-1, s2:1));
+  let _ = assert_eq(s7:-3, smax(s7:-3, s7:-6));
+  ()
 }
 
 // Returns the maximum of two unsigned integers.
@@ -292,5 +365,69 @@ pub fn mask_bits<X: u32>() -> bits[X] {
 fn mask_bits_test() {
   let _ = assert_eq(u8:0xff, mask_bits<u32:8>());
   let _ = assert_eq(u13:0x1fff, mask_bits<u32:13>());
+  ()
+}
+
+// "Explicit signed comparison" helpers for working with unsigned values, can be
+// a bit more convenient and a bit more explicit intent than doing casting of
+// left hand side and right hand side.
+
+pub fn sge<N: u32>(x: uN[N], y: uN[N]) -> bool { (x as sN[N]) >= (y as sN[N]) }
+pub fn sgt<N: u32>(x: uN[N], y: uN[N]) -> bool { (x as sN[N]) >  (y as sN[N]) }
+pub fn sle<N: u32>(x: uN[N], y: uN[N]) -> bool { (x as sN[N]) <= (y as sN[N]) }
+pub fn slt<N: u32>(x: uN[N], y: uN[N]) -> bool { (x as sN[N]) <  (y as sN[N]) }
+
+#![test]
+fn test_scmps() {
+  let _ = assert_eq(sge(u2:3, u2:1), false);
+  let _ = assert_eq(sgt(u2:3, u2:1), false);
+  let _ = assert_eq(sle(u2:3, u2:1), true);
+  let _ = assert_eq(slt(u2:3, u2:1), true);
+  ()
+}
+
+// Performs integer exponentiation as in Hacker's Delight, section 11-3.
+// Only nonnegative exponents are allowed, hence the uN parameter for spow.
+pub fn upow<N: u32>(x: uN[N], n: uN[N]) -> uN[N] {
+  let result = uN[N]:1;
+  let p = x;
+
+  let work = for (i, (n, p, result)) in range(u32:0, N) {
+    let result = result * p if (n & uN[N]:1) == uN[N]:1 else result;
+
+    (n >> 1, p * p, result)
+  }((n, p, result));
+  work[2]
+}
+
+pub fn spow<N: u32>(x: sN[N], n: uN[N]) -> sN[N] {
+  let result = sN[N]:1;
+  let p = x;
+
+  let work = for (i, (n, p, result)) : (u32, (uN[N], sN[N], sN[N])) in range(u32:0, N) {
+    let result = result * p if (n & uN[N]:1) == uN[N]:1 else result;
+
+    (n >> uN[N]:1, p * p, result)
+  }((n, p, result));
+  work[2]
+}
+
+#![test]
+fn test_upow() {
+  let _ = assert_eq(upow(u32:2, u32:2), u32:4);
+  let _ = assert_eq(upow(u32:2, u32:20), u32:0x100000);
+  let _ = assert_eq(upow(u32:3, u32:20), u32:0xcfd41b91);
+  let _ = assert_eq(upow(u32:1, u32:20), u32:0x1);
+  let _ = assert_eq(upow(u32:1, u32:20), u32:0x1);
+  ()
+}
+
+#![test]
+fn test_spow() {
+  let _ = assert_eq(spow(s32:2, u32:2), s32:4);
+  let _ = assert_eq(spow(s32:2, u32:20), s32:0x100000);
+  let _ = assert_eq(spow(s32:3, u32:20), s32:0xcfd41b91);
+  let _ = assert_eq(spow(s32:1, u32:20), s32:0x1);
+  let _ = assert_eq(spow(s32:1, u32:20), s32:0x1);
   ()
 }

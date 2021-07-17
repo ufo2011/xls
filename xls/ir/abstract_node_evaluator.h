@@ -74,6 +74,8 @@ absl::StatusOr<typename AbstractEvaluatorT::Vector> AbstractEvaluate(
       return default_handler(node);
     case Op::kAssert:
       return default_handler(node);
+    case Op::kCover:
+      return default_handler(node);
     case Op::kBitSlice: {
       XLS_RETURN_IF_ERROR(check_operand_count(1));
       BitSlice* bit_slice = node->As<BitSlice>();
@@ -87,11 +89,7 @@ absl::StatusOr<typename AbstractEvaluatorT::Vector> AbstractEvaluate(
       return evaluator->BitSliceUpdate(operands[0], operands[1], operands[2]);
     case Op::kReceive:
       return default_handler(node);
-    case Op::kReceiveIf:
-      return default_handler(node);
     case Op::kSend:
-      return default_handler(node);
-    case Op::kSendIf:
       return default_handler(node);
     case Op::kConcat:
       return evaluator->Concat(operands);
@@ -110,10 +108,14 @@ absl::StatusOr<typename AbstractEvaluatorT::Vector> AbstractEvaluate(
     case Op::kEq:
       XLS_RETURN_IF_ERROR(check_operand_count(2));
       return Vector({evaluator->Equals(operands[0], operands[1])});
+    case Op::kGate:
+      return default_handler(node);
     case Op::kIdentity:
       XLS_RETURN_IF_ERROR(check_operand_count(1));
       return operands[0];
     case Op::kInvoke:
+      return default_handler(node);
+    case Op::kInputPort:
       return default_handler(node);
     case Op::kLiteral: {
       XLS_RETURN_IF_ERROR(check_operand_count(0));
@@ -156,7 +158,13 @@ absl::StatusOr<typename AbstractEvaluatorT::Vector> AbstractEvaluate(
       return evaluator->BitwiseOr(operands);
     case Op::kOrReduce:
       return evaluator->OrReduce(operands[0]);
+    case Op::kOutputPort:
+      return default_handler(node);
     case Op::kParam:
+      return default_handler(node);
+    case Op::kRegisterRead:
+      return default_handler(node);
+    case Op::kRegisterWrite:
       return default_handler(node);
     case Op::kReverse: {
       XLS_RETURN_IF_ERROR(check_operand_count(1));

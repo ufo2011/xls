@@ -14,7 +14,7 @@
 
 # Reference interpreter executor for XLS syntax.
 
-# pytype test and library
+# pytype tests are present in this file
 
 load("@xls_pip_deps//:requirements.bzl", "requirement")
 
@@ -29,36 +29,7 @@ py_test(
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
-        "//xls/dslx/python:interp_value",
-        "//xls/ir/python:bits",
-        "@com_google_absl_py//absl/testing:absltest",
-    ],
-)
-
-py_library(
-    name = "jit_comparison",
-    srcs = ["jit_comparison.py"],
-    srcs_version = "PY3",
-    deps = [
-        "//xls/dslx:bit_helpers",
-        "//xls/dslx/python:cpp_concrete_type",
-        "//xls/dslx/python:interp_value",
-        "//xls/ir/python:bits",
-        "//xls/ir/python:number_parser",
-        "//xls/ir/python:value",
-    ],
-)
-
-py_test(
-    name = "jit_comparison_test",
-    srcs = ["jit_comparison_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
-    deps = [
-        ":jit_comparison",
-        "//xls/dslx/python:interp_value",
-        "//xls/ir/python:bits",
-        "//xls/ir/python:value",
+        "//xls/dslx/python:interpreter",
         "@com_google_absl_py//absl/testing:absltest",
     ],
 )
@@ -72,7 +43,6 @@ py_test(
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
-        requirement("pyfakefs"),  # unittest
         "//xls/common:runfiles",
         "//xls/common:test_base",
         "//xls/dslx/python:interpreter",

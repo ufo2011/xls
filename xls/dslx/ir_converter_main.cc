@@ -32,6 +32,12 @@ ABSL_FLAG(std::string, entry, "",
 ABSL_FLAG(std::string, dslx_path, "",
           "Additional paths to search for modules (colon delimited).");
 
+// TODO(https://github.com/google/xls/issues/232): 2021-04-28 Make "true" the
+// default, requires us to wrap up entry points so they don't need the "implicit
+// token" calling convention.
+ABSL_FLAG(bool, emit_fail_as_assert, false,
+          "Feature flag for emitting fail!() in the DSL as an assert IR op.");
+
 namespace xls::dslx {
 namespace {
 
@@ -76,8 +82,8 @@ absl::StatusOr<std::string> PathToName(absl::string_view path) {
 
 absl::Status RealMain(absl::string_view path,
                       absl::optional<absl::string_view> entry,
-                      absl::Span<const std::string> dslx_paths,
-                      bool* printed_error) {
+                      absl::Span<const std::filesystem::path> dslx_paths,
+                      bool emit_fail_as_assert, bool* printed_error) {
   XLS_ASSIGN_OR_RETURN(std::string text, GetFileContents(path));
 
   XLS_ASSIGN_OR_RETURN(std::string module_name, PathToName(path));
@@ -92,17 +98,21 @@ absl::Status RealMain(absl::string_view path,
     *printed_error = TryPrintError(type_info_or.status());
     return type_info_or.status();
   }
-  TypeInfo* type_info = type_info_or.value();
 
+  const ConvertOptions convert_options = {
+      .emit_positions = true,
+      .emit_fail_as_assert = emit_fail_as_assert,
+  };
   std::string converted;
   if (entry.has_value()) {
     XLS_ASSIGN_OR_RETURN(
-        converted, ConvertOneFunction(module.get(), entry.value(), type_info,
-                                      /*import_data=*/&import_data,
-                                      /*symbolic_bindings=*/nullptr,
-                                      /*emit_positions=*/true));
+        converted,
+        ConvertOneFunction(module.get(), entry.value(),
+                           /*import_data=*/&import_data,
+                           /*symbolic_bindings=*/nullptr, convert_options));
   } else {
-    XLS_ASSIGN_OR_RETURN(converted, ConvertModule(module.get(), &import_data));
+    XLS_ASSIGN_OR_RETURN(
+        converted, ConvertModule(module.get(), &import_data, convert_options));
   }
   std::cout << converted;
 
@@ -121,14 +131,22 @@ int main(int argc, char* argv[]) {
                     << "`; want " << argv[0] << " <input-file>";
   }
   std::string dslx_path = absl::GetFlag(FLAGS_dslx_path);
-  std::vector<std::string> dslx_paths = absl::StrSplit(dslx_path, ':');
+  std::vector<std::string> dslx_path_strs = absl::StrSplit(dslx_path, ':');
+
+  std::vector<std::filesystem::path> dslx_paths;
+  dslx_paths.reserve(dslx_path_strs.size());
+  for (const auto& path : dslx_path_strs) {
+    dslx_paths.push_back(std::filesystem::path(path));
+  }
+
   absl::optional<std::string> entry;
   if (!absl::GetFlag(FLAGS_entry).empty()) {
     entry = absl::GetFlag(FLAGS_entry);
   }
+  bool emit_fail_as_assert = absl::GetFlag(FLAGS_emit_fail_as_assert);
   bool printed_error = false;
-  absl::Status status =
-      xls::dslx::RealMain(args[0], entry, dslx_paths, &printed_error);
+  absl::Status status = xls::dslx::RealMain(
+      args[0], entry, dslx_paths, emit_fail_as_assert, &printed_error);
   if (printed_error) {
     return EXIT_FAILURE;
   }

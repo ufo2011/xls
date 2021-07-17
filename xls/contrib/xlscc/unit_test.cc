@@ -29,21 +29,37 @@ void XlsccTestBase::Run(const absl::flat_hash_map<std::string, uint64_t>& args,
   RunAndExpectEq(args, expected, ir, false, false, loc);
 }
 
+void XlsccTestBase::Run(
+    const absl::flat_hash_map<std::string, xls::Value>& args,
+    xls::Value expected, absl::string_view cpp_source,
+    xabsl::SourceLocation loc, std::vector<absl::string_view> clang_argv) {
+  testing::ScopedTrace trace(loc.file_name(), loc.line(), "Run failed");
+  XLS_ASSERT_OK_AND_ASSIGN(std::string ir,
+                           SourceToIr(cpp_source, nullptr, clang_argv));
+  RunAndExpectEq(args, expected, ir, false, false, loc);
+}
+
 absl::Status XlsccTestBase::ScanFile(absl::string_view cpp_src,
                                      std::vector<absl::string_view> argv) {
+  translator_ = absl::make_unique<xlscc::Translator>();
+
+  return ScanFile(cpp_src, argv, translator_.get());
+}
+
+/* static */ absl::Status XlsccTestBase::ScanFile(
+    absl::string_view cpp_src, std::vector<absl::string_view> argv,
+    xlscc::Translator* translator) {
   XLS_ASSIGN_OR_RETURN(xls::TempFile temp,
                        xls::TempFile::CreateWithContent(cpp_src, ".cc"));
 
   std::string ps = temp.path();
 
-  translator_ = absl::make_unique<xlscc::Translator>();
-
   absl::Status ret;
   argv.push_back("-Werror");
   argv.push_back("-Wall");
   argv.push_back("-Wno-unknown-pragmas");
-  XLS_RETURN_IF_ERROR(translator_->SelectTop("my_package"));
-  XLS_RETURN_IF_ERROR(translator_->ScanFile(
+  XLS_RETURN_IF_ERROR(translator->SelectTop("my_package"));
+  XLS_RETURN_IF_ERROR(translator->ScanFile(
       temp.path().c_str(), argv.empty()
                                ? absl::Span<absl::string_view>()
                                : absl::MakeSpan(&argv[0], argv.size())));
@@ -107,7 +123,7 @@ void XlsccTestBase::IOTest(std::string content, std::list<IOOpTest> inputs,
   }
 
   XLS_ASSERT_OK_AND_ASSIGN(xls::Value actual,
-                           xls::IrInterpreter::RunKwargs(entry, args));
+                           xls::InterpretFunctionKwargs(entry, args));
   ASSERT_TRUE(actual.IsTuple());
   XLS_ASSERT_OK_AND_ASSIGN(std::vector<xls::Value> returns,
                            actual.GetElements());
@@ -167,23 +183,23 @@ void XlsccTestBase::ProcTest(
   XLS_ASSERT_OK(ScanFile(content));
 
   xls::Package package("my_package");
-  XLS_ASSERT_OK_AND_ASSIGN(
-      xls::Proc * proc,
-      translator_->GenerateIR_Block(&package, block_spec,
-                                    xlscc::XLSChannelMode::kAllStreaming));
+  XLS_ASSERT_OK_AND_ASSIGN(xls::Proc * proc,
+                           translator_->GenerateIR_Block(&package, block_spec));
 
-  std::vector<std::unique_ptr<xls::RxOnlyChannelQueue>> rx_only_queues;
-
-  for (auto [ch_name, values] : inputs_by_channel) {
-    XLS_ASSERT_OK_AND_ASSIGN(xls::Channel * ch_dir,
-                             package.GetChannel(ch_name));
-    rx_only_queues.push_back(absl::make_unique<xls::FixedRxOnlyChannelQueue>(
-        ch_dir, &package, values));
-  }
+  std::vector<std::unique_ptr<xls::ChannelQueue>> queues;
 
   XLS_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<xls::ChannelQueueManager> queue_manager,
-      xls::ChannelQueueManager::Create(std::move(rx_only_queues), &package));
+      xls::ChannelQueueManager::Create(/*user_defined_queues=*/{}, &package));
+
+  // Enqueue all inputs.
+  for (auto [ch_name, values] : inputs_by_channel) {
+    XLS_ASSERT_OK_AND_ASSIGN(xls::ChannelQueue * queue,
+                             queue_manager->GetQueueByName(ch_name));
+    for (const xls::Value& value : values) {
+      XLS_ASSERT_OK(queue->Enqueue(value));
+    }
+  }
 
   xls::ProcInterpreter interpreter(proc, queue_manager.get());
   ASSERT_THAT(

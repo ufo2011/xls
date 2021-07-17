@@ -57,12 +57,14 @@ cc_library(
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
         "//xls/common:math_util",
         "//xls/common/logging",
         "//xls/common/status:status_macros",
         "//xls/ir",
         "//xls/ir:abstract_evaluator",
         "//xls/ir:abstract_node_evaluator",
+        "//xls/ir:bits_ops",
         "//xls/ir:function_builder",
         "//xls/ir:type",
     ],
@@ -71,7 +73,7 @@ cc_library(
 cc_test(
     name = "booleanifier_test",
     srcs = ["booleanifier_test.cc"],
-    data = ["//xls/examples:crc32_opt_ir"],
+    data = ["//xls/examples:crc32.opt.ir"],
     # 2021-01-29: //xls/tools/booleanifier_test --gtest_list_tests
     # shows 4
     shard_count = 4,
@@ -276,6 +278,9 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:variant",
+        "//xls/common:proto_adaptor_utils",
+        "//xls/common/file:filesystem",
+        "//xls/common/file:temp_directory",
         "//xls/common/logging",
         "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
@@ -348,6 +353,29 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/synchronization",
         "//xls/common/file:filesystem",
+    ],
+)
+
+cc_library(
+    name = "testbench_builder",
+    hdrs = ["testbench_builder.h"],
+    deps = [
+        ":testbench",
+        ":testbench_builder_helpers",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/types:optional",
+    ],
+)
+
+cc_library(
+    name = "testbench_builder_helpers",
+    hdrs = ["testbench_builder_helpers.h"],
+    deps = [
+        "@com_google_absl//absl/random",
+        "@com_google_absl//absl/random:distributions",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "//xls/common/logging",
     ],
 )
 
@@ -501,6 +529,9 @@ cc_binary(
         "//xls/common/logging",
         "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
+        "//xls/dslx:ir_converter",
+        "//xls/dslx:mangle",
+        "//xls/dslx:parse_and_typecheck",
         "//xls/interpreter:ir_interpreter",
         "//xls/ir:ir_parser",
         "//xls/ir:random_value",
@@ -574,11 +605,27 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "opt",
+    srcs = ["opt.cc"],
+    hdrs = ["opt.h"],
+    deps = [
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "//xls/dslx:ir_converter",
+        "//xls/dslx:parse_and_typecheck",
+        "//xls/ir:ir_parser",
+        "//xls/passes",
+        "//xls/passes:standard_pipeline",
+    ],
+)
+
 cc_binary(
     name = "opt_main",
     srcs = ["opt_main.cc"],
     visibility = ["//xls:xls_users"],
     deps = [
+        ":opt",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings:str_format",
         "//xls/common:init_xls",
@@ -889,6 +936,7 @@ py_test(
         "@com_google_absl_py//absl/testing:absltest",
         "//xls/common:runfiles",
         "//xls/common:test_base",
+        "//xls/ir/python:ir_parser",
     ],
 )
 
@@ -984,5 +1032,43 @@ cc_binary(
         "//xls/scheduling:pipeline_schedule",
         "//xls/scheduling:scheduling_pass",
         "@linenoise",
+    ],
+)
+
+cc_binary(
+    name = "delay_info_main",
+    srcs = ["delay_info_main.cc"],
+    deps = [
+        ":opt",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:str_format",
+        "//xls/common:init_xls",
+        "//xls/common/file:filesystem",
+        "//xls/common/logging",
+        "//xls/common/status:status_macros",
+        "//xls/delay_model:analyze_critical_path",
+        "//xls/delay_model:delay_estimator",
+        "//xls/delay_model:delay_estimators",
+        "//xls/ir",
+        "//xls/ir:ir_parser",
+        "//xls/passes",
+        "//xls/passes:standard_pipeline",
+        "//xls/scheduling:extract_stage",
+        "//xls/scheduling:pipeline_schedule",
+        "//xls/scheduling:pipeline_schedule_cc_proto",
+    ],
+)
+
+py_test(
+    name = "delay_info_main_test",
+    srcs = ["delay_info_main_test.py"],
+    data = [
+        ":delay_info_main",
+    ],
+    python_version = "PY3",
+    srcs_version = "PY3",
+    deps = [
+        "//xls/common:runfiles",
+        "//xls/common:test_base",
     ],
 )

@@ -75,12 +75,12 @@ TEST(IrMatchersTest, Basic) {
   EXPECT_THAT(Explain(y.node(), m::Type("bits[123]")),
               HasSubstr("has incorrect type, expected: bits[123]"));
   EXPECT_THAT(Explain(y.node(), m::Add()),
-              HasSubstr("has incorrect op, expected: add"));
+              HasSubstr("has incorrect op (param), expected: add"));
 
   EXPECT_THAT(Explain(f->return_value(), m::Add(m::Param())),
               HasSubstr("has too many operands (got 2, want 1)"));
   EXPECT_THAT(Explain(f->return_value(), m::Add(m::Add(), _)),
-              HasSubstr("has incorrect op, expected: add"));
+              HasSubstr("has incorrect op (sub), expected: add"));
 }
 
 TEST(IrMatchersTest, BitSlice) {
@@ -280,13 +280,15 @@ TEST(IrMatchersTest, ReductionOps) {
 TEST(IrMatchersTest, SendOps) {
   Package p("p");
   XLS_ASSERT_OK_AND_ASSIGN(
-      Channel * ch42, p.CreateStreamingChannel(
-                          "ch42", ChannelOps ::kSendReceive, p.GetBitsType(32),
-                          {}, ChannelMetadataProto(), 42));
+      Channel * ch42,
+      p.CreateStreamingChannel("ch42", ChannelOps ::kSendReceive,
+                               p.GetBitsType(32), {}, FlowControl::kReadyValid,
+                               ChannelMetadataProto(), 42));
   XLS_ASSERT_OK_AND_ASSIGN(
       Channel * ch123,
-      p.CreatePortChannel("ch123", ChannelOps::kSendReceive, p.GetBitsType(32),
-                          ChannelMetadataProto(), 123));
+      p.CreateStreamingChannel("ch123", ChannelOps::kSendReceive,
+                               p.GetBitsType(32), {}, FlowControl::kReadyValid,
+                               ChannelMetadataProto(), 123));
 
   ProcBuilder b("proc", Value(UBits(333, 32)), "my_token", "my_state", &p);
   auto send = b.Send(ch42, b.GetTokenParam(), {b.GetStateParam()});
@@ -300,23 +302,25 @@ TEST(IrMatchersTest, SendOps) {
   EXPECT_THAT(send.node(), m::Send(m::Name("my_token"), {m::Name("my_state")},
                                    m::Channel(42)));
 
-  EXPECT_THAT(send_if.node(), m::SendIf());
-  EXPECT_THAT(send_if.node(), m::SendIf(m::Channel(123)));
+  EXPECT_THAT(send_if.node(), m::Send());
+  EXPECT_THAT(send_if.node(), m::Send(m::Channel(123)));
   EXPECT_THAT(send_if.node(),
-              m::SendIf(m::Name("my_token"), m::Literal(),
-                        {m::Name("my_state")}, m::Channel(123)));
+              m::Send(m::Name("my_token"), {m::Name("my_state")}, m::Literal(),
+                      m::Channel(123)));
 }
 
 TEST(IrMatchersTest, ReceiveOps) {
   Package p("p");
   XLS_ASSERT_OK_AND_ASSIGN(
-      Channel * ch42, p.CreateStreamingChannel(
-                          "ch42", ChannelOps ::kSendReceive, p.GetBitsType(32),
-                          {}, ChannelMetadataProto(), 42));
+      Channel * ch42,
+      p.CreateStreamingChannel("ch42", ChannelOps ::kSendReceive,
+                               p.GetBitsType(32), {}, FlowControl::kReadyValid,
+                               ChannelMetadataProto(), 42));
   XLS_ASSERT_OK_AND_ASSIGN(
       Channel * ch123,
-      p.CreatePortChannel("ch123", ChannelOps::kSendReceive, p.GetBitsType(32),
-                          ChannelMetadataProto(), 123));
+      p.CreateStreamingChannel("ch123", ChannelOps::kSendReceive,
+                               p.GetBitsType(32), {}, FlowControl::kReadyValid,
+                               ChannelMetadataProto(), 123));
 
   ProcBuilder b("proc", Value(UBits(333, 32)), "my_token", "my_state", &p);
   auto receive = b.Receive(ch42, b.GetTokenParam());
@@ -334,11 +338,12 @@ TEST(IrMatchersTest, ReceiveOps) {
   EXPECT_THAT(receive.node(), m::Receive(m::Name("my_token"),
                                          m::Channel(ChannelKind::kStreaming)));
 
-  EXPECT_THAT(receive_if.node(), m::ReceiveIf());
-  EXPECT_THAT(receive_if.node(), m::ReceiveIf(m::Channel(123)));
-  EXPECT_THAT(receive_if.node(), m::ReceiveIf(m::Name("my_token"), m::Literal(),
-                                              m::Channel("ch123")));
-  EXPECT_THAT(receive_if.node(), m::ReceiveIf(m::Channel(ChannelKind::kPort)));
+  EXPECT_THAT(receive_if.node(), m::Receive());
+  EXPECT_THAT(receive_if.node(), m::Receive(m::Channel(123)));
+  EXPECT_THAT(receive_if.node(), m::Receive(m::Name("my_token"), m::Literal(),
+                                            m::Channel("ch123")));
+  EXPECT_THAT(receive_if.node(),
+              m::Receive(m::Channel(ChannelKind::kStreaming)));
 
   // Mismatch conditions.
   EXPECT_THAT(Explain(receive.node(), m::Receive(m::Channel(444))),
@@ -346,53 +351,64 @@ TEST(IrMatchersTest, ReceiveOps) {
   EXPECT_THAT(Explain(receive.node(), m::Receive(m::Channel("foobar"))),
               HasSubstr("has incorrect name (ch42), expected: foobar"));
   EXPECT_THAT(
-      Explain(receive.node(), m::Receive(m::Channel(ChannelKind::kRegister))),
-      HasSubstr(" has incorrect kind (streaming), expected: register"));
+      Explain(receive.node(),
+              m::Receive(m::Channel(ChannelKind::kSingleValue))),
+      HasSubstr(" has incorrect kind (streaming), expected: single_value"));
 }
 
 TEST(IrMatchersTest, PortMatcher) {
   Package p("p");
-  XLS_ASSERT_OK_AND_ASSIGN(
-      Channel * x_ch,
-      p.CreatePortChannel("x", ChannelOps::kReceiveOnly, p.GetBitsType(32),
-                          ChannelMetadataProto(), 42));
-  XLS_ASSERT_OK_AND_ASSIGN(
-      Channel * y_ch,
-      p.CreatePortChannel("y", ChannelOps::kReceiveOnly, p.GetBitsType(32),
-                          ChannelMetadataProto(), 43));
-  XLS_ASSERT_OK_AND_ASSIGN(
-      Channel * out_ch,
-      p.CreatePortChannel("out", ChannelOps::kSendOnly, p.GetBitsType(32),
-                          ChannelMetadataProto(), 44));
-  XLS_ASSERT_OK_AND_ASSIGN(
-      Channel * z_ch,
-      p.CreateStreamingChannel("z", ChannelOps::kSendReceive, p.GetBitsType(32),
-                               {}, ChannelMetadataProto(), 45));
-
-  TokenlessProcBuilder b("proc", Value(UBits(333, 32)), "my_token", "my_state",
-                         &p);
-  auto x = b.Receive(x_ch);
-  auto y = b.Receive(y_ch);
-  auto z = b.Receive(z_ch);
-  auto out = b.Send(out_ch, b.Add(x, y));
-  XLS_ASSERT_OK(b.Build(b.GetStateParam()));
+  BlockBuilder bb("my_block", &p);
+  Type* u32 = p.GetBitsType(32);
+  BValue x = bb.InputPort("x", u32);
+  BValue y = bb.InputPort("y", u32);
+  BValue out = bb.OutputPort("out", bb.Add(x, y));
 
   EXPECT_THAT(x.node(), m::InputPort());
-  EXPECT_THAT(x.node(), m::InputPort(/*channel_name=*/"x"));
+  EXPECT_THAT(x.node(), m::InputPort("x"));
 
   EXPECT_THAT(y.node(), m::InputPort());
-  EXPECT_THAT(y.node(), m::InputPort(/*channel_name=*/"y"));
+  EXPECT_THAT(y.node(), m::InputPort("y"));
 
   EXPECT_THAT(out.node(), m::OutputPort());
-  EXPECT_THAT(out.node(), m::OutputPort(/*channel_name=*/"out"));
+  EXPECT_THAT(out.node(), m::OutputPort("out"));
+  EXPECT_THAT(out.node(), m::OutputPort("out", m::Add()));
 
   // Check mismatch conditions.
-  EXPECT_THAT(Explain(x.node(), m::OutputPort()),
-              HasSubstr("has incorrect op, expected: send"));
+  EXPECT_THAT(
+      Explain(x.node(), m::OutputPort()),
+      HasSubstr("has incorrect op (input_port), expected: output_port"));
   EXPECT_THAT(Explain(x.node(), m::InputPort("foobar")),
-              HasSubstr("has incorrect name (x), expected: foobar"));
-  EXPECT_THAT(Explain(z.node(), m::InputPort("z")),
-              HasSubstr("has incorrect kind (streaming), expected: port"));
+              HasSubstr("has incorrect name, expected: foobar"));
+}
+
+TEST(IrMatchersTest, RegisterMatcher) {
+  Package p("p");
+  BlockBuilder bb("my_block", &p);
+  Type* u32 = p.GetBitsType(32);
+  BValue in = bb.InputPort("in", u32);
+  BValue in_d = bb.InsertRegister("reg", in);
+  BValue out = bb.OutputPort("out", in_d);
+  XLS_ASSERT_OK(bb.block()->AddClockPort("clk"));
+
+  XLS_ASSERT_OK(bb.Build());
+
+  EXPECT_THAT(in_d.node(), m::Register());
+  EXPECT_THAT(in_d.node(), m::Register(m::InputPort()));
+  EXPECT_THAT(in_d.node(), m::Register("reg"));
+  EXPECT_THAT(in_d.node(), m::Register("reg", m::InputPort()));
+  EXPECT_THAT(out.node(),
+              m::OutputPort("out", m::Register(m::InputPort("in"))));
+
+  // Check mismatch conditions.
+  EXPECT_THAT(Explain(in_d.node(), m::Register(m::Add())),
+              HasSubstr("has incorrect op (input_port), expected: add"));
+  EXPECT_THAT(Explain(in_d.node(), m::Register("wrong-reg")),
+              HasSubstr("has incorrect register (reg), expected: wrong-reg"));
+  EXPECT_THAT(Explain(in_d.node(), m::Register("reg", m::Add())),
+              HasSubstr("has incorrect op (input_port), expected: add"));
+  EXPECT_THAT(Explain(in_d.node(), m::Register("wrong-reg", m::InputPort())),
+              HasSubstr("has incorrect register (reg), expected: wrong-reg"));
 }
 
 }  // namespace

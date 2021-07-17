@@ -96,7 +96,7 @@ enum class Keyword { XLS_DSLX_KEYWORDS(XLS_FIRST_COMMA) };
 
 std::string KeywordToString(Keyword keyword);
 
-absl::StatusOr<Keyword> KeywordFromString(absl::string_view s);
+absl::optional<Keyword> KeywordFromString(absl::string_view s);
 
 // Returns a singleton set of type keywords.
 const absl::flat_hash_set<Keyword>& GetTypeKeywords();
@@ -231,6 +231,9 @@ class Scanner {
     return AtCharEof();
   }
 
+  // Proceeds through the stream until an unescaped double quote is encountered.
+  absl::StatusOr<std::string> ScanUntilDoubleQuote();
+
  private:
   // Helper routine that creates a canonically-formatted scan error (which uses
   // the status code for an InvalidArgumentError, on the assumption the invalid
@@ -360,6 +363,11 @@ class Scanner {
   //
   // If none of whitespace, comment, or EOF is observed, returns nullopt.
   absl::StatusOr<absl::optional<Token>> TryPopWhitespaceOrComment();
+
+  // Reads in the next "character" (or escape sequence) in the stream. A
+  // string is returned instead of a char, since multi-byte Unicode characters
+  // are valid constituents of a string.
+  absl::StatusOr<std::string> ProcessNextStringChar();
 
   std::string filename_;
   std::string text_;

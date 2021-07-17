@@ -63,18 +63,18 @@ TEST(Matmul4x4Test, Works) {
   XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(ir_text));
 
   // Four input queues: (0,0)x, (1,0)x, (2,0)x, (3,0)x
-  std::vector<std::unique_ptr<RxOnlyChannelQueue>> rx_queues;
+  std::vector<std::unique_ptr<ChannelQueue>> rx_queues;
   XLS_ASSERT_OK_AND_ASSIGN(Channel * channel, package->GetChannel("c_0_0_x"));
-  rx_queues.emplace_back(std::make_unique<RxOnlyChannelQueue>(
+  rx_queues.emplace_back(std::make_unique<GeneratedChannelQueue>(
       channel, package.get(), []() { return GetX0Value(); }));
   XLS_ASSERT_OK_AND_ASSIGN(channel, package->GetChannel("c_1_0_x"));
-  rx_queues.emplace_back(std::make_unique<RxOnlyChannelQueue>(
+  rx_queues.emplace_back(std::make_unique<GeneratedChannelQueue>(
       channel, package.get(), []() { return GetX1Value(); }));
   XLS_ASSERT_OK_AND_ASSIGN(channel, package->GetChannel("c_2_0_x"));
-  rx_queues.emplace_back(std::make_unique<RxOnlyChannelQueue>(
+  rx_queues.emplace_back(std::make_unique<GeneratedChannelQueue>(
       channel, package.get(), []() { return GetX2Value(); }));
   XLS_ASSERT_OK_AND_ASSIGN(channel, package->GetChannel("c_3_0_x"));
-  rx_queues.emplace_back(std::make_unique<RxOnlyChannelQueue>(
+  rx_queues.emplace_back(std::make_unique<GeneratedChannelQueue>(
       channel, package.get(), []() { return GetX3Value(); }));
   XLS_ASSERT_OK_AND_ASSIGN(
       auto interpreter,
@@ -93,16 +93,16 @@ TEST(Matmul4x4Test, Works) {
   }
 
   XLS_ASSERT_OK_AND_ASSIGN(Value value, c30->Dequeue());
-  ASSERT_THAT(value.bits().ToInt64(), IsOkAndHolds(222));
+  ASSERT_THAT(value.bits().ToUint64(), IsOkAndHolds(222));
 
   XLS_ASSERT_OK_AND_ASSIGN(value, c31->Dequeue());
-  ASSERT_THAT(value.bits().ToInt64(), IsOkAndHolds(4444));
+  ASSERT_THAT(value.bits().ToUint64(), IsOkAndHolds(4444));
 
   XLS_ASSERT_OK_AND_ASSIGN(value, c32->Dequeue());
-  ASSERT_THAT(value.bits().ToInt64(), IsOkAndHolds(66666));
+  ASSERT_THAT(value.bits().ToUint64(), IsOkAndHolds(66666));
 
   XLS_ASSERT_OK_AND_ASSIGN(value, c33->Dequeue());
-  ASSERT_THAT(value.bits().ToInt64(), IsOkAndHolds(888888));
+  ASSERT_THAT(value.bits().ToUint64(), IsOkAndHolds(888888));
 }
 
 }  // namespace

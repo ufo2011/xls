@@ -19,13 +19,46 @@
 #include "xls/common/logging/logging.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/symbolized_stacktrace.h"
+#include "xls/ir/channel.h"
+#include "xls/ir/function.h"
+#include "xls/ir/function_base.h"
 #include "xls/ir/nodes.h"
 #include "xls/ir/package.h"
+#include "xls/ir/proc.h"
 #include "xls/ir/verifier.h"
 
 namespace xls {
 
-using ::absl::StrFormat;
+Type* BValue::GetType() const { return node()->GetType(); }
+
+int64_t BValue::BitCountOrDie() const { return node()->BitCountOrDie(); }
+
+absl::optional<SourceLocation> BValue::loc() const { return node_->loc(); }
+
+std::string BValue::ToString() const {
+  return node_ == nullptr ? std::string("<null BValue>") : node_->ToString();
+}
+
+std::string BValue::SetName(absl::string_view name) {
+  if (node_ != nullptr) {
+    node_->SetName(name);
+  }
+  return "";
+}
+
+std::string BValue::GetName() const {
+  if (node_ != nullptr) {
+    return node_->GetName();
+  }
+  return "";
+}
+
+bool BValue::HasAssignedName() const {
+  if (node_ != nullptr) {
+    return node_->HasAssignedName();
+  }
+  return false;
+}
 
 BValue BValue::operator>>(BValue rhs) { return builder()->Shrl(*this, rhs); }
 BValue BValue::operator<<(BValue rhs) { return builder()->Shll(*this, rhs); }
@@ -35,6 +68,28 @@ BValue BValue::operator*(BValue rhs) { return builder()->UMul(*this, rhs); }
 BValue BValue::operator-(BValue rhs) { return builder()->Subtract(*this, rhs); }
 BValue BValue::operator+(BValue rhs) { return builder()->Add(*this, rhs); }
 BValue BValue::operator-() { return builder()->Negate(*this); }
+
+BValue BuilderBase::CreateBValue(Node* node,
+                                 absl::optional<SourceLocation> loc) {
+  last_node_ = node;
+  if (should_verify_) {
+    absl::Status verify_status = VerifyNode(last_node_);
+    if (!verify_status.ok()) {
+      return SetError(verify_status.message(), loc);
+    }
+  }
+  return BValue(last_node_, this);
+}
+
+template <typename NodeT, typename... Args>
+BValue BuilderBase::AddNode(absl::optional<SourceLocation> loc,
+                            Args&&... args) {
+  last_node_ = function_->AddNode<NodeT>(absl::make_unique<NodeT>(
+      loc, std::forward<Args>(args)..., function_.get()));
+  return CreateBValue(last_node_, loc);
+}
+
+const std::string& BuilderBase::name() const { return function_->name(); }
 
 BValue BuilderBase::SetError(absl::string_view msg,
                              absl::optional<SourceLocation> loc) {
@@ -130,8 +185,9 @@ BValue BuilderBase::Clz(BValue x, absl::optional<SourceLocation> loc,
   }
   if (!x.GetType()->IsBits()) {
     return SetError(
-        StrFormat("Count-leading-zeros argument must be of Bits type; is: %s",
-                  x.GetType()->ToString()),
+        absl::StrFormat(
+            "Count-leading-zeros argument must be of Bits type; is: %s",
+            x.GetType()->ToString()),
         loc);
   }
   return ZeroExtend(
@@ -146,8 +202,9 @@ BValue BuilderBase::Ctz(BValue x, absl::optional<SourceLocation> loc,
   }
   if (!x.GetType()->IsBits()) {
     return SetError(
-        StrFormat("Count-leading-zeros argument must be of Bits type; is: %s",
-                  x.GetType()->ToString()),
+        absl::StrFormat(
+            "Count-leading-zeros argument must be of Bits type; is: %s",
+            x.GetType()->ToString()),
         loc);
   }
   return ZeroExtend(Encode(OneHot(x, /*priority=*/LsbOrMsb::kLsb, loc)),
@@ -175,7 +232,7 @@ BValue BuilderBase::MatchTrue(absl::Span<const BValue> case_clauses,
                               absl::string_view name) {
   if (case_clauses.size() != case_values.size()) {
     return SetError(
-        StrFormat(
+        absl::StrFormat(
             "Number of case clauses %d does not equal number of values (%d)",
             case_clauses.size(), case_values.size()),
         loc);
@@ -201,8 +258,8 @@ BValue BuilderBase::MatchTrue(absl::Span<const Case> cases,
     XLS_CHECK_EQ(cases[i].value.builder(), default_value.builder());
     if (GetType(cases[i].clause) != package()->GetBitsType(1)) {
       return SetError(
-          StrFormat("Selector %d must be a single-bit Bits type, is: %s", i,
-                    GetType(cases[i].clause)->ToString()),
+          absl::StrFormat("Selector %d must be a single-bit Bits type, is: %s",
+                          i, GetType(cases[i].clause)->ToString()),
           loc);
     }
     selector_bits.push_back(cases[i].clause);
@@ -232,8 +289,8 @@ BValue BuilderBase::AfterAll(absl::Span<const BValue> dependencies,
   for (const BValue& value : dependencies) {
     nodes.push_back(value.node());
     if (!GetType(value)->IsToken()) {
-      return SetError(StrFormat("Dependency type %s is not a token.",
-                                GetType(value)->ToString()),
+      return SetError(absl::StrFormat("Dependency type %s is not a token.",
+                                      GetType(value)->ToString()),
                       loc);
     }
   }
@@ -266,8 +323,8 @@ BValue BuilderBase::Array(absl::Span<const BValue> elements, Type* element_type,
     nodes.push_back(value.node());
     if (GetType(value) != element_type) {
       return SetError(
-          StrFormat("Element type %s does not match expected type: %s",
-                    GetType(value)->ToString(), element_type->ToString()),
+          absl::StrFormat("Element type %s does not match expected type: %s",
+                          GetType(value)->ToString(), element_type->ToString()),
           loc);
     }
   }
@@ -283,8 +340,9 @@ BValue BuilderBase::TupleIndex(BValue arg, int64_t idx,
   }
   if (!GetType(arg)->IsTuple()) {
     return SetError(
-        StrFormat("Operand of tuple-index must be tuple-typed, is type: %s",
-                  GetType(arg)->ToString()),
+        absl::StrFormat(
+            "Operand of tuple-index must be tuple-typed, is type: %s",
+            GetType(arg)->ToString()),
         loc);
   }
   return AddNode<xls::TupleIndex>(loc, arg.node(), idx, name);
@@ -569,16 +627,17 @@ BValue BuilderBase::Decode(BValue arg, absl::optional<int64_t> width,
     return BValue();
   }
   if (!arg.GetType()->IsBits()) {
-    return SetError(StrFormat("Decode argument must be of Bits type; is: %s",
-                              arg.GetType()->ToString()),
-                    loc);
+    return SetError(
+        absl::StrFormat("Decode argument must be of Bits type; is: %s",
+                        arg.GetType()->ToString()),
+        loc);
   }
   // The full output width ('width' not given) is an exponential function of the
   // argument width. Set a limit of 16 bits on the argument width.
   const int64_t arg_width = arg.GetType()->AsBitsOrDie()->bit_count();
   if (!width.has_value() && arg_width > 16) {
     return SetError(
-        StrFormat(
+        absl::StrFormat(
             "Decode argument width be no greater than 32-bits; is %d bits",
             arg_width),
         loc);
@@ -846,6 +905,11 @@ BValue BuilderBase::Concat(absl::Span<const BValue> operands,
   return AddNode<xls::Concat>(loc, node_operands, name);
 }
 
+FunctionBuilder::FunctionBuilder(absl::string_view name, Package* package,
+                                 bool should_verify)
+    : BuilderBase(absl::make_unique<Function>(std::string(name), package),
+                  should_verify) {}
+
 BValue FunctionBuilder::Param(absl::string_view name, Type* type,
                               absl::optional<SourceLocation> loc) {
   if (ErrorPending()) {
@@ -853,47 +917,11 @@ BValue FunctionBuilder::Param(absl::string_view name, Type* type,
   }
   for (xls::Param* param : function()->params()) {
     if (name == param->GetName()) {
-      return SetError(StrFormat("Parameter named \"%s\" already exists", name),
-                      loc);
+      return SetError(
+          absl::StrFormat("Parameter named \"%s\" already exists", name), loc);
     }
   }
   return AddNode<xls::Param>(loc, name, type);
-}
-
-BValue FunctionBuilder::Receive(Channel* channel, BValue token,
-                                absl::optional<SourceLocation> loc,
-                                absl::string_view name) {
-  if (ErrorPending()) {
-    return BValue();
-  }
-  return SetError("Receive operations not supported in functions", loc);
-}
-
-BValue FunctionBuilder::ReceiveIf(Channel* channel, BValue token, BValue pred,
-                                  absl::optional<SourceLocation> loc,
-                                  absl::string_view name) {
-  if (ErrorPending()) {
-    return BValue();
-  }
-  return SetError("ReceiveIf operations not supported in functions", loc);
-}
-
-BValue FunctionBuilder::Send(Channel* channel, BValue token, BValue data,
-                             absl::optional<SourceLocation> loc,
-                             absl::string_view name) {
-  if (ErrorPending()) {
-    return BValue();
-  }
-  return SetError("Send operations not supported in functions", loc);
-}
-
-BValue FunctionBuilder::SendIf(Channel* channel, BValue token, BValue pred,
-                               BValue data, absl::optional<SourceLocation> loc,
-                               absl::string_view name) {
-  if (ErrorPending()) {
-    return BValue();
-  }
-  return SetError("SendIf operations not supported in functions", loc);
 }
 
 absl::StatusOr<Function*> FunctionBuilder::Build() {
@@ -904,8 +932,8 @@ absl::StatusOr<Function*> FunctionBuilder::Build() {
   if (function_->node_count() == 0) {
     return absl::InvalidArgumentError("Function cannot be empty");
   }
-  XLS_RET_CHECK(last_node_ != nullptr);
-  return BuildWithReturnValue(BValue(last_node_, this));
+  XLS_ASSIGN_OR_RETURN(BValue last_value, GetLastValue());
+  return BuildWithReturnValue(last_value);
 }
 
 absl::StatusOr<Function*> FunctionBuilder::BuildWithReturnValue(
@@ -921,9 +949,9 @@ absl::StatusOr<Function*> FunctionBuilder::BuildWithReturnValue(
     return absl::InvalidArgumentError("Could not build IR: " + msg);
   }
   XLS_RET_CHECK_EQ(return_value.builder(), this);
-  // down_cast the std::unique_ptr<FunctionBase> to std::unique_ptr<Function>.
-  // We know this is safe because FunctionBuilder constructs and passes a
-  // Function to BuilderBase constructor so function_ is always a Function.
+  // down_cast the FunctionBase* to Function*. We know this is safe because
+  // FunctionBuilder constructs and passes a Function to BuilderBase
+  // constructor so function_ is always a Function.
   Function* f = package()->AddFunction(
       absl::WrapUnique(down_cast<Function*>(function_.release())));
   XLS_RETURN_IF_ERROR(f->set_return_value(return_value.node()));
@@ -932,6 +960,21 @@ absl::StatusOr<Function*> FunctionBuilder::BuildWithReturnValue(
   }
   return f;
 }
+
+ProcBuilder::ProcBuilder(absl::string_view name, const Value& init_value,
+                         absl::string_view token_name,
+                         absl::string_view state_name, Package* package,
+                         bool should_verify)
+    : BuilderBase(absl::make_unique<Proc>(name, init_value, token_name,
+                                          state_name, package),
+                  should_verify),
+      // The parameter nodes are added at construction time. Create a BValue
+      // for each param node so they may be used in construction of
+      // expressions.
+      token_param_(proc()->TokenParam(), this),
+      state_param_(proc()->StateParam(), this) {}
+
+Proc* ProcBuilder::proc() const { return down_cast<Proc*>(function()); }
 
 absl::StatusOr<Proc*> ProcBuilder::Build(BValue token, BValue next_state) {
   if (ErrorPending()) {
@@ -946,19 +989,19 @@ absl::StatusOr<Proc*> ProcBuilder::Build(BValue token, BValue next_state) {
   }
   if (!GetType(token)->IsToken()) {
     return absl::InvalidArgumentError(
-        StrFormat("Recurrent token of proc must be token type, is: %s.",
-                  GetType(token)->ToString()));
+        absl::StrFormat("Recurrent token of proc must be token type, is: %s.",
+                        GetType(token)->ToString()));
   }
   if (GetType(next_state) != GetType(GetStateParam())) {
-    return absl::InvalidArgumentError(StrFormat(
+    return absl::InvalidArgumentError(absl::StrFormat(
         "Recurrent state type %s does not match proc "
         "parameter state type %s.",
         GetType(GetStateParam())->ToString(), GetType(next_state)->ToString()));
   }
 
-  // down_cast the std::unique_ptr<FunctionBase> to std::unique_ptr<Proc>. We
-  // know this is safe because ProcBuilder constructs and passes a Proc to
-  // BuilderBase constructor so function_ is always a Proc.
+  // down_cast the FunctionBase* to Proc*. We know this is safe because
+  // ProcBuilder constructs and passes a Proc to BuilderBase constructor so
+  // function_ is always a Proc.
   Proc* proc = package()->AddProc(
       absl::WrapUnique(down_cast<Proc*>(function_.release())));
   XLS_RETURN_IF_ERROR(proc->SetNextToken(token.node()));
@@ -977,18 +1020,29 @@ BValue ProcBuilder::Param(absl::string_view name, Type* type,
   return SetError("Cannot add parameters to procs", loc);
 }
 
+BuilderBase::BuilderBase(std::unique_ptr<FunctionBase> function,
+                         bool should_verify)
+    : function_(std::move(function)),
+      error_pending_(false),
+      should_verify_(should_verify) {}
+
+BuilderBase::~BuilderBase() = default;
+
+Package* BuilderBase::package() const { return function_->package(); }
+
 BValue BuilderBase::AddArithOp(Op op, BValue lhs, BValue rhs,
                                absl::optional<int64_t> result_width,
                                absl::optional<SourceLocation> loc,
                                absl::string_view name) {
-  XLS_CHECK_EQ(lhs.builder(), rhs.builder());
   if (ErrorPending()) {
     return BValue();
   }
+  XLS_CHECK_EQ(lhs.builder(), rhs.builder());
   if (!lhs.GetType()->IsBits() || !rhs.GetType()->IsBits()) {
     return SetError(
-        StrFormat("Arithmetic arguments must be of Bits type; is: %s and %s",
-                  lhs.GetType()->ToString(), rhs.GetType()->ToString()),
+        absl::StrFormat(
+            "Arithmetic arguments must be of Bits type; is: %s and %s",
+            lhs.GetType()->ToString(), rhs.GetType()->ToString()),
         loc);
   }
   int64_t width;
@@ -997,9 +1051,10 @@ BValue BuilderBase::AddArithOp(Op op, BValue lhs, BValue rhs,
   } else {
     if (lhs.BitCountOrDie() != rhs.BitCountOrDie()) {
       return SetError(
-          StrFormat("Arguments of arithmetic operation must be same width if "
-                    "result width is not specified; is: %s and %s",
-                    lhs.GetType()->ToString(), rhs.GetType()->ToString()),
+          absl::StrFormat(
+              "Arguments of arithmetic operation must be same width if "
+              "result width is not specified; is: %s and %s",
+              lhs.GetType()->ToString(), rhs.GetType()->ToString()),
           loc);
     }
     width = lhs.BitCountOrDie();
@@ -1009,14 +1064,14 @@ BValue BuilderBase::AddArithOp(Op op, BValue lhs, BValue rhs,
 
 BValue BuilderBase::AddUnOp(Op op, BValue x, absl::optional<SourceLocation> loc,
                             absl::string_view name) {
-  XLS_CHECK_EQ(this, x.builder());
   if (ErrorPending()) {
     return BValue();
   }
+  XLS_CHECK_EQ(this, x.builder());
   if (!IsOpClass<UnOp>(op)) {
-    return SetError(
-        StrFormat("Op %s is not a operation of class UnOp", OpToString(op)),
-        loc);
+    return SetError(absl::StrFormat("Op %s is not a operation of class UnOp",
+                                    OpToString(op)),
+                    loc);
   }
   return AddNode<UnOp>(loc, x.node(), op, name);
 }
@@ -1024,14 +1079,14 @@ BValue BuilderBase::AddUnOp(Op op, BValue x, absl::optional<SourceLocation> loc,
 BValue BuilderBase::AddBinOp(Op op, BValue lhs, BValue rhs,
                              absl::optional<SourceLocation> loc,
                              absl::string_view name) {
-  XLS_CHECK_EQ(lhs.builder(), rhs.builder());
   if (ErrorPending()) {
     return BValue();
   }
+  XLS_CHECK_EQ(lhs.builder(), rhs.builder());
   if (!IsOpClass<BinOp>(op)) {
-    return SetError(
-        StrFormat("Op %s is not a operation of class BinOp", OpToString(op)),
-        loc);
+    return SetError(absl::StrFormat("Op %s is not a operation of class BinOp",
+                                    OpToString(op)),
+                    loc);
   }
   return AddNode<BinOp>(loc, lhs.node(), rhs.node(), op, name);
 }
@@ -1039,14 +1094,15 @@ BValue BuilderBase::AddBinOp(Op op, BValue lhs, BValue rhs,
 BValue BuilderBase::AddCompareOp(Op op, BValue lhs, BValue rhs,
                                  absl::optional<SourceLocation> loc,
                                  absl::string_view name) {
-  XLS_CHECK_EQ(lhs.builder(), rhs.builder());
   if (ErrorPending()) {
     return BValue();
   }
+  XLS_CHECK_EQ(lhs.builder(), rhs.builder());
   if (!IsOpClass<CompareOp>(op)) {
-    return SetError(StrFormat("Op %s is not a operation of class CompareOp",
-                              OpToString(op)),
-                    loc);
+    return SetError(
+        absl::StrFormat("Op %s is not a operation of class CompareOp",
+                        OpToString(op)),
+        loc);
   }
   return AddNode<CompareOp>(loc, lhs.node(), rhs.node(), op, name);
 }
@@ -1058,9 +1114,9 @@ BValue BuilderBase::AddNaryOp(Op op, absl::Span<const BValue> args,
     return BValue();
   }
   if (!IsOpClass<NaryOp>(op)) {
-    return SetError(
-        StrFormat("Op %s is not a operation of class NaryOp", OpToString(op)),
-        loc);
+    return SetError(absl::StrFormat("Op %s is not a operation of class NaryOp",
+                                    OpToString(op)),
+                    loc);
   }
   std::vector<Node*> nodes;
   for (const BValue& bvalue : args) {
@@ -1072,10 +1128,10 @@ BValue BuilderBase::AddNaryOp(Op op, absl::Span<const BValue> args,
 BValue BuilderBase::AddBitwiseReductionOp(Op op, BValue arg,
                                           absl::optional<SourceLocation> loc,
                                           absl::string_view name) {
-  XLS_CHECK_EQ(this, arg.builder());
   if (ErrorPending()) {
     return BValue();
   }
+  XLS_CHECK_EQ(this, arg.builder());
   return AddNode<BitwiseReductionOp>(loc, arg.node(), op, name);
 }
 
@@ -1089,19 +1145,64 @@ BValue BuilderBase::Assert(BValue token, BValue condition,
   }
   if (!token.GetType()->IsToken()) {
     return SetError(
-        StrFormat("First operand of assert must be of token type; is: %s",
-                  token.GetType()->ToString()),
+        absl::StrFormat("First operand of assert must be of token type; is: %s",
+                        token.GetType()->ToString()),
         loc);
   }
   if (!condition.GetType()->IsBits() ||
       condition.GetType()->AsBitsOrDie()->bit_count() != 1) {
-    return SetError(StrFormat("Condition operand of assert must be of bits "
-                              "type of width 1; is: %s",
-                              condition.GetType()->ToString()),
-                    loc);
+    return SetError(
+        absl::StrFormat("Condition operand of assert must be of bits "
+                        "type of width 1; is: %s",
+                        condition.GetType()->ToString()),
+        loc);
   }
   return AddNode<xls::Assert>(loc, token.node(), condition.node(), message,
                               label, name);
+}
+
+BValue BuilderBase::Cover(BValue token, BValue condition,
+                          absl::string_view label,
+                          absl::optional<SourceLocation> loc,
+                          absl::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!token.GetType()->IsToken()) {
+    return SetError(
+        absl::StrFormat("First operand of cover must be of token type; is: %s",
+                        token.GetType()->ToString()),
+        loc);
+  }
+  if (!condition.GetType()->IsBits() ||
+      condition.GetType()->AsBitsOrDie()->bit_count() != 1) {
+    return SetError(
+        absl::StrFormat("Condition operand of cover must be of bits "
+                        "type of width 1; is: %s",
+                        condition.GetType()->ToString()),
+        loc);
+  }
+  if (label.empty()) {
+    return SetError("The label of a cover node cannot be empty.", loc);
+  }
+  return AddNode<xls::Cover>(loc, token.node(), condition.node(), label, name);
+}
+
+BValue BuilderBase::Gate(BValue condition, BValue data,
+                         absl::optional<SourceLocation> loc,
+                         absl::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!condition.GetType()->IsBits() ||
+      condition.GetType()->AsBitsOrDie()->bit_count() != 1) {
+    return SetError(
+        absl::StrFormat(
+            "Condition operand of gate must be of bits type of width 1; is: %s",
+            condition.GetType()->ToString()),
+        loc);
+  }
+  return AddNode<xls::Gate>(loc, condition.node(), data.node(), name);
 }
 
 BValue ProcBuilder::Receive(Channel* channel, BValue token,
@@ -1112,11 +1213,13 @@ BValue ProcBuilder::Receive(Channel* channel, BValue token,
   }
   if (!token.GetType()->IsToken()) {
     return SetError(
-        StrFormat("Token operand of receive must be of token type; is: %s",
-                  token.GetType()->ToString()),
+        absl::StrFormat(
+            "Token operand of receive must be of token type; is: %s",
+            token.GetType()->ToString()),
         loc);
   }
-  return AddNode<xls::Receive>(loc, token.node(), channel->id(), name);
+  return AddNode<xls::Receive>(loc, token.node(), /*predicate=*/absl::nullopt,
+                               channel->id(), name);
 }
 
 BValue ProcBuilder::ReceiveIf(Channel* channel, BValue token, BValue pred,
@@ -1127,19 +1230,21 @@ BValue ProcBuilder::ReceiveIf(Channel* channel, BValue token, BValue pred,
   }
   if (!token.GetType()->IsToken()) {
     return SetError(
-        StrFormat("Token operand of receive must be of token type; is: %s",
-                  token.GetType()->ToString()),
+        absl::StrFormat(
+            "Token operand of receive must be of token type; is: %s",
+            token.GetType()->ToString()),
         loc);
   }
   if (!pred.GetType()->IsBits() ||
       pred.GetType()->AsBitsOrDie()->bit_count() != 1) {
-    return SetError(StrFormat("Predicate operand of receive_if must be of bits "
-                              "type of width 1; is: %s",
-                              pred.GetType()->ToString()),
-                    loc);
+    return SetError(
+        absl::StrFormat("Predicate operand of receive_if must be of bits "
+                        "type of width 1; is: %s",
+                        pred.GetType()->ToString()),
+        loc);
   }
-  return AddNode<xls::ReceiveIf>(loc, token.node(), pred.node(), channel->id(),
-                                 name);
+  return AddNode<xls::Receive>(loc, token.node(), pred.node(), channel->id(),
+                               name);
 }
 
 BValue ProcBuilder::Send(Channel* channel, BValue token, BValue data,
@@ -1150,12 +1255,12 @@ BValue ProcBuilder::Send(Channel* channel, BValue token, BValue data,
   }
   if (!token.GetType()->IsToken()) {
     return SetError(
-        StrFormat("Token operand of send must be of token type; is: %s",
-                  token.GetType()->ToString()),
+        absl::StrFormat("Token operand of send must be of token type; is: %s",
+                        token.GetType()->ToString()),
         loc);
   }
-  return AddNode<xls::Send>(loc, token.node(), data.node(), channel->id(),
-                            name);
+  return AddNode<xls::Send>(loc, token.node(), data.node(),
+                            /*predicate=*/absl::nullopt, channel->id(), name);
 }
 
 BValue ProcBuilder::SendIf(Channel* channel, BValue token, BValue pred,
@@ -1166,19 +1271,19 @@ BValue ProcBuilder::SendIf(Channel* channel, BValue token, BValue pred,
   }
   if (!token.GetType()->IsToken()) {
     return SetError(
-        StrFormat("Token operand of send must be of token type; is: %s",
-                  token.GetType()->ToString()),
+        absl::StrFormat("Token operand of send must be of token type; is: %s",
+                        token.GetType()->ToString()),
         loc);
   }
   if (!pred.GetType()->IsBits() ||
       pred.GetType()->AsBitsOrDie()->bit_count() != 1) {
-    return SetError(StrFormat("Predicate operand of send_if must be of bits "
-                              "type of width 1; is: %s",
-                              pred.GetType()->ToString()),
+    return SetError(absl::StrFormat("Predicate operand of send must be of bits "
+                                    "type of width 1; is: %s",
+                                    pred.GetType()->ToString()),
                     loc);
   }
-  return AddNode<xls::SendIf>(loc, token.node(), pred.node(), data.node(),
-                              channel->id(), name);
+  return AddNode<xls::Send>(loc, token.node(), data.node(), pred.node(),
+                            channel->id(), name);
 }
 
 BValue TokenlessProcBuilder::Receive(Channel* channel,
@@ -1231,6 +1336,135 @@ absl::StatusOr<Proc*> TokenlessProcBuilder::Build(BValue next_state) {
   } else {
     return ProcBuilder::Build(AfterAll(tokens_), next_state);
   }
+}
+
+BValue BlockBuilder::Param(absl::string_view name, Type* type,
+                           absl::optional<SourceLocation> loc) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  return SetError("Cannot add parameters to blocks", loc);
+}
+
+BValue BlockBuilder::InputPort(absl::string_view name, Type* type,
+                               absl::optional<SourceLocation> loc) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  absl::StatusOr<xls::InputPort*> port_status =
+      block()->AddInputPort(name, type, loc);
+  if (!port_status.ok()) {
+    return SetError(absl::StrFormat("Unable to add port to block: %s",
+                                    port_status.status().message()),
+                    loc);
+  }
+  return CreateBValue(port_status.value(), loc);
+}
+
+BValue BlockBuilder::OutputPort(absl::string_view name, BValue operand,
+                                absl::optional<SourceLocation> loc) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  absl::StatusOr<xls::OutputPort*> port_status =
+      block()->AddOutputPort(name, operand.node(), loc);
+  if (!port_status.ok()) {
+    return SetError(absl::StrFormat("Unable to add port to block: %s",
+                                    port_status.status().message()),
+                    loc);
+  }
+  return CreateBValue(port_status.value(), loc);
+}
+
+BValue BlockBuilder::RegisterRead(Register* reg,
+                                  absl::optional<SourceLocation> loc,
+                                  absl::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (reg->block() != block()) {
+    return SetError("Register is defined in different block", loc);
+  }
+  return AddNode<xls::RegisterRead>(loc, reg->name(), name);
+}
+
+BValue BlockBuilder::RegisterWrite(Register* reg, BValue data,
+                                   absl::optional<BValue> load_enable,
+                                   absl::optional<BValue> reset,
+                                   absl::optional<SourceLocation> loc,
+                                   absl::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (reg->block() != block()) {
+    return SetError("Register is defined in different block", loc);
+  }
+  return AddNode<xls::RegisterWrite>(
+      loc, data.node(),
+      load_enable.has_value() ? absl::optional<Node*>(load_enable->node())
+                              : absl::nullopt,
+      reset.has_value() ? absl::optional<Node*>(reset->node()) : absl::nullopt,
+      reg->name(), name);
+}
+
+BValue BlockBuilder::InsertRegister(absl::string_view name, BValue data,
+                                    absl::optional<BValue> load_enable,
+                                    absl::optional<SourceLocation> loc) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  absl::StatusOr<Register*> reg_status =
+      block()->AddRegister(name, data.GetType());
+  if (!reg_status.ok()) {
+    return SetError(absl::StrFormat("Cannot add register: %s",
+                                    reg_status.status().message()),
+                    loc);
+  }
+  Register* reg = reg_status.value();
+  RegisterWrite(reg, data, load_enable, /*reset=*/absl::nullopt, loc);
+  return RegisterRead(reg, loc, reg->name());
+}
+
+BValue BlockBuilder::InsertRegister(absl::string_view name, BValue data,
+                                    BValue reset_signal, Reset reset,
+                                    absl::optional<BValue> load_enable,
+                                    absl::optional<SourceLocation> loc) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  absl::StatusOr<Register*> reg_status =
+      block()->AddRegister(name, data.GetType(), reset);
+  if (!reg_status.ok()) {
+    return SetError(absl::StrFormat("Cannot add register: %s",
+                                    reg_status.status().message()),
+                    loc);
+  }
+  Register* reg = reg_status.value();
+  RegisterWrite(reg, data, load_enable, reset_signal, loc);
+  return RegisterRead(reg, loc, reg->name());
+}
+
+absl::StatusOr<Block*> BlockBuilder::Build() {
+  if (ErrorPending()) {
+    std::string msg = error_msg_ + " ";
+    if (error_loc_.has_value()) {
+      absl::StrAppendFormat(
+          &msg, "File: %d, Line: %d, Col: %d", error_loc_->fileno().value(),
+          error_loc_->lineno().value(), error_loc_->colno().value());
+    }
+    absl::StrAppend(&msg, "\nStack Trace:\n" + error_stacktrace_);
+    return absl::InvalidArgumentError("Could not build IR: " + msg);
+  }
+
+  // down_cast the FunctionBase* to Block*. We know this is safe because
+  // BlockBuilder constructs and passes a Block to BuilderBase constructor so
+  // function_ is always a Block.
+  Block* block = package()->AddBlock(
+      absl::WrapUnique(down_cast<Block*>(function_.release())));
+  if (should_verify_) {
+    XLS_RETURN_IF_ERROR(VerifyBlock(block));
+  }
+  return block;
 }
 
 }  // namespace xls

@@ -14,7 +14,7 @@
 
 # Frontend syntax.
 
-# pytype binary, test, library
+# pytype test and library
 
 load("@xls_pip_deps//:requirements.bzl", "requirement")
 
@@ -40,30 +40,38 @@ py_test(
     ],
 )
 
-py_test(
-    name = "py_scanner_test",
-    srcs = ["scanner_test.py"],
-    main = "scanner_test.py",
-    python_version = "PY3",
-    srcs_version = "PY3",
+cc_library(
+    name = "cpp_transpiler",
+    srcs = ["cpp_transpiler.cc"],
+    hdrs = ["cpp_transpiler.h"],
     deps = [
-        "//xls/dslx/python:cpp_pos",
-        "//xls/dslx/python:scanner",
-        "@com_google_absl_py//absl/testing:absltest",
+        ":ast",
+        ":import_data",
+        ":interpreter",
+        ":type_info",
+        ":typecheck",
+        "//xls/common:case_converters",
+        "//xls/common:visitor",
+        "//xls/common/status:ret_check",
+        "//xls/common/status:status_macros",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:optional",
+        "@com_google_absl//absl/types:span",
     ],
 )
 
-py_test(
-    name = "py_parametric_expression_test",
-    srcs = ["parametric_expression_test.py"],
-    main = "parametric_expression_test.py",
-    python_version = "PY3",
-    srcs_version = "PY3",
+cc_test(
+    name = "cpp_transpiler_test",
+    srcs = ["cpp_transpiler_test.cc"],
     deps = [
-        "//xls/dslx/python:cpp_parametric_expression",
-        "//xls/dslx/python:cpp_pos",
-        "//xls/dslx/python:interp_value",
-        "@com_google_absl_py//absl/testing:absltest",
+        ":ast",
+        ":cpp_transpiler",
+        ":import_data",
+        ":parse_and_typecheck",
+        ":type_info",
+        "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
+        "@com_google_googletest//:gtest",
     ],
 )
 
@@ -124,22 +132,37 @@ cc_test(
         "//xls/common:update_golden_files",
         "//xls/common/file:filesystem",
         "//xls/common/file:get_runfile_path",
+        "//xls/common/logging:log_lines",
         "//xls/common/status:matchers",
         "@com_google_absl//absl/flags:flag",
         "@com_google_googletest//:gtest",
     ],
 )
 
-py_binary(
+cc_binary(
     name = "highlight_main",
-    srcs = ["highlight_main.py"],
+    srcs = ["highlight_main.cc"],
+    deps = [
+        ":dslx_builtins",
+        ":scanner",
+        "//xls/common:init_xls",
+        "//xls/common/file:filesystem",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+py_test(
+    name = "highlight_main_test",
+    srcs = ["highlight_main_test.py"],
+    data = [
+        ":highlight_main",
+        "//xls/examples:sha256.x",
+    ],
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
-        requirement("termcolor"),
-        "//xls/dslx/python:scanner",
-        "@com_google_absl_py//absl:app",
-        "@com_google_absl_py//absl/flags",
+        "//xls/common:runfiles",
+        "@com_google_absl_py//absl/testing:absltest",
     ],
 )
 
@@ -147,29 +170,6 @@ filegroup(
     name = "ir_converter_test_sh",
     srcs = ["ir_converter_test.sh"],
     visibility = ["//xls:xls_users"],
-)
-
-py_library(
-    name = "fakefs_util",
-    srcs = ["fakefs_util.py"],
-    srcs_version = "PY3",
-    deps = [
-        requirement("pyfakefs"),
-    ],
-)
-
-py_library(
-    name = "fakefs_test_util",
-    # If we don't mark this as testonly we can get warnings (when the modified
-    # third party version drags in googletest as a dependency and the test
-    # main is not called).
-    testonly = True,
-    srcs = ["fakefs_test_util.py"],
-    srcs_version = "PY3",
-    deps = [
-        ":fakefs_util",
-        requirement("pyfakefs"),  # unittest
-    ],
 )
 
 cc_library(
@@ -251,6 +251,7 @@ cc_library(
         "//xls/common/status:status_macros",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
@@ -265,6 +266,7 @@ cc_test(
         ":scanner",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
+        "@com_google_absl//absl/random",
         "@com_google_googletest//:gtest",
     ],
 )
@@ -318,6 +320,7 @@ cc_library(
         "//xls/common/status:ret_check",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -341,6 +344,17 @@ cc_library(
         ":pos",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
+    ],
+)
+
+cc_test(
+    name = "parametric_expression_test",
+    srcs = ["parametric_expression_test.cc"],
+    deps = [
+        ":parametric_expression",
+        "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
+        "@com_google_googletest//:gtest",
     ],
 )
 
@@ -395,6 +409,7 @@ cc_test(
     deps = [
         ":interp_value",
         "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
         "@com_google_googletest//:gtest",
     ],
 )
@@ -506,10 +521,10 @@ cc_library(
     deps = [
         ":ast",
         ":import_data",
-        ":interp_bindings",
         ":parser",
         ":scanner",
         ":type_info",
+        "//xls/common/config:xls_config",
         "//xls/common/file:filesystem",
         "//xls/common/file:get_runfile_path",
         "//xls/common/status:ret_check",
@@ -526,6 +541,17 @@ cc_library(
         ":symbolic_bindings",
         "//xls/common/status:ret_check",
         "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "mangle_test",
+    srcs = ["mangle_test.cc"],
+    deps = [
+        ":mangle",
+        "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
+        "@com_google_googletest//:gtest",
     ],
 )
 
@@ -556,6 +582,7 @@ cc_test(
         ":parse_and_typecheck",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
+        "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest",
     ],
 )
@@ -619,6 +646,8 @@ cc_library(
         ":dslx_builtins",
         ":import_routines",
         ":interpreter",
+        ":parametric_instantiator",
+        "@com_github_google_re2//:re2",
         "@com_google_absl//absl/status:statusor",
     ],
 )
@@ -666,6 +695,7 @@ cc_library(
         ":mangle",
         ":type_info",
         "//xls/ir",
+        "//xls/ir:bits",
         "//xls/ir:function_builder",
         "@com_google_absl//absl/container:btree",
         "@com_google_absl//absl/status",

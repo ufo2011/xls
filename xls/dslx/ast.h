@@ -22,6 +22,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
+#include "absl/strings/str_replace.h"
 #include "absl/types/span.h"
 #include "absl/types/variant.h"
 #include "xls/common/casts.h"
@@ -66,6 +67,7 @@ bool IsOneOf(ObjT* obj) {
   X(Next)                          \
   X(Number)                        \
   X(SplatStructInstance)           \
+  X(String)                        \
   X(StructInstance)                \
   X(Ternary)                       \
   X(Unop)                          \
@@ -519,6 +521,7 @@ class ExprVisitor {
   virtual void HandleNameRef(NameRef* expr) = 0;
   virtual void HandleNext(Next* expr) = 0;
   virtual void HandleNumber(Number* expr) = 0;
+  virtual void HandleString(String* expr) = 0;
   virtual void HandleStructInstance(StructInstance* expr) = 0;
   virtual void HandleSplatStructInstance(SplatStructInstance* expr) = 0;
   virtual void HandleTernary(Ternary* expr) = 0;
@@ -641,8 +644,17 @@ class Number : public Expr {
   // present).
   std::string ToStringNoType() const;
 
-  TypeAnnotation* type() const { return type_; }
-  void set_type(TypeAnnotation* type) { type_ = type; }
+  TypeAnnotation* type_annotation() const { return type_annotation_; }
+
+  // TODO(leary): 2021-05-18 We should remove this setter -- it is currently
+  // used because of the `$type_annotation:$number` syntax, where the type is
+  // parsed, the number is parsed independent of type context, but then the
+  // type_annotation is imbued *into* the number. Cleaner would be to make a
+  // TypedNumber construct that decorated a bare number with its literal
+  // type_annotation context.
+  void set_type_annotation(TypeAnnotation* type_annotation) {
+    type_annotation_ = type_annotation;
+  }
 
   const std::string& text() const { return text_; }
 
@@ -660,7 +672,34 @@ class Number : public Expr {
  private:
   std::string text_;  // Will never be empty.
   NumberKind kind_;
-  TypeAnnotation* type_;  // May be null.
+  TypeAnnotation* type_annotation_;  // May be null.
+};
+
+// A literal string of u8s. Does not internally include opening and closing
+// quotation marks.
+class String : public Expr {
+ public:
+  String(Module* owner, Span span, absl::string_view text)
+      : Expr(owner, span), text_(text) {}
+
+  absl::Status Accept(AstNodeVisitor* v) override {
+    return v->HandleString(this);
+  }
+  void AcceptExpr(ExprVisitor* v) override { v->HandleString(this); }
+  absl::string_view GetNodeTypeName() const override { return "String"; }
+  std::string ToString() const override {
+    // We need to re-insert the quote-escaping slash.
+    return absl::StrFormat("\"%s\"",
+                           absl::StrReplaceAll(text_, {{"\"", "\\\""}}));
+  }
+  std::vector<AstNode*> GetChildren(bool want_types) const override {
+    return {};
+  }
+
+  const std::string& text() const { return text_; }
+
+ private:
+  std::string text_;
 };
 
 // Represents a user-defined-type definition; e.g.
@@ -681,15 +720,15 @@ class TypeDef : public AstNode {
 
   std::string ToString() const override {
     return absl::StrFormat("%stype %s = %s;", is_public_ ? "pub " : "",
-                           identifier(), type_->ToString());
+                           identifier(), type_annotation_->ToString());
   }
 
   std::vector<AstNode*> GetChildren(bool want_types) const override {
-    return {name_def_, type_};
+    return {name_def_, type_annotation_};
   }
 
   NameDef* name_def() const { return name_def_; }
-  TypeAnnotation* type() const { return type_; }
+  TypeAnnotation* type_annotation() const { return type_annotation_; }
   bool is_public() const { return is_public_; }
   const Span& span() const { return span_; }
   absl::optional<Span> GetSpan() const override { return span_; }
@@ -697,7 +736,7 @@ class TypeDef : public AstNode {
  private:
   Span span_;
   NameDef* name_def_;
-  TypeAnnotation* type_;
+  TypeAnnotation* type_annotation_;
   bool is_public_;
 };
 
@@ -717,13 +756,19 @@ class Array : public Expr {
   std::vector<AstNode*> GetChildren(bool want_types) const override;
 
   const std::vector<Expr*>& members() const { return members_; }
-  TypeAnnotation* type() const { return type_; }
-  void set_type(TypeAnnotation* type) { type_ = type; }
+  TypeAnnotation* type_annotation() const { return type_annotation_; }
+
+  // TODO(leary): 2021-05-18 See TODO comment on Number::set_type_annotation for
+  // the reason this exists (prefix types for literal values), but it should be
+  // removed in favor of a decorator construct instead of using mutability.
+  void set_type_annotation(TypeAnnotation* type_annotation) {
+    type_annotation_ = type_annotation;
+  }
 
   bool has_ellipsis() const { return has_ellipsis_; }
 
  private:
-  TypeAnnotation* type_ = nullptr;
+  TypeAnnotation* type_annotation_ = nullptr;
   std::vector<Expr*> members_;
   bool has_ellipsis_;
 };
@@ -870,22 +915,23 @@ class Param : public AstNode {
 
   absl::string_view GetNodeTypeName() const override { return "Param"; }
   std::string ToString() const override {
-    return absl::StrFormat("%s: %s", name_def_->ToString(), type_->ToString());
+    return absl::StrFormat("%s: %s", name_def_->ToString(),
+                           type_annotation_->ToString());
   }
 
   std::vector<AstNode*> GetChildren(bool want_types) const override {
-    return {name_def_, type_};
+    return {name_def_, type_annotation_};
   }
 
   const Span& span() const { return span_; }
   NameDef* name_def() const { return name_def_; }
-  TypeAnnotation* type() const { return type_; }
+  TypeAnnotation* type_annotation() const { return type_annotation_; }
   const std::string& identifier() const { return name_def_->identifier(); }
   absl::optional<Span> GetSpan() const override { return span_; }
 
  private:
   NameDef* name_def_;
-  TypeAnnotation* type_;
+  TypeAnnotation* type_annotation_;
   Span span_;
 };
 
@@ -1045,8 +1091,8 @@ class Ternary : public Expr {
 //
 // That is, in:
 //
-//  fn [X: u32, Y: u32 = X+X] f(x: bits[X]) -> bits[Y] {
-//     ^~~~~~~~~~~~~~~~~~~~~^
+//  fn f<X: u32, Y: u32 = X+X>(x: bits[X]) -> bits[Y] {
+//      ^~~~~~~~~~~~~~~~~~~~~^
 //    x ++ x
 //  }
 //
@@ -1057,18 +1103,12 @@ class Ternary : public Expr {
 //   `X+X`)
 class ParametricBinding : public AstNode {
  public:
-  ParametricBinding(Module* owner, NameDef* name_def, TypeAnnotation* type,
-                    Expr* expr)
-      : AstNode(owner), name_def_(name_def), type_(type), expr_(expr) {}
+  ParametricBinding(Module* owner, NameDef* name_def,
+                    TypeAnnotation* type_annotation, Expr* expr);
 
   absl::Status Accept(AstNodeVisitor* v) override {
     return v->HandleParametricBinding(this);
   }
-
-  // Creates a cloned version of this ParametricBinding with the given new_expr
-  // replacing this' `expr_`. (The owner() is the same, and used for
-  // allocation.)
-  ParametricBinding* Clone(Expr* new_expr) const;
 
   // TODO(leary): 2020-08-21 Fix this, the span is more than just the name def's
   // span, it must include the type/expr.
@@ -1078,42 +1118,26 @@ class ParametricBinding : public AstNode {
   absl::string_view GetNodeTypeName() const override {
     return "ParametricBinding";
   }
-  std::string ToString() const override {
-    std::string suffix;
-    if (expr_ != nullptr) {
-      suffix = absl::StrFormat(" = %s", expr_->ToString());
-    }
-    return absl::StrFormat("%s: %s%s", name_def_->ToString(), type_->ToString(),
-                           suffix);
-  }
+  std::string ToString() const override;
 
-  std::string ToReprString() const {
-    return absl::StrFormat("ParametricBinding(name_def=%s, type=%s, expr=%s)",
-                           name_def_->ToReprString(), type_->ToString(),
-                           expr_ == nullptr ? "null" : expr_->ToString());
-  }
+  std::string ToReprString() const;
 
-  std::vector<AstNode*> GetChildren(bool want_types) const override {
-    std::vector<AstNode*> results = {name_def_};
-    if (want_types) {
-      results.push_back(type_);
-    }
-    if (expr_ != nullptr) {
-      results.push_back(expr_);
-    }
-    return results;
-  }
+  std::vector<AstNode*> GetChildren(bool want_types) const override;
 
   NameDef* name_def() const { return name_def_; }
-  TypeAnnotation* type() const { return type_; }
+  TypeAnnotation* type_annotation() const { return type_annotation_; }
   Expr* expr() const { return expr_; }
 
   const std::string& identifier() const { return name_def_->identifier(); }
 
  private:
   NameDef* name_def_;
-  TypeAnnotation* type_;
-  Expr* expr_;  // May be null.
+  TypeAnnotation* type_annotation_;
+
+  // The "default" parametric expression (e.g. the expression to use for this
+  // parametric name_def_ when there is no explicit binding provided by the
+  // caller). May be null.
+  Expr* expr_;
 };
 
 // Represents a function definition.
@@ -1191,9 +1215,13 @@ class MatchArm : public AstNode {
   const Span& span() const { return span_; }
   absl::optional<Span> GetSpan() const override { return span_; }
 
+  // Returns the span from the start of the (first) pattern to the limit of the
+  // (last) pattern.
+  Span GetPatternSpan() const;
+
  private:
   Span span_;
-  std::vector<NameDefTree*> patterns_;
+  std::vector<NameDefTree*> patterns_;  // Note: never empty.
   Expr* expr_;  // Expression that is executed if one of the patterns matches.
 };
 
@@ -1365,7 +1393,7 @@ class EnumDef : public AstNode {
   std::string ToString() const override;
 
   std::vector<AstNode*> GetChildren(bool want_types) const override {
-    std::vector<AstNode*> results = {name_def_, type_};
+    std::vector<AstNode*> results = {name_def_, type_annotation_};
     for (const EnumMember& item : values_) {
       results.push_back(item.name_def);
       results.push_back(ToAstNode(item.value));
@@ -1379,7 +1407,7 @@ class EnumDef : public AstNode {
   absl::optional<Span> GetSpan() const override { return span_; }
   NameDef* name_def() const { return name_def_; }
   const std::vector<EnumMember>& values() const { return values_; }
-  TypeAnnotation* type() const { return type_; }
+  TypeAnnotation* type_annotation() const { return type_annotation_; }
   bool is_public() const { return is_public_; }
 
   // The signedness of the enum is populated in the type inference phase, it is
@@ -1391,7 +1419,7 @@ class EnumDef : public AstNode {
  private:
   Span span_;
   NameDef* name_def_;
-  TypeAnnotation* type_;
+  TypeAnnotation* type_annotation_;
   std::vector<EnumMember> values_;
   absl::optional<bool> is_signed_;
   bool is_public_;
@@ -1747,18 +1775,27 @@ class For : public Expr {
 
   std::vector<AstNode*> GetChildren(bool want_types) const override;
 
+  // Names bound in the body of the loop.
   NameDefTree* names() const { return names_; }
+
+  // Annotation corresponding to "names".
+  TypeAnnotation* type_annotation() const { return type_annotation_; }
+
+  // Expression for "thing to iterate over".
   Expr* iterable() const { return iterable_; }
+
+  // Expression for the loop body.
   Expr* body() const { return body_; }
+
+  // Initial expression for the loop (start values expr).
   Expr* init() const { return init_; }
-  TypeAnnotation* type() const { return type_; }
 
  private:
-  NameDefTree* names_;    // NameDefTree bound in the body of the loop.
-  TypeAnnotation* type_;  // Annotation corresponding to "names".
-  Expr* iterable_;        // Expression for "thing to iterate over".
-  Expr* body_;  // Expression for the loop body, should evaluate to type type_.
-  Expr* init_;  // Initial expression for the loop (start values expr).
+  NameDefTree* names_;
+  TypeAnnotation* type_annotation_;
+  Expr* iterable_;
+  Expr* body_;
+  Expr* init_;
 };
 
 // Represents a while-loop expression.
@@ -1803,8 +1840,10 @@ class While : public Expr {
 // Casts the result of the foo() invocation to a u32 value.
 class Cast : public Expr {
  public:
-  Cast(Module* owner, Span span, Expr* expr, TypeAnnotation* type)
-      : Expr(owner, std::move(span)), expr_(expr), type_(type) {}
+  Cast(Module* owner, Span span, Expr* expr, TypeAnnotation* type_annotation)
+      : Expr(owner, std::move(span)),
+        expr_(expr),
+        type_annotation_(type_annotation) {}
 
   absl::Status Accept(AstNodeVisitor* v) override {
     return v->HandleCast(this);
@@ -1814,22 +1853,22 @@ class Cast : public Expr {
   absl::string_view GetNodeTypeName() const override { return "Cast"; }
   std::string ToString() const override {
     return absl::StrFormat("((%s) as %s)", expr_->ToString(),
-                           type_->ToString());
+                           type_annotation_->ToString());
   }
 
   std::vector<AstNode*> GetChildren(bool want_types) const override {
     if (want_types) {
-      return {expr_, type_};
+      return {expr_, type_annotation_};
     }
     return {expr_};
   }
 
   Expr* expr() const { return expr_; }
-  TypeAnnotation* type() const { return type_; }
+  TypeAnnotation* type_annotation() const { return type_annotation_; }
 
  private:
   Expr* expr_;
-  TypeAnnotation* type_;
+  TypeAnnotation* type_annotation_;
 };
 
 // Represents `next` keyword, refers to the implicit loop-carry call in `Proc`.
@@ -2033,7 +2072,7 @@ class Let : public Expr {
   std::vector<AstNode*> GetChildren(bool want_types) const override;
 
   NameDefTree* name_def_tree() const { return name_def_tree_; }
-  TypeAnnotation* type() const { return type_; }
+  TypeAnnotation* type_annotation() const { return type_annotation_; }
   Expr* rhs() const { return rhs_; }
   Expr* body() const { return body_; }
   ConstantDef* constant_def() const { return constant_def_; }
@@ -2047,7 +2086,7 @@ class Let : public Expr {
   NameDefTree* name_def_tree_;
 
   // The optional annotated type on the let expression, may be null.
-  TypeAnnotation* type_;
+  TypeAnnotation* type_annotation_;
 
   // Right hand side of the let; e.g. in `let a = b; c` this is `b`.
   Expr* rhs_;

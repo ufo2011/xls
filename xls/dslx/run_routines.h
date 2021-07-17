@@ -20,6 +20,7 @@
 
 #include "xls/dslx/interp_value.h"
 #include "xls/dslx/interpreter.h"
+#include "xls/dslx/ir_converter.h"
 #include "xls/dslx/symbolic_bindings.h"
 #include "xls/ir/function.h"
 #include "xls/ir/package.h"
@@ -46,8 +47,8 @@ class RunComparator {
 
   // Runs a comparison of the interpreter-determined value against the
   // JIT-determined value.
-  absl::Status RunComparison(Package* ir_package, Function* f,
-                             absl::Span<InterpValue const> args,
+  absl::Status RunComparison(Package* ir_package, bool requires_implicit_token,
+                             Function* f, absl::Span<InterpValue const> args,
                              const SymbolicBindings* symbolic_bindings,
                              const InterpValue& got);
 
@@ -78,14 +79,22 @@ class RunComparator {
 //    executions with a reference (e.g. IR execution).
 //   execute: Whether or not to execute the quickchecks and tests.
 //   seed: Seed for QuickCheck random input stimulus.
+//   convert_options: Options used in IR conversion, see `ConvertOptions` for
+//    details.
 struct ParseAndTestOptions {
-  absl::Span<const std::string> dslx_paths = {};
+  absl::Span<const std::filesystem::path> dslx_paths = {};
   absl::optional<absl::string_view> test_filter = absl::nullopt;
   bool trace_all = false;
   FormatPreference trace_format_preference = FormatPreference::kDefault;
   RunComparator* run_comparator = nullptr;
   bool execute = true;
   absl::optional<int64_t> seed = absl::nullopt;
+  ConvertOptions convert_options;
+};
+
+enum class TestResult {
+  kSomeFailed,
+  kAllPassed,
 };
 
 // Parses program and run all tests contained inside.
@@ -99,10 +108,10 @@ struct ParseAndTestOptions {
 //
 // Returns:
 //   Whether any test failed (as a boolean).
-absl::StatusOr<bool> ParseAndTest(absl::string_view program,
-                                  absl::string_view module_name,
-                                  absl::string_view filename,
-                                  const ParseAndTestOptions& options);
+absl::StatusOr<TestResult> ParseAndTest(absl::string_view program,
+                                        absl::string_view module_name,
+                                        absl::string_view filename,
+                                        const ParseAndTestOptions& options);
 
 struct QuickCheckResults {
   std::vector<std::vector<Value>> arg_sets;

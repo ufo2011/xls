@@ -15,6 +15,8 @@
 #ifndef XLS_DSLX_DEDUCE_CTX_H_
 #define XLS_DSLX_DEDUCE_CTX_H_
 
+#include <filesystem>
+
 #include "xls/common/status/ret_check.h"
 #include "xls/dslx/concrete_type.h"
 #include "xls/dslx/import_routines.h"
@@ -80,7 +82,7 @@ class DeduceCtx {
   DeduceCtx(TypeInfo* type_info, Module* module, DeduceFn deduce_function,
             TypecheckFunctionFn typecheck_function,
             TypecheckFn typecheck_module,
-            absl::Span<std::string const> additional_search_paths,
+            absl::Span<const std::filesystem::path> additional_search_paths,
             ImportData* import_data);
 
   // Creates a new DeduceCtx reflecting the given type info and module.
@@ -141,7 +143,7 @@ class DeduceCtx {
     return typecheck_function_;
   }
 
-  absl::Span<std::string const> additional_search_paths() const {
+  absl::Span<std::filesystem::path const> additional_search_paths() const {
     return additional_search_paths_;
   }
   ImportData* import_data() const { return import_data_; }
@@ -168,7 +170,7 @@ class DeduceCtx {
   TypecheckFn typecheck_module_;
 
   // Additional paths to search on import.
-  std::vector<std::string> additional_search_paths_;
+  std::vector<std::filesystem::path> additional_search_paths_;
 
   // Cache used for imported modules, may be nullptr.
   ImportData* import_data_;
@@ -229,6 +231,21 @@ bool IsTypeMissingErrorStatus(const absl::Status& status);
 
 absl::Status ArgCountMismatchErrorStatus(const Span& span,
                                          absl::string_view message);
+
+// Returned when an invalid identifier (invalid at some position in the
+// compilation chain, DSLX, IR, or Verilog) is encountered.
+absl::Status InvalidIdentifierErrorStatus(const Span& span,
+                                          absl::string_view message);
+
+// Makes a constexpr environment suitable for passing to
+// Interpreter::InterpExpr(). This will be populated with symbolic bindings
+// as well as a constexpr freevars of "node", which is useful when there are
+// local const bindings closed over e.g. in function scope.
+//
+// `type_info` is required to look up the value of previously computed
+// constexprs.
+absl::flat_hash_map<std::string, InterpValue> MakeConstexprEnv(
+    Expr* node, const SymbolicBindings& symbolic_bindings, TypeInfo* type_info);
 
 }  // namespace xls::dslx
 

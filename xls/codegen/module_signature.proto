@@ -107,6 +107,8 @@ message ResetProto {
   optional bool active_low = 3;
   // Whether flops in the data path are reset by this reset signal. If false,
   // only flops in the control path are reset (e.g., pipelined "valid" signal).
+  // TODO(meheff) 2021/04/21 Remove this field when pipeline generator is ported
+  // to the proc generator. Register resets are handled explicitly in this case.
   optional bool reset_data_path = 4;
 }
 
@@ -133,5 +135,7 @@ message ModuleSignatureProto {
   }
 
   // The XLS function type that it generated a module for.
+  // TODO(meheff): 2021/04/23 Consider removing this field and adding types to
+  // the inputs/outputs.
   optional FunctionTypeProto function_type = 9;
 }

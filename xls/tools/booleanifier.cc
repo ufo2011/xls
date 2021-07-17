@@ -17,14 +17,17 @@
 // representation, i.e., consisting of only AND/OR/NOT ops.
 #include "xls/tools/booleanifier.h"
 
+#include <cstdint>
 #include <filesystem>
 
 #include "absl/status/status.h"
+#include "absl/types/span.h"
 #include "xls/common/logging/logging.h"
 #include "xls/common/math_util.h"
 #include "xls/common/status/status_macros.h"
 #include "xls/ir/abstract_evaluator.h"
 #include "xls/ir/abstract_node_evaluator.h"
+#include "xls/ir/bits_ops.h"
 #include "xls/ir/function_builder.h"
 #include "xls/ir/node_iterator.h"
 #include "xls/ir/nodes.h"
@@ -110,6 +113,69 @@ Booleanifier::Vector Booleanifier::FlattenValue(const Value& value) {
   return result;
 }
 
+Booleanifier::Vector Booleanifier::HandleLiteralArrayIndex(
+    const ArrayType* array_type, const Vector& array, const Value& index,
+    int64_t start_offset) {
+  const int64_t element_size = array_type->element_type()->GetFlatBitCount();
+
+  XLS_CHECK(index.IsBits());
+  int64_t concrete_index =
+      bits_ops::UGreaterThanOrEqual(index.bits(), array_type->size())
+          ? array_type->size() - 1
+          : index.bits().ToUint64().value();
+  start_offset += concrete_index * element_size;
+  return evaluator_->BitSlice(array, start_offset, element_size);
+}
+
+Booleanifier::Vector Booleanifier::HandleArrayIndex(
+    const ArrayType* array_type, const Vector& array,
+    absl::Span<Node* const> indices, int64_t start_offset) {
+  Type* element_type = array_type->element_type();
+  int64_t element_size = element_type->GetFlatBitCount();
+
+  if (indices.size() == 1 && indices[0]->Is<Literal>()) {
+    // Literal index; directly slice out the relevant bits.
+    // TODO(rspringer): We can statically determine the exact set of
+    // bits to carve out for an array of literal indices (or subarrays of
+    // literals), but it's not of paramount importance at present.
+    return HandleLiteralArrayIndex(
+        array_type, array, indices[0]->As<Literal>()->value(), start_offset);
+  }
+
+  std::vector<Vector> cases;
+  for (int i = 0; i < array_type->size(); i++) {
+    if (element_type->IsArray()) {
+      cases.push_back(HandleArrayIndex(element_type->AsArrayOrDie(), array,
+                                       indices.subspan(1),
+                                       start_offset + i * element_size));
+    } else {
+      cases.push_back(evaluator_->BitSlice(
+          array, start_offset + i * element_size, element_size));
+    }
+  }
+
+  return evaluator_->Select(node_map_.at(indices[0]), cases, cases.back());
+}
+
+Booleanifier::Vector Booleanifier::HandleArrayUpdate(
+    const ArrayType* array_type, const Vector& array,
+    const Vector& update_index, const Vector& update_value) {
+  Vector result;
+  const int64_t index_width = update_index.size();
+  for (int i = 0; i < array_type->size(); i++) {
+    const Value loop_index(UBits(i, index_width));
+
+    const Element equals_index =
+        evaluator_->Equals(FlattenValue(loop_index), update_index);
+    const Vector old_value =
+        HandleLiteralArrayIndex(array_type, array, loop_index, 0);
+    const Vector new_value =
+        evaluator_->Select(Vector({equals_index}), {old_value, update_value});
+    result.insert(result.end(), new_value.begin(), new_value.end());
+  }
+  return result;
+}
+
 Booleanifier::Vector Booleanifier::HandleSpecialOps(Node* node) {
   switch (node->op()) {
     case Op::kArray:
@@ -123,26 +189,26 @@ Booleanifier::Vector Booleanifier::HandleSpecialOps(Node* node) {
       return result;
     }
     case Op::kArrayIndex: {
-      // Remember that an "array" inside booleanified space is just a vector of
-      // bits. SO we need to calculate the start bit of the specified index.
-      Vector result;
       ArrayIndex* array_index = node->As<ArrayIndex>();
       const ArrayType* array_type =
           array_index->array()->GetType()->AsArrayOrDie();
-      int64_t element_width = array_type->element_type()->GetFlatBitCount();
-      Vector& array = node_map_.at(array_index->array());
-
-      // TODO(rspringer): These will be changed to XLS_RETURN_IF_ERROR, etc.,
-      // once I update AbstractEvaluate()'s default_handler callback to return a
-      // StatusOr.
-      XLS_CHECK_EQ(array_index->indices().size(), 1);
-      XLS_CHECK(array_index->indices()[0]->Is<Literal>());
-      Literal* literal = array_index->indices()[0]->As<Literal>();
-      XLS_CHECK(literal->value().IsBits());
-      XLS_CHECK(literal->value().bits().ToUint64().ok());
-      int64_t start_index = literal->value().bits().ToUint64().value();
-      int64_t start_bit = start_index * element_width;
-      return evaluator_->BitSlice(array, start_bit, element_width);
+      std::vector<Vector> indices;
+      for (const auto& index : array_index->indices()) {
+        indices.push_back(node_map_.at(index));
+      }
+      return HandleArrayIndex(array_type, node_map_.at(array_index->array()),
+                              array_index->indices(), /*start_offset=*/0);
+    }
+    case Op::kArrayUpdate: {
+      // Use the old value for each element, except for the updated element.
+      ArrayUpdate* array_update = node->As<ArrayUpdate>();
+      XLS_CHECK(array_update->indices().size() == 1)
+          << "Booleanification is only supported for 1d arrays; got "
+          << array_update->indices().size() << ".";
+      return HandleArrayUpdate(array_update->GetType()->AsArrayOrDie(),
+                               node_map_.at(array_update->array_to_update()),
+                               node_map_.at(array_update->indices()[0]),
+                               node_map_.at(array_update->update_value()));
     }
     case Op::kLiteral: {
       Vector result;

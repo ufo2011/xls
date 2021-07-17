@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // bfloat16 routines.
-import xls.dslx.stdlib.apfloat
+import apfloat
 
 pub type BF16 = apfloat::APFloat<u32:8, u32:7>;
 pub type FloatTag = apfloat::APFloatTag;
@@ -33,6 +33,9 @@ pub fn unflatten(f: u16) -> BF16 { apfloat::unflatten<u32:8, u32:7>(f) }
 pub fn cast_from_fixed<NUM_SRC_BITS:u32>(s: sN[NUM_SRC_BITS]) -> BF16 {
   apfloat::cast_from_fixed<u32:8, u32:7>(s)
 }
+pub fn cast_to_fixed<NUM_DST_BITS:u32>(to_cast: BF16) -> sN[NUM_DST_BITS] {
+  apfloat::cast_to_fixed<NUM_DST_BITS, u32:8, u32:7>(to_cast)
+}
 pub fn subnormals_to_zero(f: BF16) -> BF16 {
   apfloat::subnormals_to_zero<u32:8, u32:7>(f)
 }
@@ -41,6 +44,26 @@ pub fn is_inf(f: BF16) -> u1 { apfloat::is_inf<u32:8, u32:7>(f) }
 pub fn is_nan(f: BF16) -> u1 { apfloat::is_nan<u32:8, u32:7>(f) }
 pub fn is_zero_or_subnormal(f: BF16) -> u1 {
   apfloat::is_zero_or_subnormal<u32:8, u32:7>(f)
+}
+
+pub fn eq_2(x: BF16, y: BF16) -> u1 {
+  apfloat::eq_2<u32:8, u32:7>(x, y)
+}
+
+pub fn gt_2(x: BF16, y: BF16) -> u1 {
+  apfloat::gt_2<u32:8, u32:7>(x, y)
+}
+
+pub fn gte_2(x: BF16, y: BF16) -> u1 {
+  apfloat::gte_2<u32:8, u32:7>(x, y)
+}
+
+pub fn lt_2(x: BF16, y: BF16) -> u1 {
+  apfloat::lt_2<u32:8, u32:7>(x, y)
+}
+
+pub fn lte_2(x: BF16, y: BF16) -> u1 {
+  apfloat::lte_2<u32:8, u32:7>(x, y)
 }
 
 pub fn normalize(sign:u1, exp: u8, sfd_with_hidden: u8) -> BF16 {

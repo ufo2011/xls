@@ -59,6 +59,7 @@ namespace op_matchers {
 // then recursively checks the operands. The second simply matches the name.
 class NodeMatcher : public ::testing::MatcherInterface<const Node*> {
  public:
+  NodeMatcher(const NodeMatcher&) = default;
   NodeMatcher(Op op, absl::Span<const ::testing::Matcher<const Node*>> operands)
       : op_(op), operands_(operands.begin(), operands.end()) {}
 
@@ -616,6 +617,9 @@ class ChannelNodeMatcher : public NodeMatcher {
 //   EXPECT_THAT(foo, m::Send(m::Channel(42)));
 //   EXPECT_THAT(foo, m::Send(/*token=*/m::Param(), /*data=*/m::Param(),
 //                            m::Channel(42)));
+//   EXPECT_THAT(foo, m::Send(/*token=*/m::Param(), /*data=*/m::Param(),
+//                            /*predicate=*/m::Param(),
+//                            m::Channel(42)));
 class SendMatcher : public ChannelNodeMatcher {
  public:
   explicit SendMatcher(
@@ -626,6 +630,13 @@ class SendMatcher : public ChannelNodeMatcher {
       ::testing::Matcher<const Node*> data,
       absl::optional<::testing::Matcher<const ::xls::Channel*>> channel_matcher)
       : ChannelNodeMatcher(Op::kSend, {token, data}, channel_matcher) {}
+  explicit SendMatcher(
+      ::testing::Matcher<const Node*> token,
+      ::testing::Matcher<const Node*> data,
+      ::testing::Matcher<const Node*> predicate,
+      absl::optional<::testing::Matcher<const ::xls::Channel*>> channel_matcher)
+      : ChannelNodeMatcher(Op::kSend, {token, data, predicate},
+                           channel_matcher) {}
 };
 
 inline ::testing::Matcher<const ::xls::Node*> Send(
@@ -644,39 +655,14 @@ inline ::testing::Matcher<const ::xls::Node*> Send(
       new ::xls::op_matchers::SendMatcher(token, data, channel_matcher));
 }
 
-// SendIf matcher. Supported forms:
-//
-//   EXPECT_THAT(foo, m::SendIf());
-//   EXPECT_THAT(foo, m::SendIf(m::Channel(...)));
-//   EXPECT_THAT(foo, m::SendIf(/*token=*/m::Param(), /*pred=*/m::Param(),
-//                              /*data=*/m::Param(), m::Channel(...)));
-class SendIfMatcher : public ChannelNodeMatcher {
- public:
-  explicit SendIfMatcher(
-      absl::optional<::testing::Matcher<const ::xls::Channel*>> channel_matcher)
-      : ChannelNodeMatcher(Op::kSendIf, {}, channel_matcher) {}
-  explicit SendIfMatcher(
-      ::testing::Matcher<const Node*> token,
-      ::testing::Matcher<const Node*> pred,
-      ::testing::Matcher<const Node*> data,
-      absl::optional<::testing::Matcher<const ::xls::Channel*>> channel_matcher)
-      : ChannelNodeMatcher(Op::kSendIf, {token, pred, data}, channel_matcher) {}
-};
-
-inline ::testing::Matcher<const ::xls::Node*> SendIf(
+inline ::testing::Matcher<const ::xls::Node*> Send(
+    ::testing::Matcher<const ::xls::Node*> token,
+    ::testing::Matcher<const Node*> data,
+    ::testing::Matcher<const Node*> predicate,
     absl::optional<::testing::Matcher<const ::xls::Channel*>> channel_matcher =
         absl::nullopt) {
-  return ::testing::MakeMatcher(
-      new ::xls::op_matchers::SendIfMatcher(channel_matcher));
-}
-
-inline ::testing::Matcher<const ::xls::Node*> SendIf(
-    ::testing::Matcher<const ::xls::Node*> token,
-    ::testing::Matcher<const ::xls::Node*> pred,
-    ::testing::Matcher<const Node*> data,
-    absl::optional<::testing::Matcher<const ::xls::Channel*>> channel_matcher) {
-  return ::testing::MakeMatcher(new ::xls::op_matchers::SendIfMatcher(
-      token, pred, data, channel_matcher));
+  return ::testing::MakeMatcher(new ::xls::op_matchers::SendMatcher(
+      token, data, predicate, channel_matcher));
 }
 
 // Receive matcher. Supported forms:
@@ -684,6 +670,8 @@ inline ::testing::Matcher<const ::xls::Node*> SendIf(
 //   EXPECT_THAT(foo, m::Receive());
 //   EXPECT_THAT(foo, m::Receive(m::Channel(...))
 //   EXPECT_THAT(foo, m::Receive(/*token=*/m::Param(), m::Channel(...)))
+//   EXPECT_THAT(foo, m::Receive(/*token=*/m::Param(), /*predicate=*/m::Param(),
+//                               m::Channel(...)))
 class ReceiveMatcher : public ChannelNodeMatcher {
  public:
   explicit ReceiveMatcher(
@@ -693,6 +681,11 @@ class ReceiveMatcher : public ChannelNodeMatcher {
       ::testing::Matcher<const Node*> token,
       absl::optional<::testing::Matcher<const ::xls::Channel*>> channel_matcher)
       : ChannelNodeMatcher(Op::kReceive, {token}, channel_matcher) {}
+  explicit ReceiveMatcher(
+      ::testing::Matcher<const Node*> token,
+      ::testing::Matcher<const Node*> predicate,
+      absl::optional<::testing::Matcher<const ::xls::Channel*>> channel_matcher)
+      : ChannelNodeMatcher(Op::kReceive, {token, predicate}, channel_matcher) {}
 };
 
 inline ::testing::Matcher<const ::xls::Node*> Receive(
@@ -709,38 +702,12 @@ inline ::testing::Matcher<const ::xls::Node*> Receive(
       new ::xls::op_matchers::ReceiveMatcher(token, channel_matcher));
 }
 
-// ReceiveIf matcher. Supported forms:
-//
-//   EXPECT_THAT(foo, m::ReceiveIf());
-//   EXPECT_THAT(foo, m::ReceiveIf(m::Channel(...)));
-//   EXPECT_THAT(foo, m::ReceiveIf(/*token=*/m::Param(),
-//                                 /*pred=*/m::Param(), m::Channel(...)));
-class ReceiveIfMatcher : public ChannelNodeMatcher {
- public:
-  explicit ReceiveIfMatcher(
-      absl::optional<::testing::Matcher<const ::xls::Channel*>> channel_matcher)
-      : ChannelNodeMatcher(Op::kReceiveIf, {}, channel_matcher) {}
-  explicit ReceiveIfMatcher(
-      ::testing::Matcher<const Node*> token,
-      ::testing::Matcher<const Node*> pred,
-      absl::optional<::testing::Matcher<const ::xls::Channel*>> channel_matcher)
-      : ChannelNodeMatcher(Op::kReceiveIf, {token, pred}, channel_matcher) {}
-};
-
-inline ::testing::Matcher<const ::xls::Node*> ReceiveIf(
-    absl::optional<::testing::Matcher<const ::xls::Channel*>> channel_matcher =
-        absl::nullopt) {
-  return ::testing::MakeMatcher(
-      new ::xls::op_matchers::ReceiveIfMatcher(channel_matcher));
-}
-
-inline ::testing::Matcher<const ::xls::Node*> ReceiveIf(
-    ::testing::Matcher<const ::xls::Node*> token,
-    ::testing::Matcher<const ::xls::Node*> pred,
-    absl::optional<::testing::Matcher<const ::xls::Channel*>> channel_matcher =
-        absl::nullopt) {
-  return ::testing::MakeMatcher(
-      new ::xls::op_matchers::ReceiveIfMatcher(token, pred, channel_matcher));
+inline ::testing::Matcher<const ::xls::Node*> Receive(
+    ::testing::Matcher<const Node*> token,
+    ::testing::Matcher<const Node*> predicate,
+    ::testing::Matcher<const ::xls::Channel*> channel_matcher) {
+  return ::testing::MakeMatcher(new ::xls::op_matchers::ReceiveMatcher(
+      token, predicate, channel_matcher));
 }
 
 // ArrayIndex matcher. Supported forms:
@@ -807,74 +774,183 @@ inline ::testing::Matcher<const ::xls::Node*> ArrayUpdate() {
 // InputPort matcher. Supported forms:
 //
 //   EXPECT_THAT(foo, m::InputPort());
-//   EXPECT_THAT(foo, m::InputPort(/*channel_name=*/"foo"));
+//   EXPECT_THAT(foo, m::InputPort("foo"));
 //
-// Unlike most other matches, InputPort matches multiple nodes, specifically the
-// following pattern:
-//
-//   TupleIndex(Receive(), /*index=*/1)
-//
-// This pattern is used because a receive operation produces a two-tuple (token,
-// data), and this matcher matches the data element. The channel specifications
-// (if given) match the channel of the Receive which must be a port channel.
-class InputPortMatcher : public ::testing::MatcherInterface<const Node*> {
+class InputPortMatcher : public NodeMatcher {
  public:
-  explicit InputPortMatcher(absl::optional<std::string> channel_name)
-      : matcher_(Receive(Channel(/*id=*/absl::nullopt, channel_name,
-                                 ChannelKind::kPort)),
-                 /*index=*/1) {}
+  explicit InputPortMatcher(absl::optional<std::string> name)
+      : NodeMatcher(Op::kInputPort, /*operands=*/{}), name_(name) {}
 
   bool MatchAndExplain(const Node* node,
                        ::testing::MatchResultListener* listener) const override;
   void DescribeTo(::std::ostream* os) const override;
 
  private:
-  TupleIndexMatcher matcher_;
+  absl::optional<std::string> name_;
 };
 
 inline ::testing::Matcher<const ::xls::Node*> InputPort(
-    absl::optional<std::string> channel_name = absl::nullopt) {
-  return ::testing::MakeMatcher(
-      new ::xls::op_matchers::InputPortMatcher(channel_name));
+    absl::optional<std::string> name = absl::nullopt) {
+  return ::testing::MakeMatcher(new ::xls::op_matchers::InputPortMatcher(name));
 }
 
 // OutputPort matcher. Supported forms:
 //
 //   EXPECT_THAT(foo, m::OutputPort());
-//   EXPECT_THAT(foo, m::OutputPort(/*channel_name=*/"foo"));
+//   EXPECT_THAT(foo, m::OutputPort("foo"));
 //   EXPECT_THAT(foo, m::OutputPort(m::Add()));
-//   EXPECT_THAT(foo, m::OutputPort(m::Add(), /*channel_name=*/"foo");
+//   EXPECT_THAT(foo, m::OutputPort("foo", m::Add());
 //
-// Matches a send node over a port channel.
-class OutputPortMatcher : public ::testing::MatcherInterface<const Node*> {
+class OutputPortMatcher : public NodeMatcher {
  public:
-  OutputPortMatcher(absl::optional<std::string> channel_name)
-      : matcher_(Channel(/*id=*/absl::nullopt, /*name=*/channel_name,
-                         ChannelKind::kPort)) {}
-  explicit OutputPortMatcher(::testing::Matcher<const ::xls::Node*> data,
-                             absl::optional<std::string> channel_name)
-      : matcher_(
-            Channel(/*id=*/absl::nullopt, channel_name, ChannelKind::kPort)) {}
+  explicit OutputPortMatcher(absl::optional<std::string> name)
+      : NodeMatcher(Op::kOutputPort, /*operands=*/{}), name_(name) {}
+
+  OutputPortMatcher(::testing::Matcher<const ::xls::Node*> data,
+                    absl::optional<std::string> name)
+      : NodeMatcher(Op::kOutputPort, /*operands=*/{data}), name_(name) {}
 
   bool MatchAndExplain(const Node* node,
                        ::testing::MatchResultListener* listener) const override;
   void DescribeTo(::std::ostream* os) const override;
 
  private:
-  SendMatcher matcher_;
+  absl::optional<std::string> name_;
 };
 
 inline ::testing::Matcher<const ::xls::Node*> OutputPort(
-    absl::optional<std::string> channel_name = absl::nullopt) {
+    absl::optional<std::string> name = absl::nullopt) {
   return ::testing::MakeMatcher(
-      new ::xls::op_matchers::OutputPortMatcher(channel_name));
+      new ::xls::op_matchers::OutputPortMatcher(name));
 }
 
 inline ::testing::Matcher<const ::xls::Node*> OutputPort(
-    ::testing::Matcher<const ::xls::Node*> data,
-    absl::optional<std::string> channel_name = absl::nullopt) {
+    ::testing::Matcher<const ::xls::Node*> data) {
   return ::testing::MakeMatcher(
-      new ::xls::op_matchers::OutputPortMatcher(data, channel_name));
+      new ::xls::op_matchers::OutputPortMatcher(data, /*name=*/absl::nullopt));
+}
+
+inline ::testing::Matcher<const ::xls::Node*> OutputPort(
+    absl::optional<std::string> name,
+    ::testing::Matcher<const ::xls::Node*> data) {
+  return ::testing::MakeMatcher(
+      new ::xls::op_matchers::OutputPortMatcher(data, name));
+}
+
+// RegisterRead matcher. Matches register name only. Supported forms:
+//
+//   EXPECT_THAT(x, m::RegisterRead());
+//   EXPECT_THAT(x, m::RegisterRead("x"));
+//
+class RegisterReadMatcher : public NodeMatcher {
+ public:
+  explicit RegisterReadMatcher(absl::optional<std::string> register_name)
+      : NodeMatcher(Op::kRegisterRead, /*operands=*/{}),
+        register_name_(register_name) {}
+
+  bool MatchAndExplain(const Node* node,
+                       ::testing::MatchResultListener* listener) const override;
+  void DescribeTo(::std::ostream* os) const override;
+
+ private:
+  absl::optional<std::string> register_name_;
+};
+
+inline ::testing::Matcher<const ::xls::Node*> RegisterRead(
+    absl::optional<std::string> register_name) {
+  return ::testing::MakeMatcher(
+      new ::xls::op_matchers::RegisterReadMatcher(register_name));
+}
+
+inline ::testing::Matcher<const ::xls::Node*> RegisterRead() {
+  return ::testing::MakeMatcher(
+      new ::xls::op_matchers::NodeMatcher(Op::kRegisterRead, {}));
+}
+
+// RegisterWrite matcher. Matches register name only. Supported forms:
+//
+//   EXPECT_THAT(x, m::RegisterWrite());
+//   EXPECT_THAT(x, m::RegisterWrite("x"));
+//   EXPECT_THAT(x, m::RegisterWrite(data));
+//   EXPECT_THAT(x, m::RegisterWrite("x", data));
+//
+class RegisterWriteMatcher : public NodeMatcher {
+ public:
+  explicit RegisterWriteMatcher(absl::optional<std::string> register_name)
+      : NodeMatcher(Op::kRegisterWrite, /*operands=*/{}),
+        register_name_(register_name) {}
+
+  explicit RegisterWriteMatcher(::testing::Matcher<const ::xls::Node*> data,
+                                absl::optional<std::string> register_name)
+      : NodeMatcher(Op::kRegisterWrite, /*operands=*/{data}),
+        register_name_(register_name) {}
+
+  bool MatchAndExplain(const Node* node,
+                       ::testing::MatchResultListener* listener) const override;
+  void DescribeTo(::std::ostream* os) const override;
+
+ private:
+  absl::optional<std::string> register_name_;
+};
+
+inline ::testing::Matcher<const ::xls::Node*> RegisterWrite(
+    absl::optional<std::string> register_name = absl::nullopt) {
+  return ::testing::MakeMatcher(
+      new ::xls::op_matchers::RegisterWriteMatcher(register_name));
+}
+
+inline ::testing::Matcher<const ::xls::Node*> RegisterWrite(
+    absl::optional<std::string> register_name, const Node* node) {
+  return ::testing::MakeMatcher(
+      new ::xls::op_matchers::RegisterWriteMatcher(node, register_name));
+}
+
+// Register matcher. Supported forms:
+//
+//   EXPECT_THAT(foo, m::Register());
+//   EXPECT_THAT(foo, m::Register("foo"));
+//   EXPECT_THAT(foo, m::Register(m::Add()));
+//   EXPECT_THAT(foo, m::Register("foo", m::Add()));
+//
+class RegisterMatcher : public ::testing::MatcherInterface<const Node*> {
+ public:
+  explicit RegisterMatcher(absl::optional<std::string> register_name)
+      : d_matcher_(register_name) {}
+  RegisterMatcher(::testing::Matcher<const Node*> input,
+                  absl::optional<std::string> register_name)
+      : q_matcher_(RegisterWriteMatcher(input, register_name)),
+        d_matcher_(register_name) {}
+
+  bool MatchAndExplain(const Node* node,
+                       ::testing::MatchResultListener* listener) const override;
+  void DescribeTo(::std::ostream* os) const override;
+
+ private:
+  // Optional matcher for the send side of the register (the Q input port).
+  absl::optional<RegisterWriteMatcher> q_matcher_;
+
+  // Matcher for the receive side of the register (the D output port). This
+  // matches a tuple index of a receive operation.
+  RegisterReadMatcher d_matcher_;
+};
+
+inline ::testing::Matcher<const ::xls::Node*> Register(
+    absl::optional<std::string> register_name = absl::nullopt) {
+  return ::testing::MakeMatcher(
+      new ::xls::op_matchers::RegisterMatcher(register_name));
+}
+
+inline ::testing::Matcher<const ::xls::Node*> Register(
+    ::testing::Matcher<const Node*> input) {
+  return ::testing::MakeMatcher(
+      new ::xls::op_matchers::RegisterMatcher(input, absl::nullopt));
+}
+
+inline ::testing::Matcher<const ::xls::Node*> Register(
+    absl::optional<std::string> register_name,
+    ::testing::Matcher<const Node*> input) {
+  return ::testing::MakeMatcher(
+      new ::xls::op_matchers::RegisterMatcher(input, register_name));
 }
 
 }  // namespace op_matchers

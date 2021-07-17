@@ -141,7 +141,7 @@
 // args: bits[26]:0x80_0000; bits[1]:0x0; bits[14]:0x200; bits[2]:0x0
 // args: bits[26]:0x40_0000; bits[1]:0x0; bits[14]:0x301; bits[2]:0x1
 // args: bits[26]:0x40; bits[1]:0x0; bits[14]:0x1000; bits[2]:0x1
-const W3_V5 = u3:0x5;
+const W32_V5 = u32:0x5;
 type x10 = u1;
 type x31 = u7;
 fn main(x0: u26, x1: u1, x2: s14, x3: u2) -> (u35, u35, u35) {
@@ -168,10 +168,10 @@ fn main(x0: u26, x1: u1, x2: s14, x3: u2) -> (u35, u35, u35) {
   let x23: u1 = (((x20) as u35)) > (x11);
   let x24: u3 = one_hot_sel(x3, [x5, x5]);
   let x25: u15 = u15:0x40;
-  let x26: s36 = (x15) >>> ((s36:0xb) if ((((x23) as s36)) >= (s36:0xb)) else (((x23) as s36)));
+  let x26: s36 = (x15) >> ((u36:0xb) if ((((x23) as u36)) >= (u36:0xb)) else (((x23) as u36)));
   let x27: s63 = s63:0x200000000000;
   let x28: u2 = one_hot_sel(x5, [x3, x3, x3]);
   let x29: u3 = (x12)[0x2];
-  let x30: x31[W3_V5] = ((x6) as x31[W3_V5]);
+  let x30: x31[W32_V5] = ((x6) as x31[W32_V5]);
   (x6, x11, x18)
 }

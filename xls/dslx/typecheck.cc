@@ -19,15 +19,21 @@
 #include "xls/dslx/dslx_builtins.h"
 #include "xls/dslx/import_routines.h"
 #include "xls/dslx/interpreter.h"
+#include "xls/dslx/parametric_instantiator.h"
+#include "re2/re2.h"
 
 namespace xls::dslx {
+
+// TODO(leary): 2021-03-29 The name here should be more like "Checkable" --
+// these are the AST node variants we keep in a stacked order for typechecking.
+using TopNode = absl::variant<Function*, TestFunction*, StructDef*, TypeDef*>;
 
 // Checks the function's parametrics' and arguments' types.
 static absl::StatusOr<std::vector<std::unique_ptr<ConcreteType>>>
 CheckFunctionParams(Function* f, DeduceCtx* ctx) {
   for (ParametricBinding* parametric : f->parametric_bindings()) {
     XLS_ASSIGN_OR_RETURN(std::unique_ptr<ConcreteType> parametric_binding_type,
-                         ctx->Deduce(parametric->type()));
+                         ctx->Deduce(parametric->type_annotation()));
     if (parametric->expr() != nullptr) {
       // TODO(leary): 2020-07-06 Fully document the behavior of parametric
       // function calls in parametric expressions.
@@ -84,7 +90,7 @@ static absl::Status CheckFunction(Function* f, DeduceCtx* ctx) {
       // invocation. Let's return this for now, and typecheck the body once we
       // have symbolic bindings.
       if (f->return_type() == nullptr) {
-        annotated_return_type = TupleType::MakeNil();
+        annotated_return_type = TupleType::MakeUnit();
       } else {
         XLS_ASSIGN_OR_RETURN(annotated_return_type,
                              ctx->Deduce(f->return_type()));
@@ -103,7 +109,7 @@ static absl::Status CheckFunction(Function* f, DeduceCtx* ctx) {
   // Note: if there is no annotated return type, we assume nil.
   std::unique_ptr<ConcreteType> return_type;
   if (f->return_type() == nullptr) {
-    return_type = TupleType::MakeNil();
+    return_type = TupleType::MakeUnit();
   } else {
     XLS_ASSIGN_OR_RETURN(return_type, DeduceAndResolve(f->return_type(), ctx));
   }
@@ -127,6 +133,16 @@ static absl::Status CheckFunction(Function* f, DeduceCtx* ctx) {
                         f->identifier()));
   }
 
+  // Implementation note: though we could have all functions have
+  // NoteRequiresImplicitToken() be false unless otherwise noted, this helps
+  // guarantee we did consider and make a note for every function -- the code is
+  // generally complex enough it's nice to have this soundness check.
+  if (absl::optional<bool> requires =
+          ctx->type_info()->GetRequiresImplicitToken(f);
+      !requires.has_value()) {
+    ctx->type_info()->NoteRequiresImplicitToken(f, false);
+  }
+
   FunctionType function_type(std::move(param_types),
                              std::move(body_return_type));
   ctx->type_info()->SetItem(f->name_def(), function_type);
@@ -138,11 +154,11 @@ static absl::Status CheckFunction(Function* f, DeduceCtx* ctx) {
 static absl::Status CheckTest(TestFunction* t, DeduceCtx* ctx) {
   XLS_ASSIGN_OR_RETURN(std::unique_ptr<ConcreteType> body_return_type,
                        ctx->Deduce(t->body()));
-  if (body_return_type->IsNil()) {
+  if (body_return_type->IsUnit()) {
     return absl::OkStatus();
   }
   return XlsTypeErrorStatus(
-      t->body()->span(), *body_return_type, *ConcreteType::MakeNil(),
+      t->body()->span(), *body_return_type, *ConcreteType::MakeUnit(),
       absl::StrFormat("Return type of test body for '%s' did not match the "
                       "expected test return type `()`.",
                       t->identifier()));
@@ -217,14 +233,20 @@ static absl::StatusOr<NameDef*> InstantiateBuiltinParametricMap(
   return absl::get<NameDef*>(name_ref->name_def());
 }
 
-absl::StatusOr<NameDef*> InstantiateBuiltinParametric(
-    BuiltinNameDef* builtin_name, Invocation* invocation, DeduceCtx* ctx) {
+// Instantiates a builtin parametric invocation; e.g. `update()`.
+static absl::StatusOr<NameDef*> InstantiateBuiltinParametric(
+    const TopNode* f, BuiltinNameDef* builtin_name, Invocation* invocation,
+    DeduceCtx* ctx) {
   std::vector<std::unique_ptr<ConcreteType>> arg_types;
+  std::vector<dslx::Span> arg_spans;
+  arg_spans.reserve(invocation->args().size());
+  arg_types.reserve(invocation->args().size());
   for (Expr* arg : invocation->args()) {
     absl::optional<ConcreteType*> arg_type = ctx->type_info()->GetItem(arg);
     XLS_ASSIGN_OR_RETURN(std::unique_ptr<ConcreteType> resolved,
                          Resolve(**arg_type, ctx));
     arg_types.push_back(std::move(resolved));
+    arg_spans.push_back(arg->span());
   }
 
   absl::optional<std::string> map_fn_name;
@@ -251,6 +273,46 @@ absl::StatusOr<NameDef*> InstantiateBuiltinParametric(
         higher_order_parametric_bindings = (*map_fn)->parametric_bindings();
       }
     }
+  } else if (builtin_name->identifier() == "fail!" ||
+             builtin_name->identifier() == "cover!") {
+    if (f != nullptr && absl::holds_alternative<Function*>(*f)) {
+      ctx->type_info()->NoteRequiresImplicitToken(absl::get<Function*>(*f),
+                                                  true);
+    } else {
+      return TypeInferenceErrorStatus(
+          invocation->span(), nullptr,
+          "Observed a fail!() or cover!() outside of a function.");
+    }
+
+    if (builtin_name->identifier() == "cover!") {
+      // Make sure that the coverpoint's identifier is valid in both Verilog
+      // and DSLX - notably, we don't support Verilog escaped strings.
+      // TODO(rspringer): 2021-05-26: Ensure only one instance of an identifier
+      // in a design.
+      String* identifier_node = dynamic_cast<String*>(invocation->args()[0]);
+      XLS_RET_CHECK(identifier_node != nullptr);
+      if (identifier_node->text().empty()) {
+        return InvalidIdentifierErrorStatus(
+            invocation->span(),
+            "An identifier must be specified with a cover! op.");
+      }
+
+      std::string identifier = identifier_node->text();
+      if (identifier[0] == '\\') {
+        return InvalidIdentifierErrorStatus(
+            invocation->span(), "Verilog escaped strings are not supported.");
+      }
+
+      // We don't support Verilog "escaped strings", so we only have to worry
+      // about regular identifier matching.
+      if (!RE2::FullMatch(identifier, "[a-zA-Z_][a-zA-Z0-9$_]*")) {
+        return InvalidIdentifierErrorStatus(
+            invocation->span(),
+            "A coverpoint identifer must start with a letter or underscore, "
+            "and otherwise consist of letters, digits, underscores, and/or "
+            "dollar signs.");
+      }
+    }
   }
 
   std::vector<const ConcreteType*> arg_type_ptrs;
@@ -266,11 +328,11 @@ absl::StatusOr<NameDef*> InstantiateBuiltinParametric(
 
   // Callback that signatures can use to request constexpr evaluation of their
   // arguments -- this is a special builtin superpower used by e.g. range().
-  auto constexpr_eval = [&](int64_t argno) -> absl::Status {
+  auto constexpr_eval = [&](int64_t argno) -> absl::StatusOr<InterpValue> {
     Expr* arg = invocation->args()[argno];
 
-    auto env =
-        MakeConstexprEnv(arg, ctx->fn_stack().back().symbolic_bindings(), ctx);
+    auto env = MakeConstexprEnv(arg, ctx->fn_stack().back().symbolic_bindings(),
+                                ctx->type_info());
 
     XLS_ASSIGN_OR_RETURN(
         InterpValue value,
@@ -278,14 +340,20 @@ absl::StatusOr<NameDef*> InstantiateBuiltinParametric(
             arg->owner(), ctx->type_info(), ctx->typecheck_module(),
             ctx->additional_search_paths(), ctx->import_data(), env, arg));
     ctx->type_info()->NoteConstExpr(arg, value);
-    return absl::OkStatus();
+    return value;
   };
 
+  absl::optional<std::vector<ParametricConstraint>> parametric_constraints;
+  if (higher_order_parametric_bindings.has_value()) {
+    XLS_ASSIGN_OR_RETURN(parametric_constraints,
+                         ParametricBindingsToConstraints(
+                             higher_order_parametric_bindings.value(), ctx));
+  }
   XLS_ASSIGN_OR_RETURN(
       TypeAndBindings tab,
       fsignature(
-          SignatureData{arg_type_ptrs, builtin_name->identifier(),
-                        invocation->span(), higher_order_parametric_bindings,
+          SignatureData{arg_type_ptrs, arg_spans, builtin_name->identifier(),
+                        invocation->span(), std::move(parametric_constraints),
                         constexpr_eval},
           ctx));
   FunctionType* fn_type = dynamic_cast<FunctionType*>(tab.type.get());
@@ -327,7 +395,6 @@ absl::StatusOr<NameDef*> InstantiateBuiltinParametric(
 // its user (which would often be an invocation), which allows us to drive the
 // appropriate instantiation of that parametric.
 
-using TopNode = absl::variant<Function*, TestFunction*, StructDef*, TypeDef*>;
 struct WipRecord {
   TopNode f;
   bool wip;
@@ -422,8 +489,16 @@ static void VLogSeen(
 //
 // * For a name that refers to a function in the "function_map", we push that
 //   onto the top of the processing stack.
+//
+// Args:
+//  f: The top node being processed when we observed the missing type status --
+//    this is optional since we can encounter e.g. a parametric function in a
+//    constant definition at the top level, so there's no TopNode to speak of in
+//    that case.
+//  status: The missing type status, this encodes the node that had the type
+//    error and its user node that discovered the type was missing.
 static absl::Status HandleMissingType(
-    const absl::Status& status,
+    const TopNode* f, const absl::Status& status,
     const absl::flat_hash_map<std::string, Function*>& function_map,
     absl::flat_hash_map<std::pair<std::string, std::string>, WipRecord>& seen,
     std::vector<TypecheckStackRecord>& stack, DeduceCtx* ctx) {
@@ -475,7 +550,7 @@ static absl::Status HandleMissingType(
       if (auto* invocation = dynamic_cast<Invocation*>(e.user)) {
         XLS_ASSIGN_OR_RETURN(
             NameDef * func,
-            InstantiateBuiltinParametric(builtin_name_def, invocation, ctx));
+            InstantiateBuiltinParametric(f, builtin_name_def, invocation, ctx));
         if (func != nullptr) {
           // We need to figure out what to do with this higher order
           // parametric function.
@@ -521,7 +596,7 @@ static absl::Status CheckTopNodeInModuleInternal(
 
     if (IsTypeMissingErrorStatus(status)) {
       XLS_RETURN_IF_ERROR(
-          HandleMissingType(status, function_map, seen, stack, ctx));
+          HandleMissingType(&f, status, function_map, seen, stack, ctx));
       continue;
     }
 
@@ -638,8 +713,8 @@ static absl::Status CheckModuleMember(ModuleMember member, Module* module,
           ctx->module()->GetFunctionByName();
       absl::flat_hash_map<std::pair<std::string, std::string>, WipRecord> seen;
       std::vector<TypecheckStackRecord> stack;
-      XLS_RETURN_IF_ERROR(
-          HandleMissingType(status, function_map, seen, stack, ctx));
+      XLS_RETURN_IF_ERROR(HandleMissingType(/*f=*/nullptr, status, function_map,
+                                            seen, stack, ctx));
       XLS_RETURN_IF_ERROR(
           CheckTopNodeInModuleInternal(function_map, seen, stack, ctx));
       status = CheckModuleMember(member, module, import_data, ctx);
@@ -730,9 +805,9 @@ static absl::Status CheckModuleMember(ModuleMember member, Module* module,
 
 absl::StatusOr<TypeInfo*> CheckModule(
     Module* module, ImportData* import_data,
-    absl::Span<const std::string> additional_search_paths) {
+    absl::Span<const std::filesystem::path> additional_search_paths) {
   // Create a deduction context to use for checking this module.
-  std::vector<std::string> additional_search_paths_copy(
+  std::vector<std::filesystem::path> additional_search_paths_copy(
       additional_search_paths.begin(), additional_search_paths.end());
   XLS_ASSIGN_OR_RETURN(TypeInfo * type_info,
                        import_data->type_info_owner().New(module));

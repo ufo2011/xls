@@ -39,10 +39,14 @@ absl::StatusOr<TypeInfo*> TypeInfoOwner::New(Module* module, TypeInfo* parent) {
     // Check we only have a single nullptr-parent TypeInfo for a given module.
     XLS_RET_CHECK(!module_to_root_.contains(module))
         << "module " << module->name() << " already has a root TypeInfo";
+    XLS_VLOG(5) << "Making root type info for module: " << module->name()
+                << " @ " << result;
     module_to_root_[module] = result;
   } else {
     // Check that we don't have parent links that traverse modules.
     XLS_RET_CHECK_EQ(parent->module(), module);
+    XLS_VLOG(5) << "Making derived type info for module: " << module->name()
+                << " parent: " << parent << " @ " << result;
   }
   return result;
 }
@@ -125,6 +129,31 @@ bool TypeInfo::HasInstantiation(Invocation* invocation,
       << invocation->owner()->name() << " vs " << module_->name() << " @ "
       << invocation->span();
   return GetInstantiationTypeInfo(invocation, caller).has_value();
+}
+
+absl::optional<bool> TypeInfo::GetRequiresImplicitToken(Function* f) const {
+  XLS_CHECK_EQ(f->owner(), module_) << "function owner: " << f->owner()->name()
+                                    << " module: " << module_->name();
+  const TypeInfo* root = GetRoot();
+  const absl::flat_hash_map<Function*, bool>& map =
+      root->requires_implicit_token_;
+  auto it = map.find(f);
+  if (it == map.end()) {
+    return absl::nullopt;
+  }
+  bool result = it->second;
+  XLS_VLOG(6) << absl::StreamFormat("GetRequiresImplicitToken %p %s::%s => %s",
+                                    root, f->owner()->name(), f->identifier(),
+                                    (result ? "true" : "false"));
+  return result;
+}
+
+void TypeInfo::NoteRequiresImplicitToken(Function* f, bool is_required) {
+  TypeInfo* root = GetRoot();
+  XLS_VLOG(6) << absl::StreamFormat(
+      "NoteRequiresImplicitToken %p: %s::%s => %s", root, f->owner()->name(),
+      f->identifier(), is_required ? "true" : "false");
+  root->requires_implicit_token_.emplace(f, is_required);
 }
 
 absl::optional<TypeInfo*> TypeInfo::GetInstantiationTypeInfo(
@@ -263,6 +292,12 @@ absl::optional<Expr*> TypeInfo::GetConstant(NameDef* name_def) const {
     return absl::nullopt;
   }
   return it->second->value();
+}
+
+TypeInfo::TypeInfo(Module* module, TypeInfo* parent)
+    : module_(module), parent_(parent) {
+  XLS_VLOG(6) << "Created type info for module \"" << module_->name() << "\" @ "
+              << this << " parent " << parent << " root " << GetRoot();
 }
 
 }  // namespace xls::dslx

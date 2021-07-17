@@ -68,25 +68,30 @@ TEST(TypecheckTest, TokenIdentity) {
   XLS_EXPECT_OK(Typecheck("fn f(x: token) -> token { x }"));
 }
 
-TEST(TypecheckTest, Nil) {
+TEST(TypecheckTest, Unit) {
   XLS_EXPECT_OK(Typecheck("fn f(x: u32) -> () { () }"));
   XLS_EXPECT_OK(Typecheck("fn f(x: u32) { () }"));
 }
 
 TEST(TypecheckTest, Arithmetic) {
+  // Simple add.
   XLS_EXPECT_OK(Typecheck("fn f(x: u32, y: u32) -> u32 { x + y }"));
+  // Wrong return type (implicitly unit).
   EXPECT_THAT(
       Typecheck("fn f(x: u32, y: u32) { x + y }"),
       StatusIs(absl::StatusCode::kInvalidArgument, HasSubstr("uN[32] vs ()")));
+  // Wrong return type (implicitly unit).
   EXPECT_THAT(
       Typecheck(R"(
       fn f<N: u32>(x: bits[N], y: bits[N]) { x + y }
-      fn g() -> u64 { f(u64: 5, u64: 5) }
+      fn g() -> u64 { f(u64:5, u64:5) }
       )"),
       StatusIs(absl::StatusCode::kInvalidArgument, HasSubstr("uN[64] vs ()")));
+  // Mixing widths not permitted.
   EXPECT_THAT(Typecheck("fn f(x: u32, y: bits[4]) { x + y }"),
               StatusIs(absl::StatusCode::kInvalidArgument,
                        HasSubstr("uN[32] vs uN[4]")));
+  // Parametric same-width is ok!
   XLS_EXPECT_OK(
       Typecheck("fn f<N: u32>(x: bits[N], y: bits[N]) -> bits[N] { x + y }"));
 }
@@ -254,6 +259,15 @@ fn f() -> u32 {
 })"));
 }
 
+TEST(TypecheckTest, ForNoAnnotation) {
+  XLS_EXPECT_OK(Typecheck(R"(
+fn f() -> u32 {
+  for (i, accum) in range(u32:0, u32:3) {
+    accum
+  }(u32:0)
+})"));
+}
+
 TEST(TypecheckTest, ForBuiltinInBody) {
   XLS_EXPECT_OK(Typecheck(R"(
 fn f() -> u32 {
@@ -283,7 +297,8 @@ fn f(x: u32) -> (u32, u8) {
 })"),
       StatusIs(
           absl::StatusCode::kInvalidArgument,
-          HasSubstr("Expected a tuple type for these names, but got uN[8].")));
+          HasSubstr("(uN[32], uN[8]) vs (uN[32], (uN[32], uN[8])): For-loop "
+                    "annotated type did not match inferred type.")));
 }
 
 TEST(TypecheckTest, DerivedExprTypeMismatch) {
@@ -634,7 +649,7 @@ fn f(x: u32[5]) -> u32[5] {
 TEST(TypecheckTest, UpdateMultidimIndex) {
   EXPECT_THAT(Typecheck(R"(
 fn f(x: u32[6][5], i: u32[2]) -> u32[6][5] {
-  update(x, i, u32[6]:0)
+  update(x, i, u32[6]:[0, ...])
 }
 )"),
               StatusIs(absl::StatusCode::kInvalidArgument,
@@ -976,15 +991,17 @@ TEST(TypecheckStructInstanceTest, DuplicateFieldY) {
 }
 
 TEST(TypecheckStructInstanceTest, StructIncompatibleWithTupleEquivalent) {
-  EXPECT_THAT(TypecheckStructInstance(R"(
+  EXPECT_THAT(
+      TypecheckStructInstance(R"(
 fn f(x: (s8, u32)) -> (s8, u32) { x }
 fn g() -> (s8, u32) {
   let p = Point { x: s8:255, y: u32:1024 };
   f(p)
 }
 )"),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("argument type name: 'Point'")));
+      StatusIs(
+          absl::StatusCode::kInvalidArgument,
+          HasSubstr("argument types are different kinds (tuple vs struct)")));
 }
 
 TEST(TypecheckStructInstanceTest, SplatWithDuplicate) {
@@ -1052,8 +1069,11 @@ TEST(TypecheckParametricStructInstanceTest, BadReturnType) {
   EXPECT_THAT(
       TypecheckParametricStructInstance(
           "fn f() -> Point<5, 10> { Point { x: u32:5, y: u64:255 } }"),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("(x: uN[32], y: uN[64]) vs (x: uN[5], y: uN[10])")));
+      StatusIs(
+          absl::StatusCode::kInvalidArgument,
+          HasSubstr(
+              "struct 'Point' structure: Point { x: uN[32], y: uN[64] } vs "
+              "struct 'Point' structure: Point { x: uN[5], y: uN[10] }")));
 }
 
 // Bad struct type-parametric instantiation in parametric function.

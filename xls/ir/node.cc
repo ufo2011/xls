@@ -68,19 +68,9 @@ absl::Status Node::AddNodeToFunctionAndReplace(
   return ReplaceUsesWith(replacement_ptr);
 }
 
-void Node::AddUser(Node* user) {
-  auto insert_result = users_set_.insert(user);
-  if (insert_result.second) {
-    users_.push_back(user);
-    // Keep the users sequence sorted by ordinal for stability.
-    absl::c_sort(users_, [](Node* a, Node* b) { return a->id() < b->id(); });
-  }
-}
+void Node::AddUser(Node* user) { users_.insert(user); }
 
-void Node::RemoveUser(Node* user) {
-  users_set_.erase(user);
-  users_.erase(std::remove(users_.begin(), users_.end(), user), users_.end());
-}
+void Node::RemoveUser(Node* user) { XLS_CHECK_EQ(users_.erase(user), 1); }
 
 absl::Status Node::VisitSingleNode(DfsVisitor* visitor) {
   switch (op()) {
@@ -97,18 +87,14 @@ absl::Status Node::VisitSingleNode(DfsVisitor* visitor) {
     case Op::kAssert:
       XLS_RETURN_IF_ERROR(visitor->HandleAssert(down_cast<Assert*>(this)));
       break;
+    case Op::kCover:
+      XLS_RETURN_IF_ERROR(visitor->HandleCover(down_cast<Cover*>(this)));
+      break;
     case Op::kReceive:
       XLS_RETURN_IF_ERROR(visitor->HandleReceive(down_cast<Receive*>(this)));
       break;
-    case Op::kReceiveIf:
-      XLS_RETURN_IF_ERROR(
-          visitor->HandleReceiveIf(down_cast<ReceiveIf*>(this)));
-      break;
     case Op::kSend:
       XLS_RETURN_IF_ERROR(visitor->HandleSend(down_cast<Send*>(this)));
-      break;
-    case Op::kSendIf:
-      XLS_RETURN_IF_ERROR(visitor->HandleSendIf(down_cast<SendIf*>(this)));
       break;
     case Op::kNand:
       XLS_RETURN_IF_ERROR(visitor->HandleNaryNand(down_cast<NaryOp*>(this)));
@@ -207,6 +193,14 @@ absl::Status Node::VisitSingleNode(DfsVisitor* visitor) {
     case Op::kParam:
       XLS_RETURN_IF_ERROR(visitor->HandleParam(down_cast<Param*>(this)));
       break;
+    case Op::kRegisterRead:
+      XLS_RETURN_IF_ERROR(
+          visitor->HandleRegisterRead(down_cast<RegisterRead*>(this)));
+      break;
+    case Op::kRegisterWrite:
+      XLS_RETURN_IF_ERROR(
+          visitor->HandleRegisterWrite(down_cast<RegisterWrite*>(this)));
+      break;
     case Op::kReverse:
       XLS_RETURN_IF_ERROR(visitor->HandleReverse(down_cast<UnOp*>(this)));
       break;
@@ -289,6 +283,17 @@ absl::Status Node::VisitSingleNode(DfsVisitor* visitor) {
       XLS_RETURN_IF_ERROR(
           visitor->HandleZeroExtend(down_cast<ExtendOp*>(this)));
       break;
+    case Op::kInputPort:
+      XLS_RETURN_IF_ERROR(
+          visitor->HandleInputPort(down_cast<InputPort*>(this)));
+      break;
+    case Op::kOutputPort:
+      XLS_RETURN_IF_ERROR(
+          visitor->HandleOutputPort(down_cast<OutputPort*>(this)));
+      break;
+    case Op::kGate:
+      XLS_RETURN_IF_ERROR(visitor->HandleGate(down_cast<Gate*>(this)));
+      break;
   }
   return absl::OkStatus();
 }
@@ -314,9 +319,13 @@ bool Node::IsDefinitelyEqualTo(const Node* other) const {
   if (this == other) {
     return true;
   }
+  if (OpIsSideEffecting(op())) {
+    return false;
+  }
   if (op() != other->op()) {
     return false;
   }
+
   auto same_type = [&](const Node* a, const Node* b) {
     return a->GetType()->IsEqualTo(b->GetType());
   };
@@ -451,23 +460,22 @@ std::string Node::ToStringInternal(bool include_operand_types) const {
     }
     case Op::kSend: {
       const Send* send = As<Send>();
+      if (send->predicate().has_value()) {
+        args = {operand(0)->GetName(), operand(1)->GetName()};
+        args.push_back(absl::StrFormat("predicate=%s",
+                                       send->predicate().value()->GetName()));
+      }
       args.push_back(absl::StrFormat("channel_id=%d", send->channel_id()));
-      break;
-    }
-    case Op::kSendIf: {
-      const SendIf* send_if = As<SendIf>();
-      args.push_back(absl::StrFormat("channel_id=%d", send_if->channel_id()));
       break;
     }
     case Op::kReceive: {
       const Receive* receive = As<Receive>();
+      if (receive->predicate().has_value()) {
+        args = {operand(0)->GetName()};
+        args.push_back(absl::StrFormat(
+            "predicate=%s", receive->predicate().value()->GetName()));
+      }
       args.push_back(absl::StrFormat("channel_id=%d", receive->channel_id()));
-      break;
-    }
-    case Op::kReceiveIf: {
-      const ReceiveIf* receive_if = As<ReceiveIf>();
-      args.push_back(
-          absl::StrFormat("channel_id=%d", receive_if->channel_id()));
       break;
     }
     case Op::kSignExt:
@@ -519,6 +527,27 @@ std::string Node::ToStringInternal(bool include_operand_types) const {
             absl::StrFormat("label=\"%s\"", As<Assert>()->label().value()));
       }
       break;
+    case Op::kCover:
+      args.push_back(absl::StrFormat("label=\"%s\"", As<Cover>()->label()));
+      break;
+    case Op::kInputPort:
+    case Op::kOutputPort:
+      args.push_back(absl::StrFormat("name=%s", GetName()));
+      break;
+    case Op::kRegisterRead:
+      args.push_back(
+          absl::StrFormat("register=%s", As<RegisterRead>()->register_name()));
+      break;
+    case Op::kRegisterWrite:
+      args = {operand(0)->GetName()};
+      args.push_back(
+          absl::StrFormat("register=%s", As<RegisterWrite>()->register_name()));
+      if (As<RegisterWrite>()->load_enable().has_value()) {
+        args.push_back(absl::StrFormat(
+            "load_enable=%s",
+            As<RegisterWrite>()->load_enable().value()->GetName()));
+      }
+      break;
     default:
       break;
   }
@@ -549,7 +578,7 @@ std::string Node::GetUsersString() const {
 }
 
 bool Node::HasUser(const Node* target) const {
-  return users_set_.find(const_cast<Node*>(target)) != users_set_.end();
+  return users_.contains(const_cast<Node*>(target));
 }
 
 bool Node::IsDead() const {
@@ -576,8 +605,17 @@ int64_t Node::OperandInstanceCount(const Node* target) const {
   return count;
 }
 
-void Node::set_id(int64_t id) {
+void Node::SetId(int64_t id) {
+  // The data structure (btree) containing the users of each node is sorted by
+  // node id. To avoid violating invariants of the data structure, remove this
+  // node from all users lists, change id, then read to users list.
+  for (Node* operand : operands()) {
+    operand->users_.erase(this);
+  }
   id_ = id;
+  for (Node* operand : operands()) {
+    operand->users_.insert(this);
+  }
   package()->set_next_node_id(std::max(id + 1, package()->next_node_id()));
 }
 
@@ -667,8 +705,7 @@ absl::StatusOr<bool> Node::ReplaceImplicitUsesWith(Node* replacement) {
       XLS_RETURN_IF_ERROR(function->set_return_value(replacement));
       changed = true;
     }
-  } else {
-    XLS_RET_CHECK(function_base()->IsProc());
+  } else if (function_base()->IsProc()) {
     Proc* proc = function_base()->AsProcOrDie();
     if (this == proc->NextToken()) {
       XLS_RETURN_IF_ERROR(proc->SetNextToken(replacement));
@@ -678,6 +715,9 @@ absl::StatusOr<bool> Node::ReplaceImplicitUsesWith(Node* replacement) {
       XLS_RETURN_IF_ERROR(proc->SetNextState(replacement));
       changed = true;
     }
+  } else {
+    XLS_RET_CHECK(function_base()->IsBlock());
+    // Blocks have no implicit uses.
   }
   return changed;
 }

@@ -30,7 +30,7 @@
 #include "xls/contrib/xlscc/translator.h"
 #include "xls/contrib/xlscc/unit_test.h"
 #include "xls/interpreter/channel_queue.h"
-#include "xls/interpreter/ir_interpreter.h"
+#include "xls/interpreter/function_interpreter.h"
 #include "xls/interpreter/proc_interpreter.h"
 #include "xls/ir/bits.h"
 #include "xls/ir/ir_test_base.h"
@@ -46,8 +46,19 @@ class XlsccTestBase : public xls::IrTestBase {
            xabsl::SourceLocation loc = xabsl::SourceLocation::current(),
            std::vector<absl::string_view> clang_argv = {});
 
+  void Run(const absl::flat_hash_map<std::string, xls::Value>& args,
+           xls::Value expected, absl::string_view cpp_source,
+           xabsl::SourceLocation loc = xabsl::SourceLocation::current(),
+           std::vector<absl::string_view> clang_argv = {});
+
   absl::Status ScanFile(absl::string_view cpp_src,
                         std::vector<absl::string_view> argv = {});
+
+  // Overload which takes a translator as a parameter rather than constructing
+  // and using the translator_ data member.
+  static absl::Status ScanFile(absl::string_view cpp_src,
+                               std::vector<absl::string_view> argv,
+                               xlscc::Translator* translator);
 
   absl::StatusOr<std::string> SourceToIr(
       absl::string_view cpp_src, xlscc::GeneratedFunction** pfunc = nullptr,

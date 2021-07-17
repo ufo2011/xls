@@ -312,13 +312,20 @@ Enums can be compared for equality/inequality, but they do not permit arithmetic
 operations, they must be cast to numerical types in order to perform arithmetic:
 
 ```dslx
+enum Opcode: u3 {
+  NOP = 0,
+  ADD = 1,
+  SUB = 2,
+  MUL = 3,
+}
+
 fn same_opcode(x: Opcode, y: Opcode) -> bool {
   x == y  // ok
 }
 
 fn next_in_sequence(x: Opcode, y: Opcode) -> bool {
   // x+1 == y // does not work, arithmetic!
-  u3:x + u3:1 == u3:y  // ok, casted first
+  x as u3 + u3:1 == (y as u3)  // ok, casted first
 }
 ```
 
@@ -330,17 +337,17 @@ extension/truncation behavior.)
 
 ```dslx
 enum MySignedEnum : s3 {
-  LOW = -1
-  ZERO = 0
-  HIGH = 1
+  LOW = -1,
+  ZERO = 0,
+  HIGH = 1,
 }
 
 fn extend_to_32b(x: MySignedEnum) -> u32 {
-  u32:x  // Sign-extends because the source type is signed.
+  x as u32  // Sign-extends because the source type is signed.
 }
 
 #![test]
-fn extend_to_32b {
+fn test_extend_to_32b() {
   assert_eq(extend_to_32b(MySignedEnum::LOW), u32:-1)
 }
 ```
@@ -376,7 +383,7 @@ Example of a tuple type:
 //       the 1st element is of type u8
 //       the 2nd element is another tuple with 1 element of type u16
 //       the 3rd element is of type u8
-type MyTuple = (u32, (u8, (u16,), u8);
+type MyTuple = (u32, (u8, (u16,), u8));
 ```
 
 To access individual tuple elements use simple indices, starting at 0. For
@@ -441,7 +448,7 @@ struct Point {
 }
 
 #![test]
-fn struct_equality {
+fn test_struct_equality() {
   let p0 = Point { x: u32:42, y: u32:64 };
   let p1 = Point { y: u32:64, x: u32:42 };
   assert_eq(p0, p1)
@@ -455,7 +462,7 @@ names of in-scope values:
 struct Point { x: u32, y: u32, }
 
 #![test]
-fn struct_equality {
+fn test_struct_equality() {
   let x = u32:42;
   let y = u32:64;
   let p0 = Point { x, y };
@@ -481,7 +488,7 @@ fn main() -> u32 {
 }
 
 #![test]
-fn main {
+fn test_main() {
   assert_eq(u32:106, main())
 }
 ```
@@ -507,7 +514,7 @@ fn main() -> Point3 {
 }
 
 #![test]
-fn main {
+fn test_main() {
   let want = Point3 { x: u32:42, y: u32:128, z: u32:256 };
   assert_eq(want, main())
 }
@@ -519,6 +526,12 @@ The DSL has syntax for conveniently producing a new value with a subset of
 fields updated to reduce verbosity. The "struct update" syntax is:
 
 ```dslx
+struct Point3 {
+  x: u32,
+  y: u32,
+  z: u32,
+}
+
 fn update_y(p: Point3) -> Point3 {
   Point3 { y: u32:42, ..p }
 }
@@ -537,14 +550,17 @@ section.
 ```dslx
 fn double(n: u32) -> u32 { n * u32:2 }
 
-struct Point<N: u32, M: u32 = double(N)> Point { x: bits[N], y: bits[M], }
+struct Point<N: u32, M: u32 = double(N)> {
+  x: bits[N],
+  y: bits[M],
+}
 
-fn make_point<A: u32, B: u32> make_point(x: bits[A], y: bits[B]) -> Point[A, B] {
+fn make_point<A: u32, B: u32>(x: bits[A], y: bits[B]) -> Point<A, B> {
   Point{ x, y }
 }
 
 #![test]
-fn struct_construction {
+fn test_struct_construction() {
   let p = make_point(u16:42, u32:42);
   assert_eq(u16:42, p.x)
 }
@@ -575,12 +591,14 @@ fn f(p: Point) -> u32 {
 }
 
 #![test]
-fn ok {
+fn test_ok() {
   assert_eq(f(Point { x: u32:42, y: u32:64 }), u32:106)
 }
+```
 
+```dslx-bad
 #![test]
-fn type_checker_error {
+fn test_type_checker_error() {
   assert_eq(f(Coordinate { x: u32:42, y: u32:64 }), u32:106)
 }
 ```
@@ -597,7 +615,7 @@ fn main(a: u32[2], i: u1) -> u32 {
 }
 
 #![test]
-fn main {
+fn test_main() {
   let x = u32:42;
   let y = u32:64;
   // Make an array with "bracket notation".
@@ -620,7 +638,7 @@ fn make_array(x: u32) -> u32[3] {
 }
 
 #![test]
-fn make_array {
+fn test_make_array() {
   let _ = assert_eq(u32[3]:[u32:42, u32:42, u32:42], make_array(u32:42));
   let _ = assert_eq(u32[3]:[u32:42, u32:64, u32:64], make_array(u32:64));
   ()
@@ -629,6 +647,30 @@ fn make_array {
 
 TODO(meheff): Explain arrays and the intricacies of our bits type interpretation
 and how it affects arrays of bits etc.
+
+#### Character String Constants
+
+Character strings are a special case of array types, being implicitly-sized
+arrays of u8 elements. String constants can be used just as traditional arrays:
+
+```dslx
+fn add_one<N: u32>(input: u8[N]) -> u8[N] {
+  for (i, result) : (u32, u8[N]) in range(u32:0, N) {
+    update(result, i, result[i] + u8:1)
+  }(input)
+}
+
+#![test]
+fn test_main() {
+  assert_eq("bcdef", add_one("abcde"))
+}
+```
+
+DSLX string constants support the
+[full Rust set of escape sequences](https://doc.rust-lang.org/reference/tokens.html) -
+for multi-byte sequences, i.e., Unicode escapes, the resulting byte sequence
+will be in printed order. In other words, the sequence `\u{89ab}` will result in
+an array with the (binary) values `1000 1001 1010 1011` in sequence.
 
 ### Type Aliases
 
@@ -644,7 +686,8 @@ type Weight = u6;
 We can create an alias for an imported type:
 
 ```dslx
-import xls.dslx.interpreter.tests.mod_imported
+// Note: this imports an external file in the codebase.
+import xls.dslx.tests.mod_imported
 
 type MyEnum = mod_imported::MyEnum;
 
@@ -653,7 +696,7 @@ fn main(x: u8) -> MyEnum {
 }
 
 #![test]
-fn main {
+fn test_main() {
   let _ = assert_eq(main(u8:42), MyEnum::FOO);
   let _ = assert_eq(main(u8:64), MyEnum::BAR);
   ()
@@ -686,37 +729,37 @@ semantics.
 
 ```dslx
 #![test]
-fn narrow_cast {
+fn test_narrow_cast() {
   let twelve = u4:0b1100;
   assert_eq(twelve as u2, u2:0)
 }
 
 #![test]
-fn widen_cast {
+fn test_widen_cast() {
   let three = u2:0b11;
   assert_eq(three as u4, u4:3)
 }
 
 #![test]
-fn narrow_signed_cast {
+fn test_narrow_signed_cast() {
   let negative_seven = s4:0b1001;
   assert_eq(negative_seven as u2, u2:1)
 }
 
 #![test]
-fn widen_signed_cast {
+fn test_widen_signed_cast() {
   let negative_one = s2:0b11;
   assert_eq(negative_one as s4, s4:-1)
 }
 
 #![test]
-fn widen_to_unsigned {
+fn test_widen_to_unsigned() {
   let negative_one = s2:0b11;
   assert_eq(negative_one as u3, u3:0b111)
 }
 
 #![test]
-fn widen_to_signed {
+fn test_widen_to_signed() {
   let three = u2:0b11;
   assert_eq(three as u3, u3:0b011)
 }
@@ -800,7 +843,7 @@ is also `bits[2]`. Qed.
 
 A **type error** would occur in the following:
 
-```dslx
+```dslx-bad
 fn add_wrapper(x: bits[2], y: bits[3]) -> bits[2] {
   x + y
 }
@@ -907,15 +950,17 @@ Here is an example using the same function via two different aliases for the
 same module:
 
 ```dslx
-import xls.dslx.interpreter.tests.mod_imported
-import xls.dslx.interpreter.tests.mod_imported as mi
+// Note: this imports an external file in the codebase under two different
+// names.
+import xls.dslx.tests.mod_imported
+import xls.dslx.tests.mod_imported as mi
 
 fn main(x: u3) -> u1 {
   mod_imported::my_lsb(x) || mi::my_lsb(x)
 }
 
 #![test]
-fn main {
+fn test_main() {
   assert_eq(u1:0b1, main(u3:0b001))
 }
 ```
@@ -935,15 +980,15 @@ This applies to other things defined at module scope as well: functions, enums,
 type aliases, etc.
 
 ```dslx
-import xls.dslx.interpreter.tests.mod_imported
-import xls.dslx.interpreter.tests.mod_imported as mi
+import xls.dslx.tests.mod_imported
+import xls.dslx.tests.mod_imported as mi
 
 fn main(x: u3) -> u1 {
   mod_imported::my_lsb(x) || mi::my_lsb(x)
 }
 
 #![test]
-fn main {
+fn test_main() {
   assert_eq(u1:0b1, main(u3:0b001))
 }
 ```
@@ -964,7 +1009,7 @@ fn match_const(x: u8) -> u8 {
 }
 
 #![test]
-fn match_const_not_binding {
+fn test_match_const_not_binding() {
   let _ = assert_eq(u8:42, match_const(u8:0));
   let _ = assert_eq(u8:42, match_const(u8:1));
   let _ = assert_eq(u8:0, match_const(u8:42));
@@ -980,14 +1025,13 @@ fn h(t: (u8, (u16, u32))) -> u32 {
 }
 
 #![test]
-fn match_nested {
+fn test_match_nested() {
   let _ = assert_eq(u32:3, h((u8:42, (u16:1, u32:2))));
   let _ = assert_eq(u32:1, h((u8:0, (u16:1, u32:42))));
   let _ = assert_eq(u32:7, h((u8:0, (u16:1, u32:0))));
   ()
 }
 ```
-
 
 ## Expressions
 
@@ -1060,7 +1104,7 @@ below:
 #![test]
 fn test_bits_concat() {
   let _ = assert_eq(u8:0b11000000, u2:0b11 ++ u6:0b000000);
-  let _ = assert_eq(u8:0b00000111, u2:0b00 ++ u6:0b000111));
+  let _ = assert_eq(u8:0b00000111, u2:0b00 ++ u6:0b000111);
   let _ = assert_eq(u6:0b100111, u1:1 ++ u2:0b00 ++ u3:0b111);
   let _ = assert_eq(u6:0b001000, u1:0 ++ u2:0b01 ++ u3:0b000);
   let _ = assert_eq(u32:0xdeadbeef, u16:0xdead ++ u16:0xbeef);
@@ -1078,7 +1122,7 @@ values to identifiers for subsequent use. For example:
 fn f(t: (u8, u32)) -> u32 {
   match t {
     (u8:42, y) => y,
-    (_, y) => y+u8:77
+    (_, y) => y+u32:77
   }
 }
 ```
@@ -1095,7 +1139,7 @@ const MY_FAVORITE_NUMBER = u8:42;
 fn f(t: (u8, u32)) -> u32 {
   match t {
     (MY_FAVORITE_NUMBER, y) => y,
-    (_, y) => y+u8:77
+    (_, y) => y+u32:77
   }
 }
 ```
@@ -1106,8 +1150,8 @@ This also works with nested tuples; for example:
 const MY_FAVORITE_NUMBER = u8:42;
 fn f(t: (u8, (u16, u32))) -> u32 {
   match t {
-    (MY_FAVORITE_NUMBER, (y, z)) => u32:y+z,
-    (_, (y, u32:42)) => u32:y,
+    (MY_FAVORITE_NUMBER, (y, z)) => y as u32 + z,
+    (_, (y, u32:42)) => y as u32,
     _ => u32:7
   }
 }
@@ -1115,6 +1159,38 @@ fn f(t: (u8, (u16, u32))) -> u32 {
 
 Here we use a "catch all" wildcard pattern in the last match arm to ensure the
 match expression always matches the input somehow.
+
+#### Redundant Patterns
+
+`match` will flag an error if a _syntactically identical_ pattern is typed
+twice; e.g.
+
+```dslx-bad
+const FOO = u32:42;
+fn f(x: u32) -> u2 {
+  match x {
+    FOO => u2:0,
+    FOO => u2:1,  // Identical pattern!
+    _ => u2:2,
+  }
+}
+```
+
+Only the first pattern will ever match, so it is fully redundant (and therefore
+likely a user error they'd like to be informed of). Note that _equivalent_ but
+not _syntactically identical_ patterns will not be flagged in this way.
+
+```dslx
+const FOO = u32:42;
+const BAR = u32:42;  // Compares `==` to `FOO`.
+fn f(x: u32) -> u2 {
+  match x {
+    FOO => u2:0,
+    BAR => u2:1,  // _Equivalent_ pattern, but not syntactically identical.
+    _ => u2:2,
+  }
+}
+```
 
 ### `let` Expression
 
@@ -1218,6 +1294,9 @@ for (index, accumulator): (type-of-index, type-of-accumulator) in iterable {
 } (initial-accumulator-value)
 ```
 
+The type annotation in the above "blueprint" is optional, but often helpful to
+include for increased clarity.
+
 Because DSLX is a pure dataflow description, a for loop is an expression that
 produces a value. As a result, you grab the output of a for loop just like any
 other expression:
@@ -1297,7 +1376,7 @@ for semantics of numeric casts:
 
 ```dslx
 #![test]
-fn numerical_conversions {
+fn test_numerical_conversions() {
   let s8_m2 = s8:-2;
   let u8_m2 = u8:-2;
   // Sign extension (source type is signed).
@@ -1342,7 +1421,7 @@ fn concat_arrays(a: u2[3], b: u2[3]) -> u2[6] {
 }
 
 #![test]
-fn cast_to_array {
+fn test_cast_to_array() {
   let a_value: u6 = u6:0b011011;
   let a: u2[3] = cast_to_array(a_value);
   let a_array = u2[3]:[1, 2, 3];
@@ -1378,18 +1457,21 @@ fn cast_to_array {
 
 DSLX supports Python-style bit slicing over bits types. Note that bits are
 numbered 0..N starting "from the right (as you would write it on paper)" --
-least significant bit, AKA LSb -- for example:
+least significant bit, AKA LSb -- for example, for the value `u7:0b100_0111`:
 
 ```
     Bit    6 5 4 3 2 1 0
   Value    1 0 0 0 1 1 1
 ```
 
-A slice expression `[n:m]` means to get from bit `n` (inclusive) to bit 'm'
-exclusive. This can be confusing, because the `n` stands to the left of `m` in
-the expression, but bit `n` would be to the 'right' of `m` in the classical bit
-numbering (note: Not in the classical array visualization, where element 0 is
-usually drawn to the left).
+A slice expression `[N:M]` means to get from bit `N` (inclusive) to bit `M`
+exclusive. The start and limit in the slice expression must be signed integral
+values.
+
+Aside: This can be confusing, because the `N` stands to the left of `M` in the
+expression, but bit `N` would be to the 'right' of `M` in the classical bit
+numbering. Additionally, this is not the case in the classical array
+visualization, where element 0 is usually drawn on the left.
 
 For example, the expression `[0:2]` would yield:
 
@@ -1402,7 +1484,7 @@ For example, the expression `[0:2]` would yield:
   Result:  0b11
 ```
 
-Note that, as of now, the indices for this `[n:m]` form must be literal numbers
+Note that, as of now, the indices for this `[N:M]` form must be literal numbers
 (so the compiler can determine the width of the result). To perform a slice with
 a non-literal-number start position, see the `+:` form described below.
 
@@ -1411,33 +1493,53 @@ start or end. To visualize, one can think of `x[ : -1]` as the equivalent of
 `x[from the start : bitwidth - 1]`. Correspondingly, `x[-1 : ]` can be
 visualized as `[ bitwidth - 1 : to the end]`.
 
-For example, to get all bits, except the MSb (from the beginning, until the top
-element minus 1):
+For example, to get all bits, *except* the MSb (from the beginning, until the
+top element minus 1):
 
 ```dslx-snippet
 x[:-1]
 ```
 
-Or to get the left-most 2 bits (from bitwidth - 2, all the way to the end):
+Or to get the two most significant bits:
 
 ```dslx-snippet
 x[-2:]
 ```
 
-There is also a "counted" form `x[start +: bits[N]]` - starting from a specified
-bit, slice out the next `N` bits. This is equivalent to: `bits[N]:(x >> start)`.
-The type can be specified as either signed or unsigned; e.g. `[start +: s8]`
-will produce an 8-bit signed value starting at `start`, whereas `[start +: u4]`
-will produce a 4-bit unsigned number starting at `start`.
+This results in the nice property that a the original complete value can be
+sliced into complementary slices such as `:-2` (all but the two most significant
+bits) and `-2:` (the two most significant bits):
+
+```dslx
+#![test]
+fn slice_into_two_pieces() {
+  let x = u5:0b11000;
+  let (lo, hi): (u3, u2) = (x[:-2], x[-2:]);
+  let _ = assert_eq(hi, u2:0b11);
+  let _ = assert_eq(lo, u3:0b000);
+  ()
+}
+```
+
+#### Width Slice
+
+There is also a "width slice" form `x[start +: bits[N]]` - starting from a
+specified bit, slice out the next `N` bits. This is equivalent to:
+`bits[N]:(x >> start)`. The type can be specified as either signed or unsigned;
+e.g. `[start +: s8]` will produce an 8-bit signed value starting at `start`,
+whereas `[start +: u4]` will produce a 4-bit unsigned number starting at
+`start`.
 
 [Here are many more examples](https://github.com/google/xls/tree/main/xls/dslx/tests/bit_slice_syntax.x):
+
+#### Bit Slice Examples
 
 ```dslx
 // Identity function helper.
 fn id<N: u32>(x: bits[N]) -> bits[N] { x }
 
 #![test]
-fn bit_slice_syntax {
+fn test_bit_slice_syntax() {
   let x = u6:0b100111;
   // Slice out two bits.
   let _ = assert_eq(u2:0b11, x[0:2]);
@@ -1648,19 +1750,6 @@ Example usage:
 See also the
 [IR semantics for the `one_hot` op](./ir_semantics.md#one_hot).
 
-### Explicitly-signed comparison builtins: sge, sgt, sle, slt
-
-Explicitly-signed comparison operations, that can be conveniently used on
-unsigned values as well (to avoid casting back and forth to signed). Has the
-following signature:
-
-```
-fn sgt<N>(x: xN[N], y: xN[N]) -> bool
-```
-
-Note that `xN` in the above signifies that the operand types must be the same,
-but may be, as a pair, either signed or unsigned (either uN or sN).
-
 ### signex
 
 Casting has well-defined extension rules, but in some cases it is necessary to
@@ -1678,7 +1767,7 @@ fn test_signex() {
   let x = u8:-1;
   let s: s32 = signex(x, s32:0);
   let u: u32 = signex(x, u32:0);
-  assert_eq(u32:s, u)
+  assert_eq(s as u32, u)
 }
 ```
 
@@ -1714,7 +1803,7 @@ fn main(x: u3) -> u3 {
 
 // Reverse examples.
 #![test]
-fn reverse {
+fn test_reverse() {
   let _ = assert_eq(u3:0b100, main(u3:0b001));
   let _ = assert_eq(u3:0b001, main(u3:0b100));
   let _ = assert_eq(bits[0]:0, rev(bits[0]:0));
@@ -1751,7 +1840,7 @@ trivial (0 bit wide) inputs:
 
 ```dslx
 #![test]
-fn trivial_reduce {
+fn test_trivial_reduce() {
   let _ = assert_eq(and_reduce(bits[0]:0), true);
   let _ = assert_eq(or_reduce(bits[0]:0), false);
   let _ = assert_eq(xor_reduce(bits[0]:0), false);
@@ -1803,15 +1892,15 @@ dumping of current values to stdout. For example:
 
 ```dslx
 fn decode_s_instruction(ins: u32) -> (u12, u5, u5, u3, u7) {
-   let imm_11_5 = (ins >> u32:25);
-   let rs2 = (ins >> u32:20) & u32:0x1F;
-   let rs1 = (ins >> u32:15) & u32:0x1F;
-   let funct3 = (ins >> u32:12) & u32:0x07;
-   let imm_4_0 = (ins >> u32:7) & u32:0x1F;
-   let opcode = ins & u32:0x7F;
-   let _ = trace!(imm_11_5);
-   let _ = trace!(imm_4_0);
-   (u12:(u7:imm_11_5 ++ u5:imm_4_0), u5:rs2, u5:rs1, u3:funct3, u7:opcode)
+  let imm_11_5 = (ins >> u32:25);
+  let rs2 = (ins >> u32:20) & u32:0x1F;
+  let rs1 = (ins >> u32:15) & u32:0x1F;
+  let funct3 = (ins >> u32:12) & u32:0x07;
+  let imm_4_0 = (ins >> u32:7) & u32:0x1F;
+  let opcode = ins & u32:0x7F;
+  let _ = trace!(imm_11_5);
+  let _ = trace!(imm_4_0);
+  (((imm_11_5 as u7) ++ (imm_4_0 as u5)) as u12, rs2 as u5, rs1 as u5, funct3 as u3, opcode as u7)
 }
 
 ```
@@ -1868,7 +1957,7 @@ during conversion to XLS IR.
 
 ### fail!
 
-Note: this section describes work-in-progress functionality, currently `fail!`
+NOTE: this section describes work-in-progress functionality, currently `fail!`
 will only trigger in DSL interpretation (it is discarded in IR conversion).
 Support for converting `fail!` to XLS `assert` IR is tracked in
 [#232](https://github.com/google/xls/issues/232) -- support for indicating the
@@ -1899,6 +1988,11 @@ documented [precondition](https://en.wikipedia.org/wiki/Precondition) for
 `main`):
 
 ```dslx
+enum EnumType: u2 {
+  FIRST = 0,
+  SECOND = 1,
+}
+
 fn main(x: EnumType) -> u32 {
   match x {
     EnumType::FIRST => u32:0,
@@ -1914,6 +2008,26 @@ or assertion failure respectively), but b) provides a fallback value to use (of
 the appropriate type) in case it were to happen in synthesized gates which did
 not insert fatal-error-indicating hardware.
 
+### cover!
+
+NOTE: This section describes work-in-progress functionality. Currently, `cover!`
+has no effect. Progress is being tracked in
+[#436](https://github.com/google/xls/issues/436).
+
+The `cover!` builtin tracks how often some condition is satisfied. Its signature
+is:
+
+```
+cover!(<name>, <condition>);
+```
+
+Where `name` is a function-unique literal string identifying the coverpoint and
+`condition` is a boolean element. When `condition` is true, a counter with the
+given name is incremented that can be inspected upon program termination.
+Coverpoints can be used to give an indication of code "coverage", i.e. to see
+what paths of a design are exercised in practice. The name of the coverpoint
+must begin with either a letter or underscore, and its remainder must consist of
+letters, digits, underscores, or dollar signs.
 
 ## Testing and Debugging
 

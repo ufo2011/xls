@@ -82,6 +82,29 @@ has no correlate in hardware.
 
 `token`
 
+## Functions, procs, and blocks
+
+The XLS IR has three function-level abstractions each which hold a data-flow
+graph of XLS IR operations:
+
+*   *function* : Stateless abstraction with a single-output which is computed
+    from zero or more input parameters. May invoke other functions.
+
+*   *proc* : Stateful abstraction with an arbitrarily-typed recurrent state.
+    Procs can communicate with other procs via channels which (abstractly) are
+    infinite-depth FIFOs with flow control. Channel communication is handled via
+    send and receive IR operations. Procs may invoke functions.
+
+*   *block* : RTL-level abstraction used for code generation. Corresponds to a
+    single Verilog module. Includes explicit representations of RTL constructs:
+    registers, ports, logic, and module instantiations. Procs and functions are
+    converted to blocks as part of the code generation process. Blocks may
+    “invoke” other blocks via instantiation.x
+
+Names of function, procs and blocks must be unique among their respective
+abstractions (functions, procs, and blocks). For example, a block cannot share a
+name with another block but can share a name with a function.
+
 ## Operations
 
 Operations share a common syntax and have both positional and keyword arguments
@@ -348,37 +371,11 @@ in a single transaction.
 #### **`receive`**
 
 Receives data values from a specified channel. The number of data values `N` and
-their type is determined by the channel.
+their type is determined by the channel. An optional predicate value
+conditionally enables the receive operation.
 
 ```
-result = receive(tkn, channel_id=<ch>)
-```
-
-**Types**
-
-Value    | Type
--------- | -------------------------------
-`tkn`    | `token`
-`result` | `(token, T_{0}, ... , T_{N-1})`
-
-**Keyword arguments**
-
-<!-- mdformat off(multiline table cells not supported in mkdocs) -->
-
-| Keyword      | Type    | Required | Default | Description              |
-| ------------ | ------- | -------- | ------- | ------------------------ |
-| `channel_id` | `int64_t` | yes      |         | The ID of the channel to receive data from |
-
-<!-- mdformat on -->
-
-#### **`receive_if`**
-
-Receives data values from a specified channel if and only if the predicate
-operand is true. The number of data values `N` and their type is determined by
-the channel.
-
-```
-result = receive_if(tkn, pred, channel_id=<ch>)
+result = receive(tkn, predicate=<pred>, channel_id=<ch>)
 ```
 
 **Types**
@@ -393,8 +390,9 @@ Value    | Type
 
 <!-- mdformat off(multiline table cells not supported in mkdocs) -->
 
-| Keyword      | Type    | Required | Default | Description              |
-| ------------ | ------- | -------- | ------- | ------------------------ |
+| Keyword      | Type      | Required | Default | Description              |
+| ------------ | --------- | -------- | ------- | ------------------------ |
+| `predicate`  | `bits[1]` | no       |         | A value is received iff `predicate` is true |
 | `channel_id` | `int64_t` | yes      |         | The ID of the channel to receive data from |
 
 <!-- mdformat on -->
@@ -404,40 +402,11 @@ If the predicate is false the data values in the result are zero-filled.
 #### **`send`**
 
 Sends data values to a specified channel. The number of data values `N` and
-their type is determined by the channel.
+their type is determined by the channel. An optional predicate value
+conditionally enables the receive operation.
 
 ```
-result = send(tkn, data_{0}, ..., data_{N-1}, channel_id=<ch>)
-```
-
-**Types**
-
-Value      | Type
----------- | -------
-`tkn`      | `token`
-`data_{i}` | `T_{i}`
-`result`   | `token`
-
-The types of operands `data_{i}` and the number `N` must match the types and
-number of data elements supported by the channel.
-
-**Keyword arguments**
-
-<!-- mdformat off(multiline table cells not supported in mkdocs) -->
-
-| Keyword      | Type    | Required | Default | Description                   |
-| ------------ | ------- | -------- | ------- | ----------------------------- |
-| `channel_id` | `int64_t` | yes      |         | The ID of the channel to send data to. |
-
-<!-- mdformat on -->
-
-#### **`send_if`**
-
-Sends data values to a specified channel if and only if the predicate operand is
-true. The number and type of data values is determined by the channel.
-
-```
-result = send_if(tkn, pred, data_{0}, ..., data_{N-1}, channel_id=<ch>)
+result = send(tkn, data_{0}, ..., data_{N-1}, predicate=<pred>, channel_id=<ch>)
 ```
 
 **Types**
@@ -445,8 +414,8 @@ result = send_if(tkn, pred, data_{0}, ..., data_{N-1}, channel_id=<ch>)
 Value      | Type
 ---------- | ---------
 `tkn`      | `token`
-`pred`     | `bits[1]`
 `data_{i}` | `T_{i}`
+`pred`     | `bits[1]`
 `result`   | `token`
 
 The types of operands `data_{i}` and the number `N` must match the types and
@@ -458,6 +427,7 @@ number of data elements supported by the channel.
 
 | Keyword      | Type    | Required | Default | Description                   |
 | ------------ | ------- | -------- | ------- | ----------------------------- |
+| `predicate`  | `bits[1]` | no       |         | A value is sent iff `predicate` is true |
 | `channel_id` | `int64_t` | yes      |         | The ID of the channel to send data to. |
 
 <!-- mdformat on -->
@@ -466,7 +436,7 @@ number of data elements supported by the channel.
 
 #### **`array`**
 
-Constructs a array of its operands.
+Constructs an array of its operands.
 
 ```
 result = array(operand_{0}, ..., operand_{N-1})
@@ -480,7 +450,7 @@ Value         | Type
 `result`      | `T[N]`
 
 Array can take an arbitrary number of operands including zero (which produces an
-empty array).
+empty array). The n-th operand becomes the n-th element of the array.
 
 #### **`array_index`**
 
@@ -1098,9 +1068,7 @@ Some operations in XLS IR are sensitive to sequence order, similar to
 [channel operations](#channel-operations), but are not themselves
 channel-related. Tokens are used to determine the possible sequencing of these
 effects, and `after_all` can be used to join together tokens as a sequencing
-"merge point" for concurrent threads of execution described by different tokens.
-`assert` is a side-effecting operation that is tied into the XLS IR's dataflow
-graph by way of token sequencing.
+merge point for concurrent threads of execution described by different tokens.
 
 #### **`after_all`**
 
@@ -1119,6 +1087,11 @@ Value         | Type
 
 `after_all` can consume an arbitrary number of token operands including zero.
 
+### Other side-effecting operations
+
+Aside from channels operations such as `send` and `receive` several other
+operations have side-effects. Care must be taken when adding, removing, or
+transforming these operations, e.g., in the optimizer.
 
 #### **`assert`**
 
@@ -1152,3 +1125,161 @@ Value       | Type
 | `label`   | `optional string` | yes      |         | Label to associate with the assert statement in the generated (System)Verilog |
 
 <!-- mdformat on -->
+
+#### **`cover`**
+
+Records the number of times the given condition evaluates to true. Just like
+`assert`, this is a software-only construct and is not emitted in a final
+hardware design, and tokens are used to sequence this operation in the graph.
+
+```
+result = cover(tkn, condition, label=<string>)
+```
+
+**Types**
+
+Value       | Type
+----------- | ---------
+`tkn`       | `token`
+`condition` | `bits[1]`
+`result`    | `token`
+
+**Keyword arguments**
+
+Keyword | Type     | Required | Default | Description
+------- | -------- | -------- | ------- | ---------------------------------
+`label` | `string` | yes      |         | Name associated with the counter.
+
+#### **`gate`**
+
+Gates an arbitrarily-typed value based on a condition.
+
+The result of the operation is the data operand if the condition is true,
+otherwise the result is a zero value of the type of the data operand. This
+operation can reduce switching and may be used in power optimizations.  This is
+intended for use in operand gating for power reduction, and the compiler may
+ultimately use it to perform register-level load-enable gating.
+
+The operation is considered side-effecting to prevent removal of the operation
+when the gated result (condition is false) is not observable. In this case the
+gate operation is still desirable because of the operations' effects on power
+consumption.
+
+```
+result = gate(condition, data)
+```
+
+**Types**
+
+Value       | Type
+----------- | ---------
+`condition` | `bits[1]`
+`data`      | `T`
+`result`    | `T`
+
+### RTL-level operations
+
+These IR operations correspond to RTL-level constructs in the emitted Verilog.
+These operations are added and used in the code generation process and may only
+appear in blocks (not procs or functions).
+
+#### **`input_port`**
+
+Corresponds to an input port on a Verilog module.
+
+**Syntax**
+
+```
+result = input_port()
+```
+
+**Types**
+
+Value    | Type
+-------- | ----
+`result` | `T`
+
+An input_port operation can be an arbitrary type.
+
+#### **`output_port`**
+
+Corresponds to an output port on a Verilog module. The value sent to the output
+port is the data operand.
+
+**Syntax**
+
+```
+result = output_port(data)
+```
+
+**Types**
+
+Value    | Type
+-------- | ----
+`data`   | `T`
+`result` | `T`
+
+#### **`register_read`**
+
+Reads a value from a register.
+
+The register is defined on the block.
+
+**Syntax**
+
+```
+result = register_read(register=<register_name>)
+```
+
+**Types**
+
+Value    | Type
+-------- | ----
+`result` | `T`
+
+The type `T` of the result of the operation is the type of the register.
+
+**Keyword arguments**
+
+<!-- mdformat off(multiline table cells not supported in mkdocs) -->
+
+| Keyword    | Type     | Required | Default | Description                  |
+| ---------- | -------- | -------- | ------- | ---------------------------- |
+| `register` | `string` | yes      |         | Name of the register to read |
+
+<!-- mdformat on -->
+
+#### **`register_write`**
+
+Writes a value to a register.
+
+The write to the register may be conditioned upon an optional load-enable
+and/or reset signal. The register is defined on the block.
+
+**Syntax**
+
+```
+result = register_write(data, load_enable=<load_enable>, reset=<reset>, register=<register_name>)
+```
+
+**Types**
+
+Value         | Type
+------------- | --------------------
+`data`        | `T`
+`load_enable` | `bits[1]` (optional)
+`reset`       | `bits[1]` (optional)
+`result`      | `()` (empty tuple)
+
+**Keyword arguments**
+
+<!-- mdformat off(multiline table cells not supported in mkdocs) -->
+
+| Keyword    | Type     | Required | Default | Description                   |
+| ---------- | -------- | -------- | ------- | ----------------------------- |
+| `register` | `string` | yes      |         | Name of the register to write |
+
+<!-- mdformat on -->
+
+The type `T` of the data operand must be the same as the the type of the
+register.

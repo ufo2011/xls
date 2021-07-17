@@ -21,6 +21,7 @@
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "xls/ir/channel.pb.h"
+#include "xls/ir/channel_ops.h"
 #include "xls/ir/type.h"
 #include "xls/ir/value.h"
 
@@ -28,35 +29,18 @@ namespace xls {
 
 // Enum for the various kinds of channels supported in XLS.
 enum class ChannelKind {
-  //  A channel with FIFO semenatics.
+  //  A channel with FIFO semantics.
   kStreaming,
 
-  // A channel corresponding to a port in code-generated block.
-  kPort,
-
-  // A channel corresponding to a hardware register in codegen.
-  kRegister,
-
-  // An abstract channel gathering together a data port channel
-  // with flow control ports (e.g., ready and valid).
-  kLogical
+  // A channel which holds a single value. Values are written to the channel via
+  // send operations which overwrites the previously sent values. Receives
+  // nondestructively read the most-recently sent value.
+  kSingleValue,
 };
 
 std::string ChannelKindToString(ChannelKind kind);
 absl::StatusOr<ChannelKind> StringToChannelKind(absl::string_view str);
 std::ostream& operator<<(std::ostream& os, ChannelKind kind);
-
-// Indicates the type(s) of operations permitted on the channel. Send-only
-// channels can only have send operations (not receive) associated with the
-// channel as might be used for communicated to a component outside of
-// XLS. Receive-only channels are similarly defined. Send-receive channels can
-// have both send and receive operations and can be used for communicated
-// between procs.
-enum class ChannelOps { kSendOnly, kReceiveOnly, kSendReceive };
-
-std::string ChannelOpsToString(ChannelOps ops);
-absl::StatusOr<ChannelOps> StringToChannelOps(absl::string_view str);
-std::ostream& operator<<(std::ostream& os, ChannelOps ops);
 
 // Abstraction describing a channel in XLS IR. Channels are a mechanism for
 // communicating between procs or between procs and components outside of
@@ -107,11 +91,6 @@ class Channel {
 
   ChannelKind kind() const { return kind_; }
 
-  bool IsStreaming() const;
-  bool IsPort() const;
-  bool IsRegister() const;
-  bool IsLogical() const;
-
   virtual std::string ToString() const;
 
  protected:
@@ -124,74 +103,52 @@ class Channel {
   ChannelMetadataProto metadata_;
 };
 
+// The flow control mechanism to use for streaming channels. This affects how
+// the channels are lowered to verilog.
+enum class FlowControl {
+  // The channel has no flow control. Some external mechanism ensures data is
+  // neither lost nor corrupted.
+  kNone,
+
+  // The channel uses a ready-valid handshake. A ready signal indicates the
+  // receiver is ready to accept data, and a valid signal indicates the data
+  // signal is valid. When both ready and valid are asserted a transaction
+  // occurs.
+  kReadyValid,
+};
+
+std::string FlowControlToString(FlowControl fc);
+absl::StatusOr<FlowControl> StringToFlowControl(absl::string_view str);
+std::ostream& operator<<(std::ostream& os, FlowControl fc);
+
 // A channel with FIFO semantics. Send operations add an data entry to the
 // channel; receives remove an element from the channel with FIFO ordering.
 class StreamingChannel : public Channel {
  public:
   StreamingChannel(absl::string_view name, int64_t id, ChannelOps supported_ops,
                    Type* type, absl::Span<const Value> initial_values,
+                   FlowControl flow_control,
                    const ChannelMetadataProto& metadata)
       : Channel(name, id, supported_ops, ChannelKind::kStreaming, type,
-                initial_values, metadata) {}
+                initial_values, metadata),
+        flow_control_(flow_control) {}
+
+  FlowControl flow_control() const { return flow_control_; }
+
+ public:
+  FlowControl flow_control_;
 };
 
-// A channel representing a port in a generated block. PortChannels do not
-// support initial values.
-class PortChannel : public Channel {
+// A channel which holds a single value. Values are written to the channel via
+// send operations, and receives nondestructively read the most-recently sent
+// value. SingleValueChannels are stateless and do not support initial values.
+class SingleValueChannel : public Channel {
  public:
-  PortChannel(absl::string_view name, int64_t id, ChannelOps supported_ops,
-              Type* type, const ChannelMetadataProto& metadata)
-      : Channel(name, id, supported_ops, ChannelKind::kPort, type,
+  SingleValueChannel(absl::string_view name, int64_t id,
+                     ChannelOps supported_ops, Type* type,
+                     const ChannelMetadataProto& metadata)
+      : Channel(name, id, supported_ops, ChannelKind::kSingleValue, type,
                 /*initial_values=*/{}, metadata) {}
-};
-
-// A channel representing a register within a block. All register channels are
-// send/receive (ChannelOps::kSendReceive) and may have at most one initial
-// value (the reset value).
-class RegisterChannel : public Channel {
- public:
-  RegisterChannel(absl::string_view name, int64_t id, Type* type,
-                  absl::optional<Value> reset_value,
-                  const ChannelMetadataProto& metadata)
-      : Channel(
-            name, id, ChannelOps::kSendReceive, ChannelKind::kRegister, type,
-            reset_value.has_value() ? std::vector<Value>({reset_value.value()})
-                                    : std::vector<Value>(),
-            metadata) {}
-
-  absl::optional<Value> reset_value() const {
-    if (initial_values().empty()) {
-      return absl::nullopt;
-    } else {
-      return initial_values().front();
-    }
-  }
-};
-
-// A channel representing a data port with ready/valid ports for flow control. A
-// logical channel is simply a logical grouping of these ports and does not have
-// directly associated send/receive nodes.
-class LogicalChannel : public Channel {
- public:
-  LogicalChannel(absl::string_view name, int64_t id, PortChannel* ready_channel,
-                 PortChannel* valid_channel, PortChannel* data_channel,
-                 const ChannelMetadataProto& metadata)
-      : Channel(name, id, data_channel->supported_ops(), ChannelKind::kLogical,
-                data_channel->type(), data_channel->initial_values(),
-                metadata) {}
-
-  PortChannel* ready_channel() const { return ready_channel_; }
-  PortChannel* valid_channel() const { return valid_channel_; }
-  PortChannel* data_channel() const { return data_channel_; }
-
-  std::string ToString() const override {
-    XLS_LOG(FATAL) << "LogicalChannel::ToString() not implemented.";
-  }
-
- private:
-  PortChannel* ready_channel_;
-  PortChannel* valid_channel_;
-  PortChannel* data_channel_;
 };
 
 }  // namespace xls

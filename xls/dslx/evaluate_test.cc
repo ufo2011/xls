@@ -25,9 +25,9 @@ using status_testing::IsOkAndHolds;
 
 TEST(CppEvaluateTest, EmptyArrayCompatibility) {
   auto empty_array_of_nil = absl::make_unique<ArrayType>(
-      ConcreteType::MakeNil(), ConcreteTypeDim::Create(0).value());
+      ConcreteType::MakeUnit(), ConcreteTypeDim::CreateU32(0));
   auto empty_array_of_u32 = absl::make_unique<ArrayType>(
-      BitsType::MakeU32(), ConcreteTypeDim::Create(0).value());
+      BitsType::MakeU32(), ConcreteTypeDim::CreateU32(0));
   auto empty_array_value = InterpValue::MakeArray(/*elements=*/{}).value();
 
   EXPECT_THAT(ValueCompatibleWithType(*empty_array_of_nil, empty_array_value),
@@ -38,7 +38,7 @@ TEST(CppEvaluateTest, EmptyArrayCompatibility) {
 
 TEST(CppEvaluateTest, DiffNumberOfElementsVs0Compatibility) {
   auto empty_array_of_nil = absl::make_unique<ArrayType>(
-      ConcreteType::MakeNil(), ConcreteTypeDim::Create(0).value());
+      ConcreteType::MakeUnit(), ConcreteTypeDim::CreateU32(0));
   auto array_of_1_value =
       InterpValue::MakeArray(/*elements=*/{InterpValue::MakeU32(1)}).value();
 
@@ -46,8 +46,8 @@ TEST(CppEvaluateTest, DiffNumberOfElementsVs0Compatibility) {
               IsOkAndHolds(false));
 }
 
-TEST(CppEvaluateTest, TupleSizeIncompatibilityVsNil) {
-  auto nil_tuple = ConcreteType::MakeNil();
+TEST(CppEvaluateTest, TupleSizeIncompatibilityVsUnit) {
+  auto nil_tuple = ConcreteType::MakeUnit();
   auto tuple_of_1 =
       InterpValue::MakeTuple(/*members=*/{InterpValue::MakeU32(1)});
 
@@ -55,7 +55,7 @@ TEST(CppEvaluateTest, TupleSizeIncompatibilityVsNil) {
               IsOkAndHolds(false));
 }
 
-TEST(CppEvaluateTest, TupleSizeIncompatibilityNilVs1Element) {
+TEST(CppEvaluateTest, TupleSizeIncompatibilityUnitVs1Element) {
   std::vector<std::unique_ptr<ConcreteType>> members;
   members.push_back(BitsType::MakeU32());
   auto tuple_of_u32_type = absl::make_unique<TupleType>(std::move(members));

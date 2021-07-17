@@ -36,13 +36,17 @@ cc_library(
     srcs = ["combinational_generator.cc"],
     hdrs = ["combinational_generator.h"],
     deps = [
+        ":block_conversion",
+        ":block_generator",
+        ":codegen_options",
+        ":codegen_pass",
+        ":codegen_pass_pipeline",
         ":flattening",
-        ":function_to_proc",
         ":module_builder",
         ":module_signature",
         ":name_to_bit_count",
         ":node_expressions",
-        ":proc_generator",
+        ":signature_generator",
         ":vast",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/memory",
@@ -56,6 +60,7 @@ cc_library(
         "//xls/common/status:status_macros",
         "//xls/ir",
         "//xls/ir:bits",
+        "//xls/ir:node_util",
         "//xls/ir:type",
     ],
 )
@@ -199,6 +204,7 @@ cc_test(
         "@com_google_absl//absl/strings",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
+        "//xls/ir:number_parser",
         "@com_google_googletest//:gtest",
     ],
 )
@@ -363,36 +369,136 @@ cc_library(
 )
 
 cc_library(
-    name = "proc_generator",
-    srcs = ["proc_generator.cc"],
-    hdrs = ["proc_generator.h"],
-    data = glob([
-        "testdata/proc_generator_test_*",
-    ]),
+    name = "block_conversion",
+    srcs = ["block_conversion.cc"],
+    hdrs = ["block_conversion.h"],
     deps = [
-        ":flattening",
-        ":module_builder",
-        ":module_signature",
         ":vast",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "//xls/ir",
+        "//xls/ir:channel",
+        "//xls/ir:function_builder",
+        "//xls/ir:node_util",
+        "//xls/ir:type",
+        "//xls/ir:value_helpers",
+        "//xls/passes:dce_pass",
+        "//xls/passes:tuple_simplification_pass",
+        "//xls/scheduling:pipeline_schedule",
+    ],
+)
+
+cc_library(
+    name = "codegen_pass",
+    srcs = ["codegen_pass.cc"],
+    hdrs = ["codegen_pass.h"],
+    deps = [
+        ":codegen_options",
+        ":module_signature",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:optional",
+        "//xls/ir",
+        "//xls/passes:pass_base",
+        "//xls/scheduling:pipeline_schedule",
+    ],
+)
+
+cc_library(
+    name = "codegen_options",
+    srcs = ["codegen_options.cc"],
+    hdrs = ["codegen_options.h"],
+    deps = [
+        ":module_signature_cc_proto",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:optional",
         "//xls/common:proto_adaptor_utils",
-        "//xls/common/logging:log_lines",
+        "//xls/scheduling:pipeline_schedule",
+    ],
+)
+
+cc_library(
+    name = "signature_generation_pass",
+    srcs = ["signature_generation_pass.cc"],
+    hdrs = ["signature_generation_pass.h"],
+    deps = [
+        ":codegen_pass",
+        ":signature_generator",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "//xls/common/status:status_macros",
+        "//xls/ir",
+        "//xls/ir:node_util",
+    ],
+)
+
+cc_library(
+    name = "codegen_pass_pipeline",
+    srcs = ["codegen_pass_pipeline.cc"],
+    hdrs = ["codegen_pass_pipeline.h"],
+    deps = [
+        ":codegen_checker",
+        ":codegen_pass",
+        ":port_legalization_pass",
+        ":signature_generation_pass",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)
+
+cc_library(
+    name = "port_legalization_pass",
+    srcs = ["port_legalization_pass.cc"],
+    hdrs = ["port_legalization_pass.h"],
+    deps = [
+        ":codegen_pass",
+        "@com_google_absl//absl/status:statusor",
+        "//xls/common/logging",
+        "//xls/ir",
+        "//xls/ir:value_helpers",
+    ],
+)
+
+cc_library(
+    name = "signature_generator",
+    srcs = ["signature_generator.cc"],
+    hdrs = ["signature_generator.h"],
+    deps = [
+        ":codegen_options",
+        ":module_signature",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "//xls/common/status:status_macros",
+        "//xls/ir",
+        "//xls/ir:node_util",
+        "//xls/scheduling:pipeline_schedule",
+    ],
+)
+
+cc_library(
+    name = "codegen_checker",
+    srcs = ["codegen_checker.cc"],
+    hdrs = ["codegen_checker.h"],
+    deps = [
+        ":codegen_pass",
+        "@com_google_absl//absl/status",
         "//xls/ir",
     ],
 )
 
 cc_library(
-    name = "function_to_proc",
-    srcs = ["function_to_proc.cc"],
-    hdrs = ["function_to_proc.h"],
+    name = "block_generator",
+    srcs = ["block_generator.cc"],
+    hdrs = ["block_generator.h"],
     deps = [
-        "@com_google_absl//absl/container:flat_hash_map",
+        ":codegen_options",
+        ":flattening",
+        ":module_builder",
+        ":vast",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "//xls/common/logging:log_lines",
         "//xls/ir",
-        "//xls/ir:channel",
-        "//xls/ir:function_builder",
-        "//xls/ir:value_helpers",
+        "//xls/ir:node_util",
     ],
 )
 
@@ -505,10 +611,66 @@ cc_test(
 )
 
 cc_test(
-    name = "proc_generator_test",
-    srcs = ["proc_generator_test.cc"],
+    name = "block_conversion_test",
+    srcs = ["block_conversion_test.cc"],
     deps = [
-        ":proc_generator",
+        ":block_conversion",
+        "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
+        "//xls/delay_model:delay_estimator",
+        "//xls/interpreter:ir_interpreter",
+        "//xls/ir",
+        "//xls/ir:function_builder",
+        "//xls/ir:ir_matcher",
+        "//xls/ir:ir_test_base",
+        "//xls/scheduling:pipeline_schedule",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_test(
+    name = "signature_generator_test",
+    srcs = ["signature_generator_test.cc"],
+    deps = [
+        ":codegen_options",
+        ":module_signature_cc_proto",
+        ":signature_generator",
+        "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
+        "//xls/delay_model:delay_estimators",
+        "//xls/ir",
+        "//xls/ir:channel",
+        "//xls/ir:function_builder",
+        "//xls/ir:type",
+        "//xls/scheduling:pipeline_schedule",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_test(
+    name = "port_legalization_pass_test",
+    srcs = ["port_legalization_pass_test.cc"],
+    deps = [
+        ":codegen_pass",
+        ":port_legalization_pass",
+        "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
+        "//xls/ir:channel",
+        "//xls/ir:function_builder",
+        "//xls/ir:ir_test_base",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_test(
+    name = "block_generator_test",
+    srcs = ["block_generator_test.cc"],
+    data = glob([
+        "testdata/block_generator_test_*",
+    ]),
+    deps = [
+        ":block_generator",
+        ":signature_generator",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
         "//xls/ir",
@@ -519,19 +681,5 @@ cc_test(
         "//xls/ir:value",
         "//xls/simulation:module_simulator",
         "//xls/simulation:verilog_test_base",
-    ],
-)
-
-cc_test(
-    name = "function_to_proc_test",
-    srcs = ["function_to_proc_test.cc"],
-    deps = [
-        ":function_to_proc",
-        "//xls/common:xls_gunit_main",
-        "//xls/common/status:matchers",
-        "//xls/ir:function_builder",
-        "//xls/ir:ir_matcher",
-        "//xls/ir:ir_test_base",
-        "@com_google_googletest//:gtest",
     ],
 )

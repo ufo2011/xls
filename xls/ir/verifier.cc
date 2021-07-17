@@ -22,12 +22,15 @@
 #include "xls/common/math_util.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/ir/block.h"
+#include "xls/ir/channel.h"
 #include "xls/ir/dfs_visitor.h"
 #include "xls/ir/function.h"
 #include "xls/ir/node.h"
 #include "xls/ir/node_iterator.h"
 #include "xls/ir/package.h"
 #include "xls/ir/proc.h"
+#include "xls/ir/type.h"
 
 namespace xls {
 namespace {
@@ -69,6 +72,14 @@ class NodeChecker : public DfsVisitor {
     return ExpectHasTokenType(assert_op);
   }
 
+  absl::Status HandleCover(Cover* cover) override {
+    XLS_RETURN_IF_ERROR(ExpectOperandCount(cover, 2));
+    XLS_RETURN_IF_ERROR(ExpectOperandHasTokenType(cover, /*operand_no=*/0));
+    XLS_RETURN_IF_ERROR(ExpectOperandHasBitsType(cover, /*operand_no=*/1,
+                                                 /*expected_bit_count=*/1));
+    return ExpectHasTokenType(cover);
+  }
+
   absl::Status HandleNaryAnd(NaryOp* and_op) override {
     XLS_RETURN_IF_ERROR(ExpectOperandCountGt(and_op, 0));
     return ExpectAllSameBitsType(and_op);
@@ -93,8 +104,12 @@ class NodeChecker : public DfsVisitor {
   }
 
   absl::Status HandleReceive(Receive* receive) override {
-    XLS_RETURN_IF_ERROR(ExpectOperandCountGt(receive, 0));
+    XLS_RETURN_IF_ERROR(ExpectOperandCountRange(receive, 1, 2));
     XLS_RETURN_IF_ERROR(ExpectOperandHasTokenType(receive, /*operand_no=*/0));
+    if (receive->predicate().has_value()) {
+      XLS_RETURN_IF_ERROR(
+          ExpectOperandHasBitsType(receive, 1, /*expected_bit_count=*/1));
+    }
     if (!receive->package()->HasChannelWithId(receive->channel_id())) {
       return absl::InternalError(
           StrFormat("%s refers to channel ID %d which does not exist",
@@ -117,40 +132,15 @@ class NodeChecker : public DfsVisitor {
     return absl::OkStatus();
   }
 
-  absl::Status HandleReceiveIf(ReceiveIf* receive_if) override {
-    XLS_RETURN_IF_ERROR(ExpectOperandCountGt(receive_if, 1));
-    XLS_RETURN_IF_ERROR(
-        ExpectOperandHasTokenType(receive_if, /*operand_no=*/0));
-    XLS_RETURN_IF_ERROR(ExpectOperandHasBitsType(receive_if, /*operand_no=*/1,
-                                                 /*expected_bit_count=*/1));
-    if (!receive_if->package()->HasChannelWithId(receive_if->channel_id())) {
-      return absl::InternalError(
-          StrFormat("%s refers to channel ID %d which does not exist",
-                    receive_if->GetName(), receive_if->channel_id()));
-    }
-    XLS_ASSIGN_OR_RETURN(Channel * channel, receive_if->package()->GetChannel(
-                                                receive_if->channel_id()));
-    Type* expected_type = receive_if->package()->GetTupleType(
-        {receive_if->package()->GetTokenType(), channel->type()});
-    if (receive_if->GetType() != expected_type) {
-      return absl::InternalError(StrFormat(
-          "Expected %s to have type %s, has type %s", receive_if->GetName(),
-          expected_type->ToString(), receive_if->GetType()->ToString()));
-    }
-    if (!channel->CanReceive()) {
-      return absl::InternalError(StrFormat(
-          "Cannot receive over channel %s (%d), receive_if operation: %s",
-          channel->name(), channel->id(), receive_if->GetName()));
-    }
-    return absl::OkStatus();
-  }
-
   absl::Status HandleSend(Send* send) override {
     XLS_RETURN_IF_ERROR(ExpectHasTokenType(send));
-    XLS_RETURN_IF_ERROR(ExpectOperandCountGt(send, 1));
+    XLS_RETURN_IF_ERROR(ExpectOperandCountRange(send, 2, 3));
     XLS_RETURN_IF_ERROR(ExpectOperandHasTokenType(send, /*operand_no=*/0));
-    // TODO(meheff): Verify types of data operands 1...n match the channel data
-    // types.
+    if (send->predicate().has_value()) {
+      XLS_RETURN_IF_ERROR(
+          ExpectOperandHasBitsType(send, 2, /*expected_bit_count=*/1));
+    }
+
     if (!send->package()->HasChannelWithId(send->channel_id())) {
       return absl::InternalError(
           StrFormat("%s refers to channel ID %d which does not exist",
@@ -163,29 +153,7 @@ class NodeChecker : public DfsVisitor {
           StrFormat("Cannot send over channel %s (%d), send operation: %s",
                     channel->name(), channel->id(), send->GetName()));
     }
-    return absl::OkStatus();
-  }
-
-  absl::Status HandleSendIf(SendIf* send_if) override {
-    XLS_RETURN_IF_ERROR(ExpectHasTokenType(send_if));
-    XLS_RETURN_IF_ERROR(ExpectOperandCountGt(send_if, 2));
-    XLS_RETURN_IF_ERROR(ExpectOperandHasTokenType(send_if, /*operand_no=*/0));
-    XLS_RETURN_IF_ERROR(ExpectOperandHasBitsType(send_if, /*operand_no=*/1,
-                                                 /*expected_bit_count=*/1));
-    // TODO(meheff): Verify types of data operands 2...n match the channel data
-    // types.
-    if (!send_if->package()->HasChannelWithId(send_if->channel_id())) {
-      return absl::InternalError(
-          StrFormat("%s refers to channel ID %d which does not exist",
-                    send_if->GetName(), send_if->channel_id()));
-    }
-    XLS_ASSIGN_OR_RETURN(Channel * channel,
-                         send_if->package()->GetChannel(send_if->channel_id()));
-    if (!channel->CanSend()) {
-      return absl::InternalError(
-          StrFormat("Cannot send over channel %s (%d), send_if operation: %s",
-                    channel->name(), channel->id(), send_if->GetName()));
-    }
+    XLS_RETURN_IF_ERROR(ExpectOperandHasType(send, 1, channel->type()));
     return absl::OkStatus();
   }
 
@@ -880,6 +848,30 @@ class NodeChecker : public DfsVisitor {
     return HandleExtendOp(zero_ext);
   }
 
+  absl::Status HandleInputPort(InputPort* input_port) override {
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleOutputPort(OutputPort* output_port) override {
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleRegisterRead(RegisterRead* reg_read) override {
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleRegisterWrite(RegisterWrite* reg_write) override {
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleGate(Gate* gate) override {
+    XLS_RETURN_IF_ERROR(ExpectOperandCount(gate, 2));
+    XLS_RETURN_IF_ERROR(ExpectOperandHasBitsType(gate, /*operand_no=*/0,
+                                                 /*expected_bit_count=*/1));
+
+    return ExpectOperandHasType(gate, 1, gate->GetType());
+  }
+
  private:
   absl::Status HandleShiftOp(Node* shift) {
     // A shift-amount operand can have arbitrary width, but the shifted operand
@@ -911,6 +903,19 @@ class NodeChecker : public DfsVisitor {
       return absl::InternalError(
           StrFormat("Expected %s to have %d operands, has %d", node->GetName(),
                     expected, node->operand_count()));
+    }
+    return absl::OkStatus();
+  }
+
+  // Verifies that the given node has a number of operands between the two
+  // limits (inclusive).
+  absl::Status ExpectOperandCountRange(Node* node, int64_t lower_limit,
+                                       int64_t upper_limit) {
+    if (node->operand_count() < lower_limit ||
+        node->operand_count() > upper_limit) {
+      return absl::InternalError(StrFormat(
+          "Expected %s to have between %d and %d operands, has %d",
+          node->GetName(), lower_limit, upper_limit, node->operand_count()));
     }
     return absl::OkStatus();
   }
@@ -1196,8 +1201,8 @@ absl::Status VerifyNodeIdUnique(
   return absl::OkStatus();
 }
 
-// Verify common invariants to procs and functions.
-absl::Status VerifyFunctionOrProc(FunctionBase* function) {
+// Verify common invariants to function-level constucts.
+absl::Status VerifyFunctionBase(FunctionBase* function) {
   XLS_VLOG(2) << absl::StreamFormat("Verifying function %s:\n",
                                     function->name());
   XLS_VLOG_LINES(4, function->DumpIr());
@@ -1247,55 +1252,23 @@ absl::Status VerifyFunctionOrProc(FunctionBase* function) {
   return absl::OkStatus();
 }
 
-// Returns true if the given node is a send/receive node or the conditional
-// variant (send_if or receive_if).
-bool IsSendOrReceive(Node* node) {
-  return node->Is<Send>() || node->Is<SendIf>() || node->Is<Receive>() ||
-         node->Is<ReceiveIf>();
-}
-
 // Returns the channel used by the given send or receive node. Returns an error
-// if the given node is not a send, send_if, receive, or receive_if.
+// if the given node is not a send or receive.
 absl::StatusOr<Channel*> GetSendOrReceiveChannel(Node* node) {
   if (node->Is<Send>()) {
     return node->package()->GetChannel(node->As<Send>()->channel_id());
   }
-  if (node->Is<SendIf>()) {
-    return node->package()->GetChannel(node->As<SendIf>()->channel_id());
-  }
   if (node->Is<Receive>()) {
     return node->package()->GetChannel(node->As<Receive>()->channel_id());
-  }
-  if (node->Is<ReceiveIf>()) {
-    return node->package()->GetChannel(node->As<ReceiveIf>()->channel_id());
   }
   return absl::InternalError(absl::StrFormat(
       "Node is not a send or receive node: %s", node->ToString()));
 }
 
-// Returns true if the given type is a token type or has a token type as an
-// subelement.
-bool TypeHasToken(Type* type) {
-  if (type->IsToken()) {
-    return true;
-  }
-  if (type->IsArray()) {
-    return TypeHasToken(type->AsArrayOrDie()->element_type());
-  }
-  if (type->IsTuple()) {
-    for (Type* element_type : type->AsTupleOrDie()->element_types()) {
-      if (TypeHasToken(element_type)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-// Verify that all send/receive nodes are connected to the initial Param token
-// and the return token via token paths. Verify return value similarly
-// connected to token param.
-absl::Status VerifyTokenConnectivity(Proc* proc) {
+// Verify that all tokens in the given FunctionBase are connected. All tokens
+// should flow from the source token to the sink token.
+absl::Status VerifyTokenConnectivity(Node* source_token, Node* sink_token,
+                                     FunctionBase* f) {
   absl::flat_hash_set<Node*> visited;
   std::deque<Node*> worklist;
   auto maybe_add_to_worklist = [&](Node* n) {
@@ -1306,13 +1279,13 @@ absl::Status VerifyTokenConnectivity(Proc* proc) {
     visited.insert(n);
   };
 
-  // Verify connectivity to token param.
-  absl::flat_hash_set<Node*> connected_to_param;
-  maybe_add_to_worklist(proc->TokenParam());
+  // Verify connectivity to source param.
+  absl::flat_hash_set<Node*> connected_to_source;
+  maybe_add_to_worklist(source_token);
   while (!worklist.empty()) {
     Node* node = worklist.front();
     worklist.pop_front();
-    connected_to_param.insert(node);
+    connected_to_source.insert(node);
     if (TypeHasToken(node->GetType())) {
       for (Node* user : node->users()) {
         maybe_add_to_worklist(user);
@@ -1320,14 +1293,14 @@ absl::Status VerifyTokenConnectivity(Proc* proc) {
     }
   }
 
-  // Verify connectivity to next token value.
-  absl::flat_hash_set<Node*> connected_to_return;
+  // Verify connectivity to sink token.
+  absl::flat_hash_set<Node*> connected_to_sink;
   visited.clear();
-  maybe_add_to_worklist(proc->NextToken());
+  maybe_add_to_worklist(sink_token);
   while (!worklist.empty()) {
     Node* node = worklist.front();
     worklist.pop_front();
-    connected_to_return.insert(node);
+    connected_to_sink.insert(node);
     for (Node* operand : node->operands()) {
       if (TypeHasToken(operand->GetType())) {
         maybe_add_to_worklist(operand);
@@ -1335,28 +1308,28 @@ absl::Status VerifyTokenConnectivity(Proc* proc) {
     }
   }
 
-  for (Node* node : proc->nodes()) {
-    if (IsSendOrReceive(node)) {
-      if (!connected_to_param.contains(node)) {
+  for (Node* node : f->nodes()) {
+    if (TypeHasToken(node->GetType())) {
+      if (!connected_to_source.contains(node)) {
         return absl::InternalError(absl::StrFormat(
-            "Send and receive nodes must be connected to the token parameter "
+            "Token-typed nodes must be connected to the source token "
             "via a path of tokens: %s.",
             node->GetName()));
       }
-      if (!connected_to_return.contains(node)) {
+      if (!connected_to_sink.contains(node)) {
         return absl::InternalError(absl::StrFormat(
-            "Send and receive nodes must be connected to the next token value "
+            "Token-typed nodes must be connected to the sink token value "
             "via a path of tokens: %s.",
             node->GetName()));
       }
     }
   }
 
-  if (!connected_to_param.contains(proc->NextToken())) {
-    return absl::InternalError(absl::StrFormat(
-        "Next token value of proc must be connected to the token parameter "
-        "via a path of tokens: %s.",
-        proc->NextToken()->GetName()));
+  if (!connected_to_source.contains(sink_token)) {
+    return absl::InternalError(
+        absl::StrFormat("The sink token must be connected to the token "
+                        "parameter via a path of tokens: %s.",
+                        sink_token->GetName()));
   }
 
   return absl::OkStatus();
@@ -1391,7 +1364,7 @@ absl::Status VerifyChannels(Package* package) {
   absl::flat_hash_map<Channel*, Node*> receive_nodes;
   for (auto& proc : package->procs()) {
     for (Node* node : proc->nodes()) {
-      if (node->Is<Send>() || node->Is<SendIf>()) {
+      if (node->Is<Send>()) {
         XLS_ASSIGN_OR_RETURN(Channel * channel, GetSendOrReceiveChannel(node));
         XLS_RET_CHECK(!send_nodes.contains(channel)) << absl::StreamFormat(
             "Multiple send nodes associated with channel '%s': %s and %s (at "
@@ -1400,12 +1373,11 @@ absl::Status VerifyChannels(Package* package) {
             send_nodes.at(channel)->GetName());
         send_nodes[channel] = node;
       }
-      if (node->Is<Receive>() || node->Is<ReceiveIf>()) {
+      if (node->Is<Receive>()) {
         XLS_ASSIGN_OR_RETURN(Channel * channel, GetSendOrReceiveChannel(node));
         XLS_RET_CHECK(!receive_nodes.contains(channel)) << absl::StreamFormat(
             "Multiple receive nodes associated with channel '%s': %s and %s "
-            "(at "
-            "least).",
+            "(at least).",
             channel->name(), node->GetName(),
             receive_nodes.at(channel)->GetName());
         receive_nodes[channel] = node;
@@ -1436,25 +1408,11 @@ absl::Status VerifyChannels(Package* package) {
     }
 
     // Verify type-specific invariants of each channel.
-    if (channel->IsPort()) {
-      // Ports cannot have initial values.
+    if (channel->kind() == ChannelKind::kSingleValue) {
+      // Single-value channels cannot have initial values.
       XLS_RET_CHECK_EQ(channel->initial_values().size(), 0);
-      // TODO(meheff): Port channels should not support SendIf and ReceiveIf.
-      // Add check when such uses are removed.
-    } else if (channel->IsRegister()) {
-      // Registers have at most one initial value.
-      XLS_RET_CHECK_LE(channel->initial_values().size(), 1);
-      // Registers must be send/receive.
-      XLS_RET_CHECK_EQ(channel->supported_ops(), ChannelOps::kSendReceive);
-      // Send and receive must be in the same proc.
-      XLS_RET_CHECK_EQ(send_nodes.at(channel)->function_base(),
-                       receive_nodes.at(channel)->function_base());
-      // Registers do not support ReceiveIf.
-      XLS_RET_CHECK(!(receive_nodes.contains(channel) &&
-                      receive_nodes.at(channel)->Is<ReceiveIf>()))
-          << absl::StreamFormat(
-                 "Register channels do not support ReceiveIf operations: %s",
-                 channel->name());
+      // TODO(meheff): 2021/06/24 Single-value channels should not support
+      // Send and Receive with predicates. Add check when such uses are removed.
     }
   }
 
@@ -1475,11 +1433,15 @@ absl::Status VerifyPackage(Package* package) {
     XLS_RETURN_IF_ERROR(VerifyProc(proc.get()));
   }
 
+  for (auto& block : package->blocks()) {
+    XLS_RETURN_IF_ERROR(VerifyBlock(block.get()));
+  }
+
   // Verify node IDs are unique within the package and uplinks point to this
   // package.
   absl::flat_hash_map<int64_t, absl::optional<SourceLocation>> ids;
   ids.reserve(package->GetNodeCount());
-  for (FunctionBase* function : package->GetFunctionsAndProcs()) {
+  for (FunctionBase* function : package->GetFunctionBases()) {
     XLS_RET_CHECK(function->package() == package);
     for (Node* node : function->nodes()) {
       XLS_RETURN_IF_ERROR(VerifyNodeIdUnique(node, &ids));
@@ -1495,19 +1457,30 @@ absl::Status VerifyPackage(Package* package) {
   }
   XLS_RET_CHECK_GT(package->next_node_id(), max_id_seen);
 
-  // Verify function (proc) names are unique within the package.
-  absl::flat_hash_set<FunctionBase*> functions;
+  // Verify function, proc, block names are unique among functions/procs/blocks.
+  absl::flat_hash_set<FunctionBase*> function_bases;
   absl::flat_hash_set<std::string> function_names;
-  for (FunctionBase* function : package->GetFunctionsAndProcs()) {
-    XLS_RET_CHECK(!function_names.contains(function->name()))
-        << "Function or proc with name " << function->name()
+  absl::flat_hash_set<std::string> proc_names;
+  absl::flat_hash_set<std::string> block_names;
+  for (FunctionBase* function_base : package->GetFunctionBases()) {
+    absl::flat_hash_set<std::string>* name_set;
+    if (function_base->IsFunction()) {
+      name_set = &function_names;
+    } else if (function_base->IsProc()) {
+      name_set = &proc_names;
+    } else {
+      XLS_RET_CHECK(function_base->IsBlock());
+      name_set = &block_names;
+    }
+    XLS_RET_CHECK(!name_set->contains(function_base->name()))
+        << "Function/proc/block with name " << function_base->name()
         << " is not unique within package " << package->name();
-    function_names.insert(function->name());
+    name_set->insert(function_base->name());
 
-    XLS_RET_CHECK(!functions.contains(function))
-        << "Function or proc with name " << function->name()
+    XLS_RET_CHECK(!function_bases.contains(function_base))
+        << "Function or proc with name " << function_base->name()
         << " appears more than once in within package" << package->name();
-    functions.insert(function);
+    function_bases.insert(function_base);
   }
 
   XLS_RETURN_IF_ERROR(VerifyChannels(package));
@@ -1524,10 +1497,10 @@ absl::Status VerifyFunction(Function* function) {
   XLS_VLOG(4) << "Verifying function:\n";
   XLS_VLOG_LINES(4, function->DumpIr());
 
-  XLS_RETURN_IF_ERROR(VerifyFunctionOrProc(function));
+  XLS_RETURN_IF_ERROR(VerifyFunctionBase(function));
 
   for (Node* node : function->nodes()) {
-    if (IsSendOrReceive(node)) {
+    if (node->Is<Send>() || node->Is<Receive>()) {
       return absl::InternalError(absl::StrFormat(
           "Send and receive nodes can only be in procs, not functions (%s)",
           node->GetName()));
@@ -1541,7 +1514,7 @@ absl::Status VerifyProc(Proc* proc) {
   XLS_VLOG(4) << "Verifying proc:\n";
   XLS_VLOG_LINES(4, proc->DumpIr());
 
-  XLS_RETURN_IF_ERROR(VerifyFunctionOrProc(proc));
+  XLS_RETURN_IF_ERROR(VerifyFunctionBase(proc));
 
   // A Proc should have two parameters: a token (parameter 0), and the recurent
   // state (parameter 1).
@@ -1569,7 +1542,104 @@ absl::Status VerifyProc(Proc* proc) {
 
   // Verify that all send/receive nodes are connected to the token parameter and
   // the return value via paths of tokens.
-  XLS_RETURN_IF_ERROR(VerifyTokenConnectivity(proc));
+  XLS_RETURN_IF_ERROR(
+      VerifyTokenConnectivity(proc->TokenParam(), proc->NextToken(), proc));
+
+  return absl::OkStatus();
+}
+
+absl::Status VerifyBlock(Block* block) {
+  XLS_VLOG(4) << "Verifying block:\n";
+  XLS_VLOG_LINES(4, block->DumpIr());
+
+  XLS_RETURN_IF_ERROR(VerifyFunctionBase(block));
+
+  // Verify the nodes returned by Block::Get*Port methods are consistent.
+  absl::flat_hash_set<Node*> all_data_ports;
+  for (const Block::Port& port : block->GetPorts()) {
+    if (absl::holds_alternative<InputPort*>(port)) {
+      all_data_ports.insert(absl::get<InputPort*>(port));
+    } else if (absl::holds_alternative<OutputPort*>(port)) {
+      all_data_ports.insert(absl::get<OutputPort*>(port));
+    }
+  }
+  absl::flat_hash_set<Node*> input_data_ports(block->GetInputPorts().begin(),
+                                              block->GetInputPorts().end());
+  absl::flat_hash_set<Node*> output_data_ports(block->GetOutputPorts().begin(),
+                                               block->GetOutputPorts().end());
+
+  // All the pointers returned by the GetPort methods should be unique.
+  XLS_RET_CHECK_EQ(block->GetInputPorts().size(), input_data_ports.size());
+  XLS_RET_CHECK_EQ(block->GetOutputPorts().size(), output_data_ports.size());
+  XLS_RET_CHECK_EQ(
+      block->GetInputPorts().size() + block->GetOutputPorts().size(),
+      all_data_ports.size());
+
+  int64_t input_port_count = 0;
+  int64_t output_port_count = 0;
+  for (Node* node : block->nodes()) {
+    if (node->Is<InputPort>()) {
+      XLS_RET_CHECK(all_data_ports.contains(node)) << node->GetName();
+      XLS_RET_CHECK(input_data_ports.contains(node)) << node->GetName();
+      input_port_count++;
+    } else if (node->Is<OutputPort>()) {
+      XLS_RET_CHECK(all_data_ports.contains(node)) << node->GetName();
+      XLS_RET_CHECK(output_data_ports.contains(node)) << node->GetName();
+      output_port_count++;
+    }
+  }
+  XLS_RET_CHECK_EQ(input_port_count, input_data_ports.size());
+  XLS_RET_CHECK_EQ(output_port_count, output_data_ports.size());
+
+  // Blocks should have no parameters.
+  XLS_RET_CHECK(block->params().empty());
+
+  // The block must have a clock port if it has any registers.
+  if (!block->GetRegisters().empty() && !block->GetClockPort().has_value()) {
+    return absl::InternalError(
+        StrFormat("Block has registers but no clock port"));
+  }
+
+  // Verify all registers have exactly one read and write operation.
+  absl::flat_hash_map<Register*, RegisterRead*> reg_reads;
+  absl::flat_hash_map<Register*, RegisterWrite*> reg_writes;
+  for (Node* node : block->nodes()) {
+    if (node->Is<RegisterRead>()) {
+      RegisterRead* reg_read = node->As<RegisterRead>();
+      XLS_ASSIGN_OR_RETURN(Register * reg,
+                           block->GetRegister(reg_read->register_name()));
+      if (reg_reads.contains(reg)) {
+        return absl::InternalError(
+            StrFormat("Register %s has multiple reads", reg->name()));
+      }
+      XLS_RET_CHECK_EQ(reg->type(), node->GetType());
+      reg_reads[reg] = reg_read;
+    } else if (node->Is<RegisterWrite>()) {
+      RegisterWrite* reg_write = node->As<RegisterWrite>();
+      XLS_ASSIGN_OR_RETURN(Register * reg,
+                           block->GetRegister(reg_write->register_name()));
+      if (reg_writes.contains(reg)) {
+        return absl::InternalError(
+            StrFormat("Register %s has multiple writes", reg->name()));
+      }
+      XLS_RET_CHECK_EQ(reg->type(), reg_write->data()->GetType());
+      if (reg_write->load_enable().has_value()) {
+        XLS_RET_CHECK_EQ(reg_write->load_enable().value()->GetType(),
+                         block->package()->GetBitsType(1));
+      }
+      reg_writes[reg] = reg_write;
+    }
+  }
+  for (Register* reg : block->GetRegisters()) {
+    if (!reg_reads.contains(reg)) {
+      return absl::InternalError(
+          StrFormat("Register %s has no read", reg->name()));
+    }
+    if (!reg_writes.contains(reg)) {
+      return absl::InternalError(
+          StrFormat("Register %s has no write", reg->name()));
+    }
+  }
 
   return absl::OkStatus();
 }

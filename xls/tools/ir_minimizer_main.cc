@@ -26,7 +26,7 @@
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
 #include "xls/common/subprocess.h"
-#include "xls/interpreter/ir_interpreter.h"
+#include "xls/interpreter/function_interpreter.h"
 #include "xls/ir/bits_ops.h"
 #include "xls/ir/ir_parser.h"
 #include "xls/ir/number_parser.h"
@@ -185,7 +185,7 @@ absl::StatusOr<bool> StillFailsHelper(
                                          FLAGS_test_only_inject_jit_result)));
   }
   XLS_ASSIGN_OR_RETURN(Value interpreter_result,
-                       IrInterpreter::Run(main, *inputs));
+                       InterpretFunction(main, *inputs));
   return jit_result != interpreter_result;
 }
 
@@ -237,7 +237,7 @@ absl::StatusOr<bool> RemoveDeadParameters(Function* f) {
   std::vector<Param*> params(f->params().begin(), f->params().end());
   for (Param* p : params) {
     if (p->users().empty() && p != f->return_value()) {
-      XLS_RETURN_IF_ERROR(f->RemoveNode(p, /*remove_param_ok=*/true));
+      XLS_RETURN_IF_ERROR(f->RemoveNode(p));
     }
   }
   return params.size() != f->params().size();

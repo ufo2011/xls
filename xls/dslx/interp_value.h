@@ -29,6 +29,7 @@ namespace xls::dslx {
   X("bit_slice", kBitSlice)              \
   X("bit_slice_update", kBitSliceUpdate) \
   X("clz", kClz)                         \
+  X("cover!", kCover)                    \
   X("ctz", kCtz)                         \
   X("enumerate", kEnumerate)             \
   X("fail!", kFail)                      \
@@ -39,12 +40,8 @@ namespace xls::dslx {
   X("range", kRange)                     \
   X("rev", kRev)                         \
   X("select", kSelect)                   \
-  X("sge", kSGe)                         \
-  X("sgt", kSGt)                         \
   X("signex", kSignex)                   \
-  X("sle", kSLe)                         \
   X("slice", kSlice)                     \
-  X("slt", kSLt)                         \
   X("trace!", kTrace)                    \
   X("update", kUpdate)                   \
   X("xor_reduce", kXorReduce)
@@ -110,15 +107,15 @@ class InterpValue {
   static InterpValue MakeUBits(int64_t bit_count, int64_t value);
   static InterpValue MakeSBits(int64_t bit_count, int64_t value);
 
-  static InterpValue MakeNil() { return MakeTuple({}); }
+  static InterpValue MakeUnit() { return MakeTuple({}); }
   static InterpValue MakeU32(uint32_t value) {
     return MakeUBits(/*bit_count=*/32, value);
   }
-  static InterpValue MakeU64(uint64_t value) {
-    return MakeUBits(/*bit_count=*/64, value);
+  static InterpValue MakeEnum(Bits bits, EnumDef* type) {
+    return InterpValue(InterpValueTag::kEnum, std::move(bits), type);
   }
-  static InterpValue MakeEnum(const Bits& bits, EnumDef* type) {
-    return InterpValue(InterpValueTag::kEnum, bits, type);
+  static InterpValue MakeSigned(Bits bits) {
+    return InterpValue(InterpValueTag::kSBits, std::move(bits));
   }
   static InterpValue MakeTuple(std::vector<InterpValue> members);
   static absl::StatusOr<InterpValue> MakeArray(
@@ -149,7 +146,7 @@ class InterpValue {
 
   bool IsTuple() const { return tag_ == InterpValueTag::kTuple; }
   bool IsArray() const { return tag_ == InterpValueTag::kArray; }
-  bool IsNilTuple() const { return IsTuple() && GetLength().value() == 0; }
+  bool IsUnit() const { return IsTuple() && GetLength().value() == 0; }
   bool IsUBits() const { return tag_ == InterpValueTag::kUBits; }
   bool IsSBits() const { return tag_ == InterpValueTag::kSBits; }
   bool IsBits() const { return IsUBits() || IsSBits(); }
@@ -293,15 +290,9 @@ class InterpValue {
   static absl::StatusOr<std::vector<xls::Value>> ConvertValuesToIr(
       absl::Span<InterpValue const> values);
 
-  bool operator==(const InterpValue& rhs) const {
-    return Compare(
-               *this, rhs,
-               [](const Bits& lhs, const Bits& rhs) { return lhs == rhs; },
-               [](const Bits& lhs, const Bits& rhs) { return lhs == rhs; })
-        .value()
-        .IsTrue();
-  }
-
+  // Convenience wrappers around Eq()/Ne() so InterpValues can act as C++ value
+  // types; e.g. in testing assertions and such.
+  bool operator==(const InterpValue& rhs) const;
   bool operator!=(const InterpValue& rhs) const { return !(*this == rhs); }
 
   // Lt() only performs comparisons on bits-valued InterpValues, whereas this

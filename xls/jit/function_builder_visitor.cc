@@ -288,7 +288,13 @@ absl::Status FunctionBuilderVisitor::HandleArraySlice(ArraySlice* slice) {
   llvm::Value* start = node_map_.at(slice->start());
   int64_t width = slice->width();
 
-  llvm::Type* index_type = start->getType();
+  // This overestimates the number of bits needed but in all practical
+  // situations it should be fine. The only exception to that is if some code
+  // uses a 64 bit index but doesn't actually make full use of that range, then
+  // this will possibly push us over a performance cliff.
+  int64_t index_bits = start->getType()->getIntegerBitWidth() +
+                       Bits::MinBitCountSigned(width) + 1;
+  llvm::Type* index_type = builder_->getIntNTy(index_bits);
   llvm::Type* result_type =
       type_converter_->ConvertToLlvmType(slice->GetType());
   llvm::Type* result_element_type = type_converter_->ConvertToLlvmType(
@@ -298,10 +304,11 @@ absl::Status FunctionBuilderVisitor::HandleArraySlice(ArraySlice* slice) {
       alloca_uncasted,
       llvm::PointerType::get(result_element_type, /*AddressSpace=*/0),
       "alloca");
+  llvm::Value* start_big = builder_->CreateZExt(start, index_type, "start_big");
 
   for (int64_t i = 0; i < width; i++) {
     llvm::Value* index = builder_->CreateAdd(
-        start, llvm::ConstantInt::get(index_type, i), "index");
+        start_big, llvm::ConstantInt::get(index_type, i), "index");
     XLS_ASSIGN_OR_RETURN(
         llvm::Value * value,
         IndexIntoArray(array, index,
@@ -560,19 +567,22 @@ absl::Status FunctionBuilderVisitor::HandleConcat(Concat* concat) {
 absl::Status FunctionBuilderVisitor::HandleCountedFor(CountedFor* counted_for) {
   XLS_ASSIGN_OR_RETURN(llvm::Function * function,
                        GetModuleFunction(counted_for->body()));
-  // One for the loop carry, one for the index, and one for user data.
-  std::vector<llvm::Value*> args(counted_for->invariant_args().size() + 3);
+  // Add the loop carry and the index to the invariant arguments.
+  std::vector<llvm::Value*> args(counted_for->invariant_args().size() + 2);
   for (int i = 0; i < counted_for->invariant_args().size(); i++) {
     args[i + 2] = node_map_.at(counted_for->invariant_args()[i]);
   }
+
   args[1] = node_map_.at(counted_for->initial_value());
-  args.back() = GetUserDataPtr();
+
+  auto required = GetRequiredArgs();
+  args.insert(args.end(), required.begin(), required.end());
 
   llvm::Type* function_type = function->getType()->getPointerElementType();
   for (int i = 0; i < counted_for->trip_count(); ++i) {
     args[0] = llvm::ConstantInt::get(function_type->getFunctionParamType(0),
                                      i * counted_for->stride());
-    args[1] = builder_->CreateCall(function, {args});
+    args[1] = builder_->CreateCall(function, args);
   }
 
   return StoreResult(counted_for, args[1]);
@@ -601,15 +611,16 @@ absl::Status FunctionBuilderVisitor::HandleDynamicCountedFor(
   llvm::Type* loop_body_function_type =
       loop_body_function->getType()->getPointerElementType();
 
-  // Add invariants to loop body args.
-  // One extra arg for the loop carry, one for the index, and one for user data.
+  // The loop body arguments are the invariant arguments plus the loop carry and
+  // index.
   std::vector<llvm::Value*> args(dynamic_counted_for->invariant_args().size() +
-                                 3);
+                                 2);
   for (int i = 0; i < dynamic_counted_for->invariant_args().size(); i++) {
     args[i + 2] = node_map_.at(dynamic_counted_for->invariant_args()[i]);
   }
-  // Add user data arg.
-  args.back() = GetUserDataPtr();
+
+  auto required = GetRequiredArgs();
+  args.insert(args.end(), required.begin(), required.end());
 
   // Create basic blocks and corresponding builders. We have 4 blocks:
   // Entry     - the code executed before the loop.
@@ -728,10 +739,79 @@ absl::Status FunctionBuilderVisitor::HandleEncode(Encode* encode) {
   return StoreResult(encode, result);
 }
 
+absl::StatusOr<std::vector<FunctionBuilderVisitor::CompareTerm>>
+FunctionBuilderVisitor::ExpandTerms(Node* lhs, Node* rhs, Node* src) {
+  XLS_RET_CHECK(lhs->GetType() == rhs->GetType()) << absl::StreamFormat(
+      "The lhs and rhs of %s have different types: lhs %s rhs %s",
+      src->ToString(), lhs->GetType()->ToString(), rhs->GetType()->ToString());
+
+  struct ToExpand {
+    Type* ty;
+    llvm::Value* lhs;
+    llvm::Value* rhs;
+  };
+
+  std::vector<ToExpand> unexpanded = {
+      ToExpand{lhs->GetType(), node_map_.at(lhs), node_map_.at(rhs)}};
+
+  std::vector<CompareTerm> terms;
+
+  while (!unexpanded.empty()) {
+    ToExpand next = unexpanded.back();
+    unexpanded.pop_back();
+
+    switch (next.ty->kind()) {
+      case TypeKind::kToken:
+        // Tokens represent different points in time and are incomparable.
+        return absl::InvalidArgumentError(absl::StrFormat(
+            "Tokens are incomparable so this expression is illegal: %s",
+            src->ToString()));
+      case TypeKind::kBits:
+        terms.push_back(CompareTerm{next.lhs, next.rhs});
+        break;
+      case TypeKind::kArray: {
+        ArrayType* array_type = next.ty->AsArrayOrDie();
+        Type* element_type = array_type->element_type();
+        // Cast once so we do not have to cast when calling CreateExtractValue
+        uint32_t array_size = static_cast<uint32_t>(array_type->size());
+        for (uint32_t i = 0; i < array_size; i++) {
+          llvm::Value* lhs_value = builder_->CreateExtractValue(next.lhs, {i});
+          llvm::Value* rhs_value = builder_->CreateExtractValue(next.rhs, {i});
+          unexpanded.push_back(ToExpand{element_type, lhs_value, rhs_value});
+        }
+        break;
+      }
+      case TypeKind::kTuple: {
+        TupleType* tuple_type = next.ty->AsTupleOrDie();
+        // Cast once so we do not have to cast when calling CreateExtractValue
+        uint32_t tuple_size = static_cast<uint32_t>(tuple_type->size());
+        for (uint32_t i = 0; i < tuple_size; i++) {
+          Type* element_type = tuple_type->element_type(i);
+          llvm::Value* lhs_value = builder_->CreateExtractValue(next.lhs, {i});
+          llvm::Value* rhs_value = builder_->CreateExtractValue(next.rhs, {i});
+          unexpanded.push_back(ToExpand{element_type, lhs_value, rhs_value});
+        }
+        break;
+      }
+    }
+  }
+  return terms;
+}
+
 absl::Status FunctionBuilderVisitor::HandleEq(CompareOp* eq) {
-  llvm::Value* lhs = node_map_.at(eq->operand(0));
-  llvm::Value* rhs = node_map_.at(eq->operand(1));
-  llvm::Value* result = builder_->CreateICmpEQ(lhs, rhs);
+  Node* lhs = eq->operand(0);
+  Node* rhs = eq->operand(1);
+
+  XLS_ASSIGN_OR_RETURN(std::vector<CompareTerm> eq_terms,
+                       ExpandTerms(lhs, rhs, eq));
+
+  llvm::Value* result = builder_->getTrue();
+
+  for (const auto& eq_term : eq_terms) {
+    llvm::Value* term_test = builder_->CreateICmpEQ(eq_term.lhs, eq_term.rhs);
+    result = builder_->CreateAnd(result, term_test);
+  }
+
   return StoreResult(eq, result);
 }
 
@@ -743,12 +823,13 @@ absl::Status FunctionBuilderVisitor::HandleInvoke(Invoke* invoke) {
   XLS_ASSIGN_OR_RETURN(llvm::Function * function,
                        GetModuleFunction(invoke->to_apply()));
 
-  // One extra for user data.
-  std::vector<llvm::Value*> args(invoke->operand_count() + 1);
+  std::vector<llvm::Value*> args(invoke->operand_count());
   for (int i = 0; i < invoke->operand_count(); i++) {
     args[i] = node_map_[invoke->operand(i)];
   }
-  args.back() = GetUserDataPtr();
+
+  auto required = GetRequiredArgs();
+  args.insert(args.end(), required.begin(), required.end());
 
   llvm::Value* invoke_inst = builder_->CreateCall(function, args);
   return StoreResult(invoke, invoke_inst);
@@ -775,11 +856,14 @@ absl::Status FunctionBuilderVisitor::HandleMap(Map* map) {
   llvm::Value* result = CreateTypedZeroValue(llvm::ArrayType::get(
       function_type->getReturnType(), input_type->getArrayNumElements()));
 
-  llvm::Value* user_data = GetUserDataPtr();
   for (uint32_t i = 0; i < input_type->getArrayNumElements(); ++i) {
-    llvm::Value* iter_input = builder_->CreateExtractValue(input, {i});
-    llvm::Value* iter_result =
-        builder_->CreateCall(to_apply, {iter_input, user_data});
+    llvm::Value* map_arg = builder_->CreateExtractValue(input, {i});
+
+    std::vector<llvm::Value*> iter_args = GetRequiredArgs();
+    // The argument of the map function goes before the required arguments.
+    iter_args.insert(iter_args.begin(), map_arg);
+
+    llvm::Value* iter_result = builder_->CreateCall(to_apply, iter_args);
     result = builder_->CreateInsertValue(result, iter_result, {i});
   }
 
@@ -837,9 +921,19 @@ absl::Status FunctionBuilderVisitor::HandleNaryXor(NaryOp* xor_op) {
 }
 
 absl::Status FunctionBuilderVisitor::HandleNe(CompareOp* ne) {
-  llvm::Value* lhs = node_map_.at(ne->operand(0));
-  llvm::Value* rhs = node_map_.at(ne->operand(1));
-  llvm::Value* result = builder_->CreateICmpNE(lhs, rhs);
+  Node* lhs = ne->operand(0);
+  Node* rhs = ne->operand(1);
+
+  XLS_ASSIGN_OR_RETURN(std::vector<CompareTerm> ne_terms,
+                       ExpandTerms(lhs, rhs, ne));
+
+  llvm::Value* result = builder_->getFalse();
+
+  for (const auto& ne_term : ne_terms) {
+    llvm::Value* term_test = builder_->CreateICmpNE(ne_term.lhs, ne_term.rhs);
+    result = builder_->CreateOr(result, term_test);
+  }
+
   return StoreResult(ne, result);
 }
 
@@ -858,9 +952,8 @@ absl::Status FunctionBuilderVisitor::HandleOneHot(OneHot* one_hot) {
   llvm::Type* input_type = input->getType();
   int input_width = input_type->getIntegerBitWidth();
 
-  llvm::Type* int1_type = llvm::Type::getInt1Ty(ctx_);
-  llvm::Value* llvm_false = llvm::ConstantInt::getFalse(int1_type);
-  llvm::Value* llvm_true = llvm::ConstantInt::getTrue(int1_type);
+  llvm::Value* llvm_false = builder_->getFalse();
+  llvm::Value* llvm_true = builder_->getTrue();
 
   // Special case the 0-bit input value, it produces a single true output bit.
   if (one_hot->operand(0)->GetType()->AsBitsOrDie()->bit_count() == 0) {
@@ -1514,17 +1607,24 @@ absl::StatusOr<llvm::Function*> FunctionBuilderVisitor::GetModuleFunction(
   // There are a couple of differences between this and entry function
   // visitor initialization such that I think it makes slightly more sense
   // to not factor it into a common block, but it's not clear-cut.
-  std::vector<llvm::Type*> param_types(xls_function->params().size() + 1);
+  std::vector<llvm::Type*> param_types(xls_function->params().size() + 2);
   for (int i = 0; i < xls_function->params().size(); ++i) {
     param_types[i] =
         type_converter_->ConvertToLlvmType(xls_function->param(i)->GetType());
   }
+
+  // Treat void pointers as int64_t values at the LLVM IR level.
+  // Using an actual pointer type triggers LLVM asserts when compiling
+  // in debug mode.
+  // TODO(amfv): 2021-04-05 Figure out why and fix void pointer handling.
+  llvm::Type* void_ptr_type = llvm::Type::getInt64Ty(ctx());
+
+  // Pointer to assertion status temporary
+  param_types.at(param_types.size() - 2) = void_ptr_type;
+
   // We need to add an extra param to every function call to carry our "user
   // data", i.e., callback info.
-  param_types.back() =
-      // llvm::PointerType::get(llvm::Type::getInt8Ty(ctx()),
-      // /*AddressSpace=*/0);
-      llvm::Type::getInt64Ty(ctx());
+  param_types.back() = void_ptr_type;
 
   Type* return_type = GetEffectiveReturnValue(xls_function)->GetType();
   llvm::Type* llvm_return_type =

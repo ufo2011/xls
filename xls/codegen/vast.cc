@@ -31,8 +31,6 @@
 namespace xls {
 namespace verilog {
 
-using absl::StrJoin;
-
 std::string SanitizeIdentifier(absl::string_view name) {
   if (name.empty()) {
     return "_";
@@ -188,28 +186,6 @@ absl::StatusOr<PortProto> Port::ToProto() const {
   XLS_ASSIGN_OR_RETURN(int64_t width, wire->data_type()->FlatBitCountAsInt64());
   proto.set_width(width);
   return proto;
-}
-
-static absl::StatusOr<int64_t> GetBitsForDirection(absl::Span<const Port> ports,
-                                                   Direction direction) {
-  int64_t result = 0;
-  for (const Port& port : ports) {
-    if (port.direction != direction) {
-      continue;
-    }
-    XLS_ASSIGN_OR_RETURN(int64_t width,
-                         port.wire->data_type()->FlatBitCountAsInt64());
-    result += width;
-  }
-  return result;
-}
-
-absl::StatusOr<int64_t> GetInputBits(absl::Span<const Port> ports) {
-  return GetBitsForDirection(ports, Direction::kInput);
-}
-
-absl::StatusOr<int64_t> GetOutputBits(absl::Span<const Port> ports) {
-  return GetBitsForDirection(ports, Direction::kOutput);
 }
 
 VerilogFunction::VerilogFunction(absl::string_view name, DataType* result_type,
@@ -476,6 +452,13 @@ std::string Assert::Emit() const {
                              : absl::StrFormat(", \"%s\"", error_message_));
 }
 
+std::string Cover::Emit() const {
+  // Coverpoints don't work without clock sources. Don't emit them in that case.
+  return absl::StrFormat("%s: cover property (%s%s);", label_,
+                         absl::StrCat("@(posedge ", clk_->Emit(), ") "),
+                         condition_->Emit());
+}
+
 std::string SystemTaskCall::Emit() const {
   if (args_.has_value()) {
     return absl::StrFormat(
@@ -544,10 +527,15 @@ std::string Literal::Emit() const {
 }
 
 bool Literal::IsLiteralWithValue(int64_t target) const {
-  if (!bits().FitsInInt64()) {
+  // VAST Literals are always unsigned. Signed literal values are created by
+  // casting a VAST Literal to a signed type.
+  if (target < 0) {
     return false;
   }
-  return bits().ToInt64().value() == target;
+  if (!bits().FitsInUint64()) {
+    return false;
+  }
+  return bits().ToUint64().value() == target;
 }
 
 // TODO(meheff): Escape string.

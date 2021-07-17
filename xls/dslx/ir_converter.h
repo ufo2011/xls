@@ -28,12 +28,24 @@
 
 namespace xls::dslx {
 
+// Bundles together options (common among the API routines below) used in
+// DSLX-to-IR conversion.
+struct ConvertOptions {
+  // Whether to emit positional metadata into the output IR.
+  //
+  // Stripping positions can be useful for less fragile string matching in
+  // development, e.g. tests.
+  bool emit_positions = true;
+
+  // Whether to emit fail!() operations as predicated assertion IR nodes.
+  bool emit_fail_as_assert = false;
+};
+
 // Converts the contents of a module to IR form.
 //
 // Args:
 //   module: Module to convert.
 //   import_data: Contains type information used in conversion.
-//   emit_positions: Whether to emit positional metadata into the output IR.
 //   traverse_tests: Whether to convert functions called in DSLX test
 //   constructs.
 //     Note that this does NOT convert the test constructs themselves.
@@ -41,15 +53,19 @@ namespace xls::dslx {
 // Returns:
 //   The IR package that corresponds to this module.
 absl::StatusOr<std::unique_ptr<Package>> ConvertModuleToPackage(
-    Module* module, ImportData* import_data, bool emit_positions = true,
+    Module* module, ImportData* import_data, const ConvertOptions& options,
     bool traverse_tests = false);
 
 // Wrapper around ConvertModuleToPackage that converts to IR text.
 absl::StatusOr<std::string> ConvertModule(Module* module,
                                           ImportData* import_data,
-                                          bool emit_positions = true);
+                                          const ConvertOptions& options);
 
 // Converts a single function into its emitted text form.
+//
+// Note that there may be several IR functions in the result text due to either
+// call graph dependencies within the module or constructs that turn into
+// multiple functions (e.g. for-loop bodies).
 //
 // Args:
 //   module: Module we're converting a function within.
@@ -59,8 +75,6 @@ absl::StatusOr<std::string> ConvertModule(Module* module,
 //    converted is parametrically instantiated.
 //   symbolic_bindings: Parametric bindings to use during conversion, if this
 //     function is parametric.
-//   emit_positions: Whether to emit position information into the IR based on
-//     the AST's source positions.
 //
 // Returns an error status that indicates whether the conversion was successful.
 // On success there will be a corresponding (built) function inside of
@@ -68,9 +82,9 @@ absl::StatusOr<std::string> ConvertModule(Module* module,
 //
 // Implementation note: creates a temporary IR package based on module's name.
 absl::StatusOr<std::string> ConvertOneFunction(
-    Module* module, absl::string_view entry_function_name, TypeInfo* type_info,
+    Module* module, absl::string_view entry_function_name,
     ImportData* import_data, const SymbolicBindings* symbolic_bindings,
-    bool emit_positions);
+    const ConvertOptions& options);
 
 // Converts an interpreter value to an IR value.
 absl::StatusOr<Value> InterpValueToValue(const InterpValue& v);

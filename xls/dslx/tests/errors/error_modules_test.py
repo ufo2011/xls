@@ -101,6 +101,12 @@ class ImportModuleWithTypeErrorTest(test_base.TestCase):
     self.assertIn('xls/dslx/tests/errors/bad_annotation.x:15:11-15:12', stderr)
     self.assertIn("identifier 'x' doesn't resolve to a type", stderr)
 
+  def test_invalid_colon_ref_as_literal_type(self):
+    test_path = 'xls/dslx/tests/errors/invalid_colon_ref_as_literal_type.x'
+    stderr = self._run(test_path)
+    self.assertIn('{}:23:25-23:26'.format(test_path), stderr)
+    self.assertIn('Non-bits type used to define a numeric literal.', stderr)
+
   def test_invalid_parameter_cast(self):
     stderr = self._run('xls/dslx/tests/errors/invalid_parameter_cast.x')
     self.assertIn('xls/dslx/tests/errors/invalid_parameter_cast.x:16:7-16:10',
@@ -170,6 +176,10 @@ class ImportModuleWithTypeErrorTest(test_base.TestCase):
         'xls/dslx/tests/errors/let_destructure_same_name.x:17:11-17:12', stderr)
     self.assertIn("Name 'i' is defined twice in this pattern", stderr)
 
+  def test_empty_array_error(self):
+    stderr = self._run('xls/dslx/tests/errors/empty_array.x')
+    self.assertIn('Cannot deduce the type of an empty array.', stderr)
+
   def test_invalid_array_expression_type(self):
     stderr = self._run('xls/dslx/tests/errors/invalid_array_expression_type.x')
     self.assertIn(
@@ -235,8 +245,89 @@ class ImportModuleWithTypeErrorTest(test_base.TestCase):
 
   def test_cast_struct_to_int(self):
     stderr = self._run('xls/dslx/tests/errors/cast_struct_to_int.x')
-    self.assertIn("Cannot cast from expression type struct 'S' to uN[32]",
+    self.assertIn(
+        "Cannot cast from expression type struct 'S' structure: S { member: uN[32] } to uN[32]",
+        stderr)
+
+  def test_destructure_fallible(self):
+    stderr = self._run('xls/dslx/tests/errors/destructure_fallible.x')
+    self.assertIn(
+        'FailureError: The program being interpreted failed! (u8:0, u8:0)',
+        stderr)
+
+  def test_match_not_exhaustive(self):
+    stderr = self._run('xls/dslx/tests/errors/match_not_exhaustive.x')
+    self.assertIn('match_not_exhaustive.x:16:3-19:4', stderr)
+    self.assertIn('Only matches with trailing irrefutable patterns', stderr)
+
+  def test_bad_coverpoint_name(self):
+    stderr = self._run('xls/dslx/tests/errors/coverpoint_bad_name.x')
+    self.assertIn('coverpoint_bad_name.x:16:9-16:40', stderr)
+    self.assertIn('A coverpoint identifer must start with', stderr)
+
+  def test_arg0_type_mismatch(self):
+    stderr = self._run('xls/dslx/tests/errors/arg0_type_mismatch.x')
+    # TODO(https://github.com/google/xls/issues/438): 2021-05-24 Numbers are
+    # currently reported with inaccurate spans, this will need to change once
+    # that's addressed.
+    self.assertIn('arg0_type_mismatch.x:18:9-18:14', stderr)
+    self.assertIn(
+        'uN[2] vs uN[32]: Mismatch between parameter and argument types',
+        stderr)
+
+  def test_arg1_type_mismatch(self):
+    stderr = self._run('xls/dslx/tests/errors/arg1_type_mismatch.x')
+    # TODO(https://github.com/google/xls/issues/438): 2021-05-24 Numbers are
+    # currently reported with inaccurate spans, this will need to change once
+    # that's addressed.
+    self.assertIn('arg1_type_mismatch.x:19:9-19:14', stderr)
+    self.assertIn(
+        'uN[3] vs uN[32]: Mismatch between parameter and argument types',
+        stderr)
+
+  def test_index_struct_value(self):
+    stderr = self._run('xls/dslx/tests/errors/index_struct_value.x')
+    self.assertIn('index_struct_value.x:23:4-23:7', stderr)
+    self.assertIn('Value to index is not an array', stderr)
+
+  def test_non_const_array_type_dimension(self):
+    stderr = self._run('xls/dslx/tests/errors/non_const_array_type_dimension.x')
+    # TODO(leary): 2021-06-21 This error should become something like "can only
+    # refer to constant or parametric values in dimensions".
+    self.assertIn('non_const_array_type_dimension.x:16:10-16:18', stderr)
+    self.assertIn('uN[32][x] vs ()', stderr)
+
+  def test_array_type_dimension_with_width_annotated(self):
+    stderr = self._run(
+        'xls/dslx/tests/errors/array_type_dimension_with_width_annotated.x')
+    self.assertIn('array_type_dimension_with_width_annotated.x:15:24-15:26',
                   stderr)
+    self.assertIn('Please do not annotate a type on dimensions', stderr)
+
+  def test_parametric_plus_global_as_local_const(self):
+    stderr = self._run(
+        'xls/dslx/tests/errors/parametric_plus_global_as_dimension.x')
+    self.assertIn('parametric_plus_global_as_dimension.x:20:24-20:25', stderr)
+    self.assertIn('Could not evaluate dimension expression to a constant value',
+                  stderr)
+
+  def test_signed_array_size(self):
+    stderr = self._run('xls/dslx/tests/errors/signed_array_size.x')
+    self.assertIn('signed_array_size.x:17:18-17:22', stderr)
+    self.assertIn('Dimension SIZE must be a `u32`', stderr)
+
+  # TODO(leary): 2021-06-30 We currently don't flag when an array dimension
+  # value resolves to signed *after* parametric instantiation.
+  @test_base.skip('Currently not flagging this as an error')
+  def test_signed_parametric_in_array_size(self):
+    self._run('xls/dslx/tests/errors/signed_parametric_in_array_size.x')
+
+  def test_duplicate_match_arm(self):
+    stderr = self._run('xls/dslx/tests/errors/duplicate_match_arm.x')
+    self.assertIn('duplicate_match_arm.x:22:5-22:8', stderr)
+    self.assertIn(
+        'Exact-duplicate pattern match detected `FOO` -- only the first could possibly match',
+        stderr)
 
 
 if __name__ == '__main__':

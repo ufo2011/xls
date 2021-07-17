@@ -14,7 +14,7 @@
 
 #include "xls/dslx/dslx_builtins.h"
 
-#include "xls/dslx/parametric_instantiator.h"
+#include "xls/dslx/concrete_type.h"
 
 namespace xls::dslx {
 namespace {
@@ -147,12 +147,7 @@ class Checker {
     if (!status_.ok()) {
       return *this;
     }
-    auto status_or_target = ConcreteTypeDim::Create(target);
-    if (status_or_target.ok()) {
-      status_ = status_or_target.status();
-      return *this;
-    }
-    if (t.size() != ConcreteTypeDim(status_or_target.value())) {
+    if (t.size() != ConcreteTypeDim::CreateU32(target)) {
       status_ = TypeInferenceErrorStatus(span_, &t, make_msg());
     }
     return *this;
@@ -163,7 +158,7 @@ class Checker {
     }
     const ConcreteType& t = *arg_types_[argno];
     if (auto* bits = dynamic_cast<const BitsType*>(&t);
-        bits == nullptr || bits->size() != ConcreteTypeDim::Create(1).value()) {
+        bits == nullptr || bits->size() != ConcreteTypeDim::CreateU32(1)) {
       status_ = TypeInferenceErrorStatus(
           span_, &t,
           absl::StrFormat("Expected argument %d to '%s' to be a u1; got %s",
@@ -216,6 +211,7 @@ const absl::flat_hash_map<std::string, std::string>& GetParametricBuiltins() {
       {"clz", "(uN[N]) -> uN[N]"},
       {"ctz", "(uN[N]) -> uN[N]"},
       {"concat", "(uN[M], uN[N]) -> uN[M+N]"},
+      {"cover!", "(u8[N], u1) -> ()"},
       {"fail!", "(T) -> T"},
       {"map", "(T[N], (T) -> U) -> U[N]"},
       {"one_hot", "(uN[N], u1) -> uN[N+1]"},
@@ -228,12 +224,6 @@ const absl::flat_hash_map<std::string, std::string>& GetParametricBuiltins() {
       {"or_reduce", "(uN[N]) -> u1"},
       {"xor_reduce", "(uN[N]) -> u1"},
 
-      // Signed comparisons.
-      {"sge", "(xN[N], xN[N]) -> u1"},
-      {"sgt", "(xN[N], xN[N]) -> u1"},
-      {"sle", "(xN[N], xN[N]) -> u1"},
-      {"slt", "(xN[N], xN[N]) -> u1"},
-
       // Use a dummy value to determine size.
       {"signex", "(xN[M], xN[N]) -> xN[N]"},
       {"slice", "(T[M], uN[N], T[P]) -> T[P]"},
@@ -243,9 +233,9 @@ const absl::flat_hash_map<std::string, std::string>& GetParametricBuiltins() {
 
       // Require-const-argument.
       //
-      // Note this is messed up and should be replaced with
-      // known-statically-sized iota syntax.
-      {"range", "(const uN[N], const uN[N]) -> ()"},
+      // Note this is a messed up type signature to need to support and should
+      // really be replaced with known-statically-sized iota syntax.
+      {"range", "(const uN[N], const uN[N]) -> uN[N][R]"},
   };
   return *map;
 }
@@ -314,7 +304,9 @@ static void PopulateSignatureToLambdaMap(
       return absl::StrFormat("Want arg 1 element type to be bits; got %s",
                              return_type.ToString());
     });
-    int64_t target = absl::get<int64_t>(b->size().value());
+    XLS_ASSIGN_OR_RETURN(
+        int64_t target,
+        absl::get<InterpValue>(b->size().value()).GetBitValueUint64());
     checker.CheckIsLen(*a, target, [&] {
       return absl::StrFormat("Bit width %d must match %s array size %s", target,
                              a->ToString(), a->size().ToString());
@@ -339,21 +331,32 @@ static void PopulateSignatureToLambdaMap(
                             .ArgsSameType(0, 1)
                             .status());
     return TypeAndBindings{absl::make_unique<FunctionType>(
-        CloneToUnique(data.arg_types), ConcreteType::MakeNil())};
+        CloneToUnique(data.arg_types), ConcreteType::MakeUnit())};
   };
-  map["(const uN[N], const uN[N]) -> ()"] =
+  map["(const uN[N], const uN[N]) -> uN[N][R]"] =
       [](const SignatureData& data,
          DeduceCtx* ctx) -> absl::StatusOr<TypeAndBindings> {
     XLS_RETURN_IF_ERROR(Checker(data.arg_types, data.name, data.span)
                             .Len(2)
                             .IsUN(0)
-                            .IsUN(1)
                             .ArgsSameType(0, 1)
                             .status());
-    XLS_RETURN_IF_ERROR(data.constexpr_eval(0));
-    XLS_RETURN_IF_ERROR(data.constexpr_eval(1));
+    XLS_ASSIGN_OR_RETURN(InterpValue start, data.constexpr_eval(0));
+    XLS_ASSIGN_OR_RETURN(InterpValue limit, data.constexpr_eval(1));
+    XLS_ASSIGN_OR_RETURN(int64_t start_int, start.GetBitValueUint64());
+    XLS_ASSIGN_OR_RETURN(int64_t limit_int, limit.GetBitValueUint64());
+    int64_t length = limit_int - start_int;
+    if (length < 0) {
+      return TypeInferenceErrorStatus(
+          data.span, nullptr,
+          absl::StrFormat("Need limit to '%s' to be >= than start value; "
+                          "start: %s, limit: %s",
+                          data.name, start.ToString(), limit.ToString()));
+    }
+    auto return_type = absl::make_unique<ArrayType>(
+        data.arg_types[0]->CloneToUnique(), ConcreteTypeDim::CreateU32(length));
     return TypeAndBindings{absl::make_unique<FunctionType>(
-        CloneToUnique(data.arg_types), ConcreteType::MakeNil())};
+        CloneToUnique(data.arg_types), std::move(return_type))};
   };
   map["(T[N], uN[M], T) -> T[N]"] =
       [](const SignatureData& data,
@@ -393,7 +396,7 @@ static void PopulateSignatureToLambdaMap(
                             .IsUN(1)
                             .status());
     return TypeAndBindings{absl::make_unique<FunctionType>(
-        CloneToUnique(data.arg_types), ConcreteType::MakeNil())};
+        CloneToUnique(data.arg_types), ConcreteType::MakeUnit())};
   };
   map["(uN[M], uN[N]) -> uN[M+N]"] =
       [](const SignatureData& data,
@@ -474,22 +477,11 @@ static void PopulateSignatureToLambdaMap(
     XLS_ASSIGN_OR_RETURN(ConcreteTypeDim n,
                          data.arg_types[0]->GetTotalBitCount());
     XLS_ASSIGN_OR_RETURN(ConcreteTypeDim np1,
-                         n.Add(ConcreteTypeDim::Create(1).value()));
+                         n.Add(ConcreteTypeDim::CreateU32(1)));
     auto return_type =
         absl::make_unique<BitsType>(/*signed=*/false, /*size=*/np1);
     return TypeAndBindings{absl::make_unique<FunctionType>(
         CloneToUnique(data.arg_types), std::move(return_type))};
-  };
-  map["(xN[N], xN[N]) -> u1"] =
-      [](const SignatureData& data,
-         DeduceCtx* ctx) -> absl::StatusOr<TypeAndBindings> {
-    XLS_RETURN_IF_ERROR(Checker(data.arg_types, data.name, data.span)
-                            .Len(2)
-                            .IsBits(0)
-                            .ArgsSameType(0, 1)
-                            .status());
-    return TypeAndBindings{absl::make_unique<FunctionType>(
-        CloneToUnique(data.arg_types), BitsType::MakeU1())};
   };
   map["(T[N]) -> (u32, T)[N]"] =
       [](const SignatureData& data,
@@ -522,10 +514,10 @@ static void PopulateSignatureToLambdaMap(
                             .status());
 
     const ConcreteType& t = a->element_type();
-    std::vector<std::unique_ptr<ConcreteType>> mapped_fn_arg_types;
-    mapped_fn_arg_types.push_back(t.CloneToUnique());
+    std::vector<InstantiateArg> mapped_fn_args = {
+        InstantiateArg{t, data.arg_spans[0]}};
 
-    absl::optional<absl::Span<ParametricBinding* const>>
+    absl::optional<absl::Span<const ParametricConstraint>>
         mapped_parametric_bindings;
     if (data.parametric_bindings.has_value()) {
       mapped_parametric_bindings.emplace(data.parametric_bindings.value());
@@ -534,15 +526,33 @@ static void PopulateSignatureToLambdaMap(
     // Note that InstantiateFunction will check that the mapped function type
     // lines up with the array (we're providing it the argument types it's being
     // invoked with).
-    XLS_ASSIGN_OR_RETURN(TypeAndBindings tab,
-                         InstantiateFunction(data.span, *f, mapped_fn_arg_types,
-                                             ctx, mapped_parametric_bindings));
+    XLS_ASSIGN_OR_RETURN(
+        TypeAndBindings tab,
+        InstantiateFunction(
+            data.span, *f, mapped_fn_args, ctx,
+            /*parametric_constraints=*/mapped_parametric_bindings));
     auto return_type =
         absl::make_unique<ArrayType>(std::move(tab.type), a->size());
     return TypeAndBindings{
         absl::make_unique<FunctionType>(CloneToUnique(data.arg_types),
                                         std::move(return_type)),
         tab.symbolic_bindings};
+  };
+  map["(u8[N], u1) -> ()"] =
+      [](const SignatureData& data,
+         DeduceCtx* ctx) -> absl::StatusOr<TypeAndBindings> {
+    const ArrayType* array_type;
+    auto checker = Checker(data.arg_types, data.name, data.span)
+                       .Len(2)
+                       .IsArray(0, &array_type)
+                       .IsU1(1);
+    checker.Eq(array_type->element_type(), BitsType(false, 8), [&] {
+      return absl::StrFormat("Element type of argument 0 %s should be a u8.",
+                             array_type->ToString());
+    });
+    XLS_RETURN_IF_ERROR(checker.status());
+    return TypeAndBindings{absl::make_unique<FunctionType>(
+        CloneToUnique(data.arg_types), ConcreteType::MakeUnit())};
   };
 }
 

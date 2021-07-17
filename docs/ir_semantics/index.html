@@ -86,36 +86,6 @@
       
     </div>
     
-      <label class="md-header-nav__button md-icon" for="__search">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0116 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.516 6.516 0 019.5 16 6.5 6.5 0 013 9.5 6.5 6.5 0 019.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5z"/></svg>
-      </label>
-      
-<div class="md-search" data-md-component="search" role="dialog">
-  <label class="md-search__overlay" for="__search"></label>
-  <div class="md-search__inner" role="search">
-    <form class="md-search__form" name="search">
-      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" data-md-state="active">
-      <label class="md-search__icon md-icon" for="__search">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0116 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.516 6.516 0 019.5 16 6.5 6.5 0 013 9.5 6.5 6.5 0 019.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5z"/></svg>
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11h12z"/></svg>
-      </label>
-      <button type="reset" class="md-search__icon md-icon" aria-label="Clear" data-md-component="search-reset" tabindex="-1">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12 19 6.41z"/></svg>
-      </button>
-    </form>
-    <div class="md-search__output">
-      <div class="md-search__scrollwrap" data-md-scrollfix>
-        <div class="md-search-result" data-md-component="search-result">
-          <div class="md-search-result__meta">
-            Initializing search
-          </div>
-          <ol class="md-search-result__list"></ol>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-    
     
       <div class="md-header-nav__source">
         
@@ -294,6 +264,13 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#functions-procs-and-blocks" class="md-nav__link">
+    Functions, procs, and blocks
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#operations" class="md-nav__link">
     Operations
   </a>
@@ -386,22 +363,8 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#receive_if" class="md-nav__link">
-    receive_if
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
   <a href="#send" class="md-nav__link">
     send
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#send_if" class="md-nav__link">
-    send_if
   </a>
   
 </li>
@@ -625,6 +588,54 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#cover" class="md-nav__link">
+    cover
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rtl-level-operations" class="md-nav__link">
+    RTL-level operations
+  </a>
+  
+    <nav class="md-nav" aria-label="RTL-level operations">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#input_port" class="md-nav__link">
+    input_port
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#output_port" class="md-nav__link">
+    output_port
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#register_read" class="md-nav__link">
+    register_read
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#register_write" class="md-nav__link">
+    register_write
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -833,18 +844,30 @@
           
 
 
+  <li class="md-nav__item">
+    <a href="../dslx_std/" title="Standard Library" class="md-nav__link">
+      Standard Library
+    </a>
+  </li>
+
+        
+          
+          
+          
+
+
   <li class="md-nav__item md-nav__item--nested">
     
-      <input class="md-nav__toggle md-toggle" data-md-toggle="nav-3-2" type="checkbox" id="nav-3-2">
+      <input class="md-nav__toggle md-toggle" data-md-toggle="nav-3-3" type="checkbox" id="nav-3-3">
     
-    <label class="md-nav__link" for="nav-3-2">
+    <label class="md-nav__link" for="nav-3-3">
       Examples
       <span class="md-nav__icon md-icon">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M8.59 16.58L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.42z"/></svg>
       </span>
     </label>
     <nav class="md-nav" aria-label="Examples" data-md-level="2">
-      <label class="md-nav__title" for="nav-3-2">
+      <label class="md-nav__title" for="nav-3-3">
         <span class="md-nav__icon md-icon">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11h12z"/></svg>
         </span>
@@ -891,6 +914,18 @@
         
       </ul>
     </nav>
+  </li>
+
+        
+          
+          
+          
+
+
+  <li class="md-nav__item">
+    <a href="../floating_point/" title="Floating Point" class="md-nav__link">
+      Floating Point
+    </a>
   </li>
 
         
@@ -1320,6 +1355,13 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#functions-procs-and-blocks" class="md-nav__link">
+    Functions, procs, and blocks
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#operations" class="md-nav__link">
     Operations
   </a>
@@ -1412,22 +1454,8 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#receive_if" class="md-nav__link">
-    receive_if
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
   <a href="#send" class="md-nav__link">
     send
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#send_if" class="md-nav__link">
-    send_if
   </a>
   
 </li>
@@ -1651,6 +1679,54 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#cover" class="md-nav__link">
+    cover
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rtl-level-operations" class="md-nav__link">
+    RTL-level operations
+  </a>
+  
+    <nav class="md-nav" aria-label="RTL-level operations">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#input_port" class="md-nav__link">
+    input_port
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#output_port" class="md-nav__link">
+    output_port
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#register_read" class="md-nav__link">
+    register_read
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#register_write" class="md-nav__link">
+    register_write
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1692,6 +1768,7 @@
 <li><a href="#token">Token</a></li>
 </ul>
 </li>
+<li><a href="#functions-procs-and-blocks">Functions, procs, and blocks</a></li>
 <li><a href="#operations">Operations</a><ul>
 <li><a href="#unary-bitwise-operations">Unary bitwise operations</a></li>
 <li><a href="#variadic-bitwise-operations">Variadic bitwise operations</a></li>
@@ -1706,9 +1783,7 @@
 </li>
 <li><a href="#channel-operations">Channel operations</a><ul>
 <li><a href="#receive">receive</a></li>
-<li><a href="#receive_if">receive_if</a></li>
 <li><a href="#send">send</a></li>
-<li><a href="#send_if">send_if</a></li>
 </ul>
 </li>
 <li><a href="#array-operations">Array operations</a><ul>
@@ -1746,6 +1821,14 @@
 <li><a href="#sequencing-operations">Sequencing operations</a><ul>
 <li><a href="#after_all">after_all</a></li>
 <li><a href="#assert">assert</a></li>
+<li><a href="#cover">cover</a></li>
+</ul>
+</li>
+<li><a href="#rtl-level-operations">RTL-level operations</a><ul>
+<li><a href="#input_port">input_port</a></li>
+<li><a href="#output_port">output_port</a></li>
+<li><a href="#register_read">register_read</a></li>
+<li><a href="#register_write">register_write</a></li>
 </ul>
 </li>
 </ul>
@@ -1813,6 +1896,29 @@ no value and all tokens are identical. A token is purely symbolic / semantic and
 has no correlate in hardware.</p>
 <p><strong>Type syntax:</strong></p>
 <p><code>token</code></p>
+<h2 id="functions-procs-and-blocks">Functions, procs, and blocks</h2>
+<p>The XLS IR has three function-level abstractions each which hold a data-flow
+graph of XLS IR operations:</p>
+<ul>
+<li><em>function</em> : Stateless abstraction with a single-output which is computed
+    from zero or more input parameters. May invoke other functions.</li>
+</ul>
+<ul>
+<li><em>proc</em> : Stateful abstraction with an arbitrarily-typed recurrent state.
+    Procs can communicate with other procs via channels which (abstractly) are
+    infinite-depth FIFOs with flow control. Channel communication is handled via
+    send and receive IR operations. Procs may invoke functions.</li>
+</ul>
+<ul>
+<li><em>block</em> : RTL-level abstraction used for code generation. Corresponds to a
+    single Verilog module. Includes explicit representations of RTL constructs:
+    registers, ports, logic, and module instantiations. Procs and functions are
+    converted to blocks as part of the code generation process. Blocks may
+    “invoke” other blocks via instantiation.x</li>
+</ul>
+<p>Names of function, procs and blocks must be unique among their respective
+abstractions (functions, procs, and blocks). For example, a block cannot share a
+name with another block but can share a name with a function.</p>
 <h2 id="operations">Operations</h2>
 <p>Operations share a common syntax and have both positional and keyword arguments
 à la Python. Positional arguments are ordered and must appear first in the
@@ -2263,59 +2369,9 @@ and each channel supports a fixed set of data types which are sent or received
 in a single transaction.</p>
 <h4 id="receive"><strong><code>receive</code></strong></h4>
 <p>Receives data values from a specified channel. The number of data values <code>N</code> and
-their type is determined by the channel.</p>
-<div class="highlight"><pre><span></span><code>result = receive(tkn, channel_id=&lt;ch&gt;)
-</code></pre></div>
-
-<p><strong>Types</strong></p>
-<table>
-<thead>
-<tr>
-<th>Value</th>
-<th>Type</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>tkn</code></td>
-<td><code>token</code></td>
-</tr>
-<tr>
-<td><code>result</code></td>
-<td><code>(token, T_{0}, ... , T_{N-1})</code></td>
-</tr>
-</tbody>
-</table>
-<p><strong>Keyword arguments</strong></p>
-<!-- mdformat off(multiline table cells not supported in mkdocs) -->
-
-<table>
-<thead>
-<tr>
-<th>Keyword</th>
-<th>Type</th>
-<th>Required</th>
-<th>Default</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>channel_id</code></td>
-<td><code>int64_t</code></td>
-<td>yes</td>
-<td></td>
-<td>The ID of the channel to receive data from</td>
-</tr>
-</tbody>
-</table>
-<!-- mdformat on -->
-
-<h4 id="receive_if"><strong><code>receive_if</code></strong></h4>
-<p>Receives data values from a specified channel if and only if the predicate
-operand is true. The number of data values <code>N</code> and their type is determined by
-the channel.</p>
-<div class="highlight"><pre><span></span><code>result = receive_if(tkn, pred, channel_id=&lt;ch&gt;)
+their type is determined by the channel. An optional predicate value
+conditionally enables the receive operation.</p>
+<div class="highlight"><pre><span></span><code>result = receive(tkn, predicate=&lt;pred&gt;, channel_id=&lt;ch&gt;)
 </code></pre></div>
 
 <p><strong>Types</strong></p>
@@ -2355,6 +2411,13 @@ the channel.</p>
 </tr>
 </thead>
 <tbody>
+<tr>
+<td><code>predicate</code></td>
+<td><code>bits[1]</code></td>
+<td>no</td>
+<td></td>
+<td>A value is received iff <code>predicate</code> is true</td>
+</tr>
 <tr>
 <td><code>channel_id</code></td>
 <td><code>int64_t</code></td>
@@ -2369,8 +2432,9 @@ the channel.</p>
 <p>If the predicate is false the data values in the result are zero-filled.</p>
 <h4 id="send"><strong><code>send</code></strong></h4>
 <p>Sends data values to a specified channel. The number of data values <code>N</code> and
-their type is determined by the channel.</p>
-<div class="highlight"><pre><span></span><code>result = send(tkn, data_{0}, ..., data_{N-1}, channel_id=&lt;ch&gt;)
+their type is determined by the channel. An optional predicate value
+conditionally enables the receive operation.</p>
+<div class="highlight"><pre><span></span><code>result = send(tkn, data_{0}, ..., data_{N-1}, predicate=&lt;pred&gt;, channel_id=&lt;ch&gt;)
 </code></pre></div>
 
 <p><strong>Types</strong></p>
@@ -2389,68 +2453,12 @@ their type is determined by the channel.</p>
 <tr>
 <td><code>data_{i}</code></td>
 <td><code>T_{i}</code></td>
-</tr>
-<tr>
-<td><code>result</code></td>
-<td><code>token</code></td>
-</tr>
-</tbody>
-</table>
-<p>The types of operands <code>data_{i}</code> and the number <code>N</code> must match the types and
-number of data elements supported by the channel.</p>
-<p><strong>Keyword arguments</strong></p>
-<!-- mdformat off(multiline table cells not supported in mkdocs) -->
-
-<table>
-<thead>
-<tr>
-<th>Keyword</th>
-<th>Type</th>
-<th>Required</th>
-<th>Default</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>channel_id</code></td>
-<td><code>int64_t</code></td>
-<td>yes</td>
-<td></td>
-<td>The ID of the channel to send data to.</td>
-</tr>
-</tbody>
-</table>
-<!-- mdformat on -->
-
-<h4 id="send_if"><strong><code>send_if</code></strong></h4>
-<p>Sends data values to a specified channel if and only if the predicate operand is
-true. The number and type of data values is determined by the channel.</p>
-<div class="highlight"><pre><span></span><code>result = send_if(tkn, pred, data_{0}, ..., data_{N-1}, channel_id=&lt;ch&gt;)
-</code></pre></div>
-
-<p><strong>Types</strong></p>
-<table>
-<thead>
-<tr>
-<th>Value</th>
-<th>Type</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>tkn</code></td>
-<td><code>token</code></td>
 </tr>
 <tr>
 <td><code>pred</code></td>
 <td><code>bits[1]</code></td>
 </tr>
 <tr>
-<td><code>data_{i}</code></td>
-<td><code>T_{i}</code></td>
-</tr>
-<tr>
 <td><code>result</code></td>
 <td><code>token</code></td>
 </tr>
@@ -2472,6 +2480,13 @@ number of data elements supported by the channel.</p>
 </tr>
 </thead>
 <tbody>
+<tr>
+<td><code>predicate</code></td>
+<td><code>bits[1]</code></td>
+<td>no</td>
+<td></td>
+<td>A value is sent iff <code>predicate</code> is true</td>
+</tr>
 <tr>
 <td><code>channel_id</code></td>
 <td><code>int64_t</code></td>
@@ -2485,7 +2500,7 @@ number of data elements supported by the channel.</p>
 
 <h3 id="array-operations">Array operations</h3>
 <h4 id="array_1"><strong><code>array</code></strong></h4>
-<p>Constructs a array of its operands.</p>
+<p>Constructs an array of its operands.</p>
 <div class="highlight"><pre><span></span><code>result = array(operand_{0}, ..., operand_{N-1})
 </code></pre></div>
 
@@ -2509,7 +2524,7 @@ number of data elements supported by the channel.</p>
 </tbody>
 </table>
 <p>Array can take an arbitrary number of operands including zero (which produces an
-empty array).</p>
+empty array). The n-th operand becomes the n-th element of the array.</p>
 <h4 id="array_index"><strong><code>array_index</code></strong></h4>
 <p>Returns a single element from an array.</p>
 <p><strong>Syntax</strong></p>
@@ -3022,7 +3037,7 @@ is zero.</p>
 </tr>
 </tbody>
 </table>
-<p>The result width <code>M</code> must be equal to $$\lceil \log_{2} N \rceil$$.</p>
+<p>The result width <code>M</code> must be equal to <span class="arithmatex">\(<span class="arithmatex">\(\lceil \log_{2} N \rceil\)</span>\)</span>.</p>
 <p><code>encode</code> converts the one-hot operand value into a binary-encoded value of the
 "hot" bit of the input. If the <code>n</code>-th bit and only the <code>n</code>-th bit of the operand
 is set the result is equal the value <code>n</code> as an unsigned number.</p>
@@ -3599,6 +3614,220 @@ result = assert(tkn, condition, message=&lt;string&gt;, label=&lt;string&gt;)
 </tbody>
 </table>
 <!-- mdformat on -->
+
+<h4 id="cover"><strong><code>cover</code></strong></h4>
+<p>Records the number of times the given condition evaluates to true. Just like
+<code>assert</code>, this is a software-only construct and is not emitted in a final
+hardware design, and tokens are used to sequence this operation in the graph.</p>
+<div class="highlight"><pre><span></span><code>result = cover(tkn, condition, label=&lt;string&gt;)
+</code></pre></div>
+
+<p><strong>Types</strong></p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tkn</code></td>
+<td><code>token</code></td>
+</tr>
+<tr>
+<td><code>condition</code></td>
+<td><code>bits[1]</code></td>
+</tr>
+<tr>
+<td><code>result</code></td>
+<td><code>token</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Keyword arguments</strong></p>
+<table>
+<thead>
+<tr>
+<th>Keyword</th>
+<th>Type</th>
+<th>Required</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>label</code></td>
+<td><code>string</code></td>
+<td>yes</td>
+<td></td>
+<td>Name associated with the counter.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="rtl-level-operations">RTL-level operations</h3>
+<p>These IR operations correspond to RTL-level constructs in the emitted Verilog.
+These operations are added and used in the code generation process and may only
+appear in blocks (not procs or functions).</p>
+<h4 id="input_port"><strong><code>input_port</code></strong></h4>
+<p>Corresponds to an input port on a Verilog module.</p>
+<p><strong>Syntax</strong></p>
+<div class="highlight"><pre><span></span><code>result = input_port()
+</code></pre></div>
+
+<p><strong>Types</strong></p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>result</code></td>
+<td><code>T</code></td>
+</tr>
+</tbody>
+</table>
+<p>An input_port operation can be an arbitrary type.</p>
+<h4 id="output_port"><strong><code>output_port</code></strong></h4>
+<p>Corresponds to an output port on a Verilog module. The value sent to the output
+port is the data operand.</p>
+<p><strong>Syntax</strong></p>
+<div class="highlight"><pre><span></span><code>result = output_port(data)
+</code></pre></div>
+
+<p><strong>Types</strong></p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>data</code></td>
+<td><code>T</code></td>
+</tr>
+<tr>
+<td><code>result</code></td>
+<td><code>T</code></td>
+</tr>
+</tbody>
+</table>
+<h4 id="register_read"><strong><code>register_read</code></strong></h4>
+<p>Reads a value from a register.</p>
+<p>The register is defined on the block.</p>
+<p><strong>Syntax</strong></p>
+<div class="highlight"><pre><span></span><code>result = register_read(register=&lt;register_name&gt;)
+</code></pre></div>
+
+<p><strong>Types</strong></p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>result</code></td>
+<td><code>T</code></td>
+</tr>
+</tbody>
+</table>
+<p>The type <code>T</code> of the result of the operation is the type of the register.</p>
+<p><strong>Keyword arguments</strong></p>
+<!-- mdformat off(multiline table cells not supported in mkdocs) -->
+
+<table>
+<thead>
+<tr>
+<th>Keyword</th>
+<th>Type</th>
+<th>Required</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>register</code></td>
+<td><code>string</code></td>
+<td>yes</td>
+<td></td>
+<td>Name of the register to read</td>
+</tr>
+</tbody>
+</table>
+<!-- mdformat on -->
+
+<h4 id="register_write"><strong><code>register_write</code></strong></h4>
+<p>Writes a value to a register.</p>
+<p>The write to the register may be conditioned upon an optional load-enable
+and/or reset signal. The register is defined on the block.</p>
+<p><strong>Syntax</strong></p>
+<div class="highlight"><pre><span></span><code>result = register_write(data, load_enable=&lt;load_enable&gt;, reset=&lt;reset&gt;, register=&lt;register_name&gt;)
+</code></pre></div>
+
+<p><strong>Types</strong></p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>data</code></td>
+<td><code>T</code></td>
+</tr>
+<tr>
+<td><code>load_enable</code></td>
+<td><code>bits[1]</code> (optional)</td>
+</tr>
+<tr>
+<td><code>reset</code></td>
+<td><code>bits[1]</code> (optional)</td>
+</tr>
+<tr>
+<td><code>result</code></td>
+<td><code>()</code> (empty tuple)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Keyword arguments</strong></p>
+<!-- mdformat off(multiline table cells not supported in mkdocs) -->
+
+<table>
+<thead>
+<tr>
+<th>Keyword</th>
+<th>Type</th>
+<th>Required</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>register</code></td>
+<td><code>string</code></td>
+<td>yes</td>
+<td></td>
+<td>Name of the register to write</td>
+</tr>
+</tbody>
+</table>
+<!-- mdformat on -->
+
+<p>The type <code>T</code> of the data operand must be the same as the the type of the
+register.</p>
                 
               
               
@@ -3677,6 +3906,10 @@ result = assert(tkn, condition, message=&lt;string&gt;, label=&lt;string&gt;)
           }, typeof search !== "undefined" && search)
         })
       </script>
+      
+        <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
       
     
   </body>

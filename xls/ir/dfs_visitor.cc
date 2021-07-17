@@ -93,20 +93,16 @@ absl::Status DfsVisitorWithDefault::HandleBitSliceUpdate(
   return DefaultHandler(update);
 }
 
+absl::Status DfsVisitorWithDefault::HandleCover(Cover* cover) {
+  return DefaultHandler(cover);
+}
+
 absl::Status DfsVisitorWithDefault::HandleReceive(Receive* receive) {
   return DefaultHandler(receive);
 }
 
-absl::Status DfsVisitorWithDefault::HandleReceiveIf(ReceiveIf* receive_if) {
-  return DefaultHandler(receive_if);
-}
-
 absl::Status DfsVisitorWithDefault::HandleSend(Send* send) {
   return DefaultHandler(send);
-}
-
-absl::Status DfsVisitorWithDefault::HandleSendIf(SendIf* send_if) {
-  return DefaultHandler(send_if);
 }
 
 absl::Status DfsVisitorWithDefault::HandleDynamicBitSlice(
@@ -139,8 +135,19 @@ absl::Status DfsVisitorWithDefault::HandleEq(CompareOp* eq) {
   return DefaultHandler(eq);
 }
 
+absl::Status DfsVisitorWithDefault::HandleGate(Gate* gate) {
+  return DefaultHandler(gate);
+}
+
 absl::Status DfsVisitorWithDefault::HandleIdentity(UnOp* identity) {
   return DefaultHandler(identity);
+}
+
+absl::Status DfsVisitorWithDefault::HandleInputPort(InputPort* input_port) {
+  return DefaultHandler(input_port);
+}
+absl::Status DfsVisitorWithDefault::HandleOutputPort(OutputPort* output_port) {
+  return DefaultHandler(output_port);
 }
 
 absl::Status DfsVisitorWithDefault::HandleInvoke(Invoke* invoke) {
@@ -177,6 +184,15 @@ absl::Status DfsVisitorWithDefault::HandleOneHotSel(OneHotSelect* sel) {
 
 absl::Status DfsVisitorWithDefault::HandleParam(Param* param) {
   return DefaultHandler(param);
+}
+
+absl::Status DfsVisitorWithDefault::HandleRegisterRead(RegisterRead* reg_read) {
+  return DefaultHandler(reg_read);
+}
+
+absl::Status DfsVisitorWithDefault::HandleRegisterWrite(
+    RegisterWrite* reg_write) {
+  return DefaultHandler(reg_write);
 }
 
 absl::Status DfsVisitorWithDefault::HandleReverse(UnOp* reverse) {

@@ -25,7 +25,9 @@ namespace m = ::xls::op_matchers;
 namespace xls {
 namespace {
 
+using status_testing::IsOkAndHolds;
 using status_testing::StatusIs;
+using ::testing::ElementsAre;
 using ::testing::HasSubstr;
 
 class ProcTest : public IrTestBase {};
@@ -53,11 +55,12 @@ TEST_F(ProcTest, MutateProc) {
   ProcBuilder pb("p", /*init_value=*/Value(UBits(42, 32)), "tkn", "st",
                  p.get());
   BValue add = pb.Add(pb.Literal(UBits(1, 32)), pb.GetStateParam());
-  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc,
-                           pb.Build(pb.AfterAll({pb.GetTokenParam()}), add));
+  BValue after_all = pb.AfterAll({pb.GetTokenParam()});
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build(after_all, add));
 
   EXPECT_THAT(proc->NextToken(), m::AfterAll(m::Param("tkn")));
   XLS_ASSERT_OK(proc->SetNextToken(proc->TokenParam()));
+  XLS_ASSERT_OK(proc->RemoveNode(after_all.node()));
   EXPECT_THAT(proc->NextToken(), m::Param("tkn"));
 
   EXPECT_THAT(proc->NextState(), m::Add());
@@ -70,7 +73,8 @@ TEST_F(ProcTest, MutateProc) {
   XLS_ASSERT_OK_AND_ASSIGN(
       Node * new_state,
       proc->MakeNode<Literal>(/*loc=*/absl::nullopt, Value(UBits(100, 100))));
-  XLS_ASSERT_OK(proc->ReplaceState("new_state", new_state));
+  XLS_ASSERT_OK(
+      proc->ReplaceState("new_state", new_state, Value(UBits(100, 100))));
 
   EXPECT_THAT(proc->NextState(), m::Literal(UBits(100, 100)));
   EXPECT_THAT(proc->StateParam(), m::Type("bits[100]"));
@@ -118,9 +122,27 @@ TEST_F(ProcTest, ReplaceStateThatStillHasUse) {
       Node * new_state,
       proc->MakeNode<Literal>(/*loc=*/absl::nullopt, Value(UBits(100, 100))));
   EXPECT_THAT(
-      proc->ReplaceState("new_state", new_state),
+      proc->ReplaceState("new_state", new_state, Value(UBits(100, 100))),
       StatusIs(absl::StatusCode::kInvalidArgument,
                HasSubstr("Existing state param \"st\" still has uses")));
+}
+
+TEST_F(ProcTest, ReplaceStateWithWrongInitValueType) {
+  auto p = CreatePackage();
+  ProcBuilder pb("p", /*init_value=*/Value(UBits(42, 32)), "tkn", "st",
+                 p.get());
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Proc * proc,
+      pb.Build(pb.AfterAll({pb.GetTokenParam()}), pb.Literal(UBits(1, 32))));
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Node * new_state,
+      proc->MakeNode<Literal>(/*loc=*/absl::nullopt, Value(UBits(100, 100))));
+  EXPECT_THAT(proc->ReplaceState("new_state", new_state,
+                                 /*init_value=*/Value(UBits(0, 42))),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("New initial value bits[42]:0 does not match "
+                                 "type bits[100] of next state literal.5")));
 }
 
 }  // namespace

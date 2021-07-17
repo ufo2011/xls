@@ -53,8 +53,8 @@ py_library(
 )
 
 py_test(
-    name = "run_fuzz_sanity_test",
-    srcs = ["run_fuzz_sanity_test.py"],
+    name = "run_fuzz_smoke_test",
+    srcs = ["run_fuzz_smoke_test.py"],
     data = glob(["testdata/run_fuzz_test*.x"]),
     python_version = "PY3",
     srcs_version = "PY3",
@@ -195,7 +195,6 @@ generate_crasher_regression_tests(
     failing = [
         "crashers/crasher_2020-12-03_8671.x",
         "crashers/crasher_2020-12-04_0d47.x",
-        "crashers/crasher_2021-02-20_257d.x",
         "crashers/crasher_2021-02-28_ce06.x",
         "crashers/crasher_2021-03-19_2649.x",
         "crashers/crasher_2021-03-28_dba9.x",
@@ -204,6 +203,11 @@ generate_crasher_regression_tests(
         "crashers/crasher_2021-04-05_32d7.x",
     ],
     prefix = package_name(),
+    tags = {
+        "crashers/crasher_2021-03-27_2259.x": [
+            "optonly",
+        ],
+    },
 )
 
 py_library(
@@ -294,19 +298,6 @@ py_test(
         "//xls/fuzzer/python:cpp_sample",
         "@com_google_absl_py//absl/logging",
         "@com_google_absl_py//absl/testing:absltest",
-    ],
-)
-
-py_test(
-    name = "sample_generator_test",
-    srcs = ["sample_generator_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
-    deps = [
-        "//xls/common:test_base",
-        "//xls/dslx/python:cpp_concrete_type",
-        "//xls/fuzzer/python:cpp_ast_generator",
-        "//xls/fuzzer/python:cpp_sample",
     ],
 )
 
@@ -482,11 +473,12 @@ cc_library(
 )
 
 cc_test(
-    name = "cpp_sample_generator_test",
+    name = "sample_generator_test",
     srcs = ["sample_generator_test.cc"],
     deps = [
         ":cpp_sample_generator",
         "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
         "@com_google_googletest//:gtest",
     ],
 )

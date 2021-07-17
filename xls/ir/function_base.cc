@@ -20,12 +20,11 @@
 #include "xls/common/logging/logging.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/ir/block.h"
 #include "xls/ir/function.h"
 #include "xls/ir/node_iterator.h"
 #include "xls/ir/package.h"
 #include "xls/ir/proc.h"
-
-using absl::StrAppend;
 
 namespace xls {
 
@@ -62,17 +61,13 @@ absl::StatusOr<Node*> FunctionBase::GetNode(
       return param;
     }
   }
-  return absl::InvalidArgumentError(
+  return absl::NotFoundError(
       absl::StrFormat("GetNode(%s) failed.", standard_node_name));
 }
 
-absl::Status FunctionBase::RemoveNode(Node* node, bool remove_param_ok) {
+absl::Status FunctionBase::RemoveNode(Node* node) {
   XLS_RET_CHECK(node->users().empty());
   XLS_RET_CHECK(!HasImplicitUse(node));
-  if (node->Is<Param>()) {
-    XLS_RET_CHECK(remove_param_ok)
-        << "Attempting to remove parameter when !remove_param_ok: " << *node;
-  }
   std::vector<Node*> unique_operands;
   for (Node* operand : node->operands()) {
     if (!absl::c_linear_search(unique_operands, operand)) {
@@ -82,15 +77,14 @@ absl::Status FunctionBase::RemoveNode(Node* node, bool remove_param_ok) {
   for (Node* operand : unique_operands) {
     operand->RemoveUser(node);
   }
+  if (node->Is<Param>()) {
+    params_.erase(std::remove(params_.begin(), params_.end(), node),
+                  params_.end());
+  }
   auto node_it = node_iterators_.find(node);
   XLS_RET_CHECK(node_it != node_iterators_.end());
   nodes_.erase(node_it->second);
   node_iterators_.erase(node_it);
-  if (remove_param_ok) {
-    params_.erase(std::remove(params_.begin(), params_.end(), node),
-                  params_.end());
-  }
-
   return absl::OkStatus();
 }
 
@@ -111,6 +105,10 @@ bool FunctionBase::IsProc() const {
   return dynamic_cast<const Proc*>(this) != nullptr;
 }
 
+bool FunctionBase::IsBlock() const {
+  return dynamic_cast<const Block*>(this) != nullptr;
+}
+
 Function* FunctionBase::AsFunctionOrDie() {
   XLS_CHECK(IsFunction());
   return down_cast<Function*>(this);
@@ -119,6 +117,11 @@ Function* FunctionBase::AsFunctionOrDie() {
 Proc* FunctionBase::AsProcOrDie() {
   XLS_CHECK(IsProc());
   return down_cast<Proc*>(this);
+}
+
+Block* FunctionBase::AsBlockOrDie() {
+  XLS_CHECK(IsBlock());
+  return down_cast<Block*>(this);
 }
 
 std::ostream& operator<<(std::ostream& os, const FunctionBase& function) {

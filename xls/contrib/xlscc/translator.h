@@ -48,6 +48,7 @@
 #include "xls/contrib/xlscc/hls_block.pb.h"
 #include "xls/contrib/xlscc/metadata_output.pb.h"
 #include "xls/ir/bits.h"
+#include "xls/ir/channel.h"
 #include "xls/ir/function.h"
 #include "xls/ir/function_builder.h"
 #include "xls/ir/package.h"
@@ -154,8 +155,6 @@ class CField {
   int index_;
   std::shared_ptr<CType> type_;
 };
-
-enum class XLSChannelMode { kDefault = 0, kAllStreaming, kAllSingleValue };
 
 // C/C++ struct
 class CStructType : public CType {
@@ -313,6 +312,9 @@ struct GeneratedFunction {
   //  in the order specified in this list.
   // Use list for safe pointers to values
   std::list<IOOp> io_ops;
+
+  // Global values built with this FunctionBuilder
+  absl::flat_hash_map<const clang::NamedDecl*, CValue> global_values;
 };
 
 // Encapsulates a context for translating Clang AST to XLS IR.
@@ -454,9 +456,8 @@ class Translator {
       xls::Package* package, bool force_static = false);
 
   // Generates IR as an HLS block / XLS proc.
-  absl::StatusOr<xls::Proc*> GenerateIR_Block(
-      xls::Package* package, const HLSBlock& block,
-      XLSChannelMode channel_mode = XLSChannelMode::kDefault);
+  absl::StatusOr<xls::Proc*> GenerateIR_Block(xls::Package* package,
+                                              const HLSBlock& block);
 
   // Ideally, this would be done using the opt_main tool, but for now
   //  codegen is done by XLS[cc] for combinational blocks.
@@ -698,7 +699,7 @@ class Translator {
 
   // The translator assumes NamedDecls are unique. This set is used to
   //  generate an error if that assumption is violated.
-  absl::flat_hash_set<const clang::NamedDecl*> sanity_check_unique_ids_;
+  absl::flat_hash_set<const clang::NamedDecl*> check_unique_ids_;
 
   using PragmaLoc = std::tuple<std::string, int>;
   enum Pragma { Pragma_Null = 0, Pragma_NoTuples, Pragma_Unroll, Pragma_Top };
@@ -773,17 +774,19 @@ class Translator {
     xls::BValue token;
   };
 
-  // Sanity checks the function prototype in the Clang AST and HLSBlock
-  absl::Status GenerateIRBlockSanityCheck(PreparedBlock& prepared,
-                                          const HLSBlock& block,
-                                          const clang::FunctionDecl* definition,
-                                          const xls::SourceLocation& body_loc);
+  // Verifies the function prototype in the Clang AST and HLSBlock are sound.
+  absl::Status GenerateIRBlockCheck(PreparedBlock& prepared,
+                                    const HLSBlock& block,
+                                    const clang::FunctionDecl* definition,
+                                    const xls::SourceLocation& body_loc);
 
   // Prepares IO channels for generating XLS Proc
-  absl::Status GenerateIRBlockPrepare(
-      PreparedBlock& prepared, xls::ProcBuilder& pb, const HLSBlock& block,
-      XLSChannelMode channel_mode, const clang::FunctionDecl* definition,
-      xls::Package* package, const xls::SourceLocation& body_loc);
+  absl::Status GenerateIRBlockPrepare(PreparedBlock& prepared,
+                                      xls::ProcBuilder& pb,
+                                      const HLSBlock& block,
+                                      const clang::FunctionDecl* definition,
+                                      xls::Package* package,
+                                      const xls::SourceLocation& body_loc);
 
   struct IOOpReturn {
     bool generate_expr;
@@ -800,7 +803,7 @@ class Translator {
   absl::StatusOr<xls::Channel*> CreateChannel(const HLSChannel& hls_channel,
                                               std::shared_ptr<CType> ctype,
                                               xls::Package* package,
-                                              int port_order, bool streaming,
+                                              int port_order,
                                               const xls::SourceLocation& loc);
 
   // Adds subroutine call's IO ops to context().sf->io_ops

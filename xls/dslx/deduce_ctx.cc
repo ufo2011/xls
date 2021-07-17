@@ -28,12 +28,11 @@ std::string FnStackEntry::ToReprString() const {
 
 bool FnStackEntry::Matches(const Function* f) const { return f == function_; }
 
-DeduceCtx::DeduceCtx(TypeInfo* type_info, Module* module,
-                     DeduceFn deduce_function,
-                     TypecheckFunctionFn typecheck_function,
-                     TypecheckFn typecheck_module,
-                     absl::Span<std::string const> additional_search_paths,
-                     ImportData* import_data)
+DeduceCtx::DeduceCtx(
+    TypeInfo* type_info, Module* module, DeduceFn deduce_function,
+    TypecheckFunctionFn typecheck_function, TypecheckFn typecheck_module,
+    absl::Span<const std::filesystem::path> additional_search_paths,
+    ImportData* import_data)
     : type_info_(type_info),
       module_(module),
       deduce_function_(std::move(XLS_DIE_IF_NULL(deduce_function))),
@@ -70,7 +69,7 @@ absl::Status XlsTypeErrorStatus(const Span& span, const ConcreteType& lhs,
                                 absl::string_view message) {
   return absl::InvalidArgumentError(
       absl::StrFormat("XlsTypeError: %s %s vs %s: %s", span.ToString(),
-                      lhs.ToString(), rhs.ToString(), message));
+                      lhs.ToErrorString(), rhs.ToErrorString(), message));
 }
 
 NodeAndUser ParseTypeMissingErrorMessage(absl::string_view s) {
@@ -112,6 +111,62 @@ absl::Status ArgCountMismatchErrorStatus(const Span& span,
                                          absl::string_view message) {
   return absl::InvalidArgumentError(absl::StrFormat(
       "ArgCountMismatchError: %s %s", span.ToString(), message));
+}
+
+absl::Status InvalidIdentifierErrorStatus(const Span& span,
+                                          absl::string_view message) {
+  return absl::InvalidArgumentError(absl::StrFormat(
+      "InvalidIdentifierError: %s %s", span.ToString(), message));
+}
+
+absl::flat_hash_map<std::string, InterpValue> MakeConstexprEnv(
+    Expr* node, const SymbolicBindings& symbolic_bindings,
+    TypeInfo* type_info) {
+  XLS_CHECK_EQ(node->owner(), type_info->module())
+      << "expr `" << node->ToString()
+      << "` from module: " << node->owner()->name()
+      << " vs type info module: " << type_info->module()->name();
+  XLS_VLOG(5) << "Creating constexpr environment for node: "
+              << node->ToString();
+  absl::flat_hash_map<std::string, InterpValue> env;
+  absl::flat_hash_map<std::string, InterpValue> values;
+
+  for (auto [id, value] : symbolic_bindings.ToMap()) {
+    env.insert({id, value});
+  }
+
+  // Collect all the freevars that are constexpr.
+  //
+  // TODO(https://github.com/google/xls/issues/333): 2020-03-11 We'll want the
+  // expression to also be able to constexpr evaluate local non-integral values,
+  // like constant tuple definitions and such. We'll need to extend the
+  // constexpr ability to full InterpValues to accomplish this.
+  //
+  // E.g. fn main(x: u32) -> ... { const B = u32:20; x[:B] }
+  FreeVariables freevars = node->GetFreeVariables();
+  XLS_VLOG(5) << "freevars for " << node->ToString() << ": "
+              << freevars.GetFreeVariableCount();
+  for (ConstRef* const_ref : freevars.GetConstRefs()) {
+    ConstantDef* constant_def = const_ref->GetConstantDef();
+    XLS_VLOG(5) << "analyzing constant reference: " << const_ref->ToString()
+                << " def: " << constant_def->ToString();
+    absl::optional<InterpValue> value =
+        type_info->GetConstExpr(constant_def->value());
+    if (!value.has_value()) {
+      // Could be a tuple or similar, not part of the (currently integral-only)
+      // constexpr environment.
+      XLS_VLOG(5) << "Could not find constexpr value for constant def: `"
+                  << constant_def->ToString() << "` @ " << constant_def->value()
+                  << " in " << type_info;
+      continue;
+    }
+
+    XLS_VLOG(5) << "freevar env record: " << const_ref->identifier() << " => "
+                << value->ToString();
+    env.insert({const_ref->identifier(), *value});
+  }
+
+  return env;
 }
 
 }  // namespace xls::dslx

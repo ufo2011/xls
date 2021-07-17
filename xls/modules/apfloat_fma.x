@@ -23,7 +23,7 @@
 // The fundamentals of the multiply and add are the same as those in the
 // standalone ops - the differences arise in the extra precision bits and the
 // handling thereof (e.g., 72 vs. 24 bits for the add, for binary32).
-import xls.dslx.stdlib.apfloat
+import apfloat
 import std
 
 type APFloat = apfloat::APFloat;
@@ -220,9 +220,9 @@ pub fn fma<EXP_SZ: u32, SFD_SZ: u32,
   // starts at the bit below instead of bit 3.
   // For binary32, normal_chunk will be bits 0-48 (inclusive), stopping
   // immediately below the first bit in the final sfd.
-  let normal_chunk = shifted_sfd[0:(WIDE_SFD_LOW_BIT - u32:1)];
+  let normal_chunk = shifted_sfd[0:(WIDE_SFD_LOW_BIT - u32:1) as s32];
   let half_way_chunk =
-      shifted_sfd[(WIDE_SFD_LOW_BIT - u32:2):(WIDE_SFD_LOW_BIT)];
+      shifted_sfd[(WIDE_SFD_LOW_BIT - u32:2) as s32:(WIDE_SFD_LOW_BIT as s32)];
   let half_of_extra =
       uN[WIDE_SFD_TOP_ROUNDING]:1 << (WIDE_SFD_LOW_BIT - u32:2);
   let do_round_up =

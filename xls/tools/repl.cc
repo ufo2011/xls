@@ -267,7 +267,7 @@ absl::Status UpdateIr() {
   XLS_ASSIGN_OR_RETURN(
       globals->ir_package,
       ConvertModuleToPackage(globals->module.get(), &globals->import_data,
-                             /*emit_positions=*/true,
+                             dslx::ConvertOptions{},
                              /*traverse_tests=*/true));
   XLS_RETURN_IF_ERROR(
       RunStandardPassPipeline(globals->ir_package.get()).status());
@@ -300,11 +300,6 @@ absl::Status CommandHelp() {
 absl::Status CommandReload() {
   Globals* globals = GetSingletonGlobals();
 
-  // This makes an empty paths list, since we don't yet support passing in a
-  // custom paths list.
-  std::vector<std::string> dslx_paths_temp;
-  absl::Span<const std::string> dslx_paths(dslx_paths_temp);
-
   XLS_ASSIGN_OR_RETURN(std::string dslx_contents,
                        GetFileContents(globals->dslx_path));
 
@@ -323,9 +318,9 @@ absl::Status CommandReload() {
     return absl::OkStatus();
   }
 
-  XLS_ASSIGN_OR_RETURN(
-      globals->type_info,
-      CheckModule(globals->module.get(), &globals->import_data, dslx_paths));
+  XLS_ASSIGN_OR_RETURN(globals->type_info,
+                       CheckModule(globals->module.get(), &globals->import_data,
+                                   /*dslx_paths=*/{}));
 
   PopulateIdentifierTrie();
 
@@ -362,7 +357,7 @@ absl::StatusOr<Function*> FindFunction(absl::string_view function_name,
   }
   XLS_ASSIGN_OR_RETURN(
       std::string mangled_name,
-      dslx::MangleDslxName(function_name, /*free_keys=*/{}, module));
+      dslx::MangleDslxName(module->name(), function_name, /*free_keys=*/{}));
   if (!package->HasFunctionWithName(mangled_name)) {
     std::cerr << absl::StreamFormat(
         "Symbol \"%s\" was not found in IR as either \"%s\" or (mangled) "

@@ -16,6 +16,7 @@
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/numbers.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/dslx/ast.h"
 
@@ -29,6 +30,7 @@ const std::vector<absl::string_view>& GetParametricBuiltinNames() {
                                               "bit_slice",
                                               "bit_slice_update",
                                               "clz",
+                                              "cover!",
                                               "ctz",
                                               "concat",
                                               "fail!",
@@ -40,10 +42,6 @@ const std::vector<absl::string_view>& GetParametricBuiltinNames() {
                                               "and_reduce",
                                               "or_reduce",
                                               "xor_reduce",
-                                              "sge",
-                                              "sgt",
-                                              "sle",
-                                              "slt",
                                               "signex",
                                               "slice",
                                               "trace!",
@@ -372,7 +370,8 @@ absl::StatusOr<StructRef> Parser::ResolveStruct(Bindings* bindings,
     return StructRef(absl::get<ColonRef*>(type_defn));
   }
   if (absl::holds_alternative<TypeDef*>(type_defn)) {
-    return ResolveStruct(bindings, absl::get<TypeDef*>(type_defn)->type());
+    return ResolveStruct(bindings,
+                         absl::get<TypeDef*>(type_defn)->type_annotation());
   }
   if (absl::holds_alternative<EnumDef*>(type_defn)) {
     return absl::InvalidArgumentError(
@@ -763,10 +762,10 @@ absl::StatusOr<Expr*> Parser::ParseCast(Bindings* bindings,
   XLS_ASSIGN_OR_RETURN(Expr * term, ParseTerm(bindings));
   if (IsOneOf<Number, Array>(term)) {
     if (auto* n = dynamic_cast<Number*>(term)) {
-      n->set_type(type);
+      n->set_type_annotation(type);
     } else {
       auto* a = dynamic_cast<Array*>(term);
-      a->set_type(type);
+      a->set_type_annotation(type);
     }
     return term;
   }
@@ -1072,6 +1071,17 @@ absl::StatusOr<Expr*> Parser::ParseTerm(Bindings* outer_bindings) {
           tok.span(), "Carry keyword encountered outside of a while loop.");
     }
     lhs = module_->Make<Carry>(tok.span(), loop_stack_.back());
+  } else if (peek->IsKindIn({TokenKind::kDoubleQuote})) {
+    // Eat characters until the first unescaped double quote.
+    Span span = peek->span();
+    XLS_ASSIGN_OR_RETURN(std::string text, PopString());
+    if (text.empty()) {
+      // TODO(rspringer): 2021-05-20 Add zero-length support.
+      return ParseErrorStatus(peek->span(),
+                              "Zero-length strings are not supported.");
+    }
+    txn.CommitAndCancelCleanup(&cleanup);
+    return module_->Make<String>(span, text);
   } else if (peek->IsKindIn({TokenKind::kBang, TokenKind::kMinus})) {
     Token tok = PopTokenOrDie();
     XLS_ASSIGN_OR_RETURN(Expr * arg, ParseTerm(txn.bindings()));
@@ -1172,6 +1182,20 @@ absl::StatusOr<Expr*> Parser::ParseTerm(Bindings* outer_bindings) {
     const Pos new_pos = GetPos();
     XLS_ASSIGN_OR_RETURN(const Token* peek, PeekToken());
     switch (peek->kind()) {
+      case TokenKind::kColon: {  // Possibly a Number of ColonRef type.
+        Span span(new_pos, GetPos());
+        // The only valid construct here would be declaring a number via
+        // ColonRef-colon-Number, e.g., "module::type:7"
+        if (dynamic_cast<ColonRef*>(lhs) == nullptr) {
+          goto done;
+        }
+        auto* type_ref = module_->Make<TypeRef>(span, lhs->ToString(),
+                                                ToTypeDefinition(lhs).value());
+        auto* type_annot = module_->Make<TypeRefTypeAnnotation>(
+            span, type_ref, std::vector<Expr*>());
+        XLS_ASSIGN_OR_RETURN(lhs, ParseCast(txn.bindings(), type_annot));
+        break;
+      }
       case TokenKind::kOParen: {  // Invocation.
         DropTokenOrDie();
         XLS_ASSIGN_OR_RETURN(
@@ -1462,12 +1486,14 @@ absl::StatusOr<For*> Parser::ParseFor(Bindings* bindings) {
 
   Bindings for_bindings(bindings);
   XLS_ASSIGN_OR_RETURN(NameDefTree * names, ParseNameDefTree(&for_bindings));
-  // TODO(leary): 2020-09-12 Make this type annotation optional.
-  XLS_RETURN_IF_ERROR(
-      DropTokenOrError(TokenKind::kColon, nullptr,
-                       "Expect type annotation on for-loop values."));
-  XLS_ASSIGN_OR_RETURN(TypeAnnotation * type,
-                       ParseTypeAnnotation(&for_bindings));
+  XLS_ASSIGN_OR_RETURN(bool peek_is_colon, PeekTokenIs(TokenKind::kColon));
+  TypeAnnotation* type = nullptr;
+  if (peek_is_colon) {
+    XLS_RETURN_IF_ERROR(
+        DropTokenOrError(TokenKind::kColon, nullptr,
+                         "Expect type annotation on for-loop values."));
+    XLS_ASSIGN_OR_RETURN(type, ParseTypeAnnotation(&for_bindings));
+  }
   XLS_RETURN_IF_ERROR(DropKeywordOrError(Keyword::kIn));
   XLS_ASSIGN_OR_RETURN(Expr * iterable, ParseExpression(bindings));
   XLS_RETURN_IF_ERROR(DropTokenOrError(TokenKind::kOBrace));
@@ -1494,23 +1520,24 @@ absl::StatusOr<EnumDef*> Parser::ParseEnumDef(bool is_public,
       DropTokenOrError(TokenKind::kColon, nullptr,
                        "enum requires a ': type' annotation to indicate "
                        "enum's underlying type."));
-  XLS_ASSIGN_OR_RETURN(TypeAnnotation * type, ParseTypeAnnotation(bindings));
+  XLS_ASSIGN_OR_RETURN(TypeAnnotation * type_annotation,
+                       ParseTypeAnnotation(bindings));
   XLS_RETURN_IF_ERROR(DropTokenOrError(TokenKind::kOBrace));
   Bindings enum_bindings(bindings);
 
   auto parse_enum_entry = [this, &enum_bindings,
-                           type]() -> absl::StatusOr<EnumMember> {
+                           type_annotation]() -> absl::StatusOr<EnumMember> {
     XLS_ASSIGN_OR_RETURN(NameDef * name_def, ParseNameDef(&enum_bindings));
     XLS_RETURN_IF_ERROR(DropTokenOrError(TokenKind::kEquals));
     XLS_ASSIGN_OR_RETURN(Expr * expr, ParseExpression(&enum_bindings));
     // Propagate type annotation to un-annotated enum entries -- this is a
     // convenience until we have proper unifying type inference.
     if (auto* number = dynamic_cast<Number*>(expr); number != nullptr) {
-      if (number->type() == nullptr) {
-        number->set_type(type);
+      if (number->type_annotation() == nullptr) {
+        number->set_type_annotation(type_annotation);
       } else {
         return ParseErrorStatus(
-            number->type()->span(),
+            number->type_annotation()->span(),
             "A type is annotated on this enum value, but the enum defines a "
             "type, so this is not necessary: please remove it.");
       }
@@ -1521,8 +1548,8 @@ absl::StatusOr<EnumDef*> Parser::ParseEnumDef(bool is_public,
   XLS_ASSIGN_OR_RETURN(
       std::vector<EnumMember> entries,
       ParseCommaSeq<EnumMember>(parse_enum_entry, TokenKind::kCBrace));
-  auto* enum_def = module_->Make<EnumDef>(enum_tok.span(), name_def, type,
-                                          entries, is_public);
+  auto* enum_def = module_->Make<EnumDef>(enum_tok.span(), name_def,
+                                          type_annotation, entries, is_public);
   bindings->Add(name_def->identifier(), enum_def);
   name_def->set_definer(enum_def);
   return enum_def;

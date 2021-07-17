@@ -22,6 +22,8 @@
 #include "xls/common/logging/logging.h"
 #include "xls/common/status/status_macros.h"
 #include "xls/common/strong_int.h"
+#include "xls/ir/block.h"
+#include "xls/ir/channel.h"
 #include "xls/ir/function.h"
 #include "xls/ir/proc.h"
 #include "xls/ir/type.h"
@@ -49,6 +51,11 @@ Function* Package::AddFunction(std::unique_ptr<Function> f) {
 Proc* Package::AddProc(std::unique_ptr<Proc> proc) {
   procs_.push_back(std::move(proc));
   return procs_.back().get();
+}
+
+Block* Package::AddBlock(std::unique_ptr<Block> block) {
+  blocks_.push_back(std::move(block));
+  return blocks_.back().get();
 }
 
 absl::StatusOr<Function*> Package::GetFunction(
@@ -82,13 +89,31 @@ absl::StatusOr<Proc*> Package::GetProc(absl::string_view proc_name) const {
                     })));
 }
 
-std::vector<FunctionBase*> Package::GetFunctionsAndProcs() const {
+absl::StatusOr<Block*> Package::GetBlock(absl::string_view block_name) const {
+  for (auto& block : blocks_) {
+    if (block->name() == block_name) {
+      return block.get();
+    }
+  }
+  return absl::NotFoundError(absl::StrFormat(
+      "Package does not have a block with name: \"%s\"; available: [%s]",
+      block_name,
+      absl::StrJoin(blocks_, ", ",
+                    [](std::string* out, const std::unique_ptr<Block>& block) {
+                      absl::StrAppend(out, block->name());
+                    })));
+}
+
+std::vector<FunctionBase*> Package::GetFunctionBases() const {
   std::vector<FunctionBase*> result;
   for (auto& function : functions()) {
     result.push_back(function.get());
   }
   for (auto& proc : procs()) {
     result.push_back(proc.get());
+  }
+  for (auto& block : blocks()) {
+    result.push_back(block.get());
   }
   return result;
 }
@@ -407,6 +432,9 @@ std::string Package::DumpIr() const {
   for (auto& proc : procs()) {
     function_dumps.push_back(proc->DumpIr());
   }
+  for (auto& block : blocks()) {
+    function_dumps.push_back(block->DumpIr());
+  }
   absl::StrAppend(&out, absl::StrJoin(function_dumps, "\n"));
   return out;
 }
@@ -459,40 +487,58 @@ absl::Status VerifyValuesAreType(absl::Span<const Value> values, Type* type) {
 
 absl::StatusOr<StreamingChannel*> Package::CreateStreamingChannel(
     absl::string_view name, ChannelOps supported_ops, Type* type,
-    absl::Span<const Value> initial_values,
+    absl::Span<const Value> initial_values, FlowControl flow_control,
     const ChannelMetadataProto& metadata, absl::optional<int64_t> id) {
   XLS_RETURN_IF_ERROR(VerifyValuesAreType(initial_values, type));
   int64_t actual_id = id.has_value() ? id.value() : next_channel_id_;
   auto channel = absl::make_unique<StreamingChannel>(
-      name, actual_id, supported_ops, type, initial_values, metadata);
+      name, actual_id, supported_ops, type, initial_values, flow_control,
+      metadata);
   StreamingChannel* channel_ptr = channel.get();
   XLS_RETURN_IF_ERROR(AddChannel(std::move(channel)));
   return channel_ptr;
 }
 
-absl::StatusOr<PortChannel*> Package::CreatePortChannel(
+absl::StatusOr<SingleValueChannel*> Package::CreateSingleValueChannel(
     absl::string_view name, ChannelOps supported_ops, Type* type,
     const ChannelMetadataProto& metadata, absl::optional<int64_t> id) {
   int64_t actual_id = id.has_value() ? id.value() : next_channel_id_;
-  auto channel = absl::make_unique<PortChannel>(name, actual_id, supported_ops,
-                                                type, metadata);
-  PortChannel* channel_ptr = channel.get();
+  auto channel = absl::make_unique<SingleValueChannel>(
+      name, actual_id, supported_ops, type, metadata);
+  SingleValueChannel* channel_ptr = channel.get();
   XLS_RETURN_IF_ERROR(AddChannel(std::move(channel)));
   return channel_ptr;
 }
 
-absl::StatusOr<RegisterChannel*> Package::CreateRegisterChannel(
-    absl::string_view name, Type* type, absl::optional<Value> reset_value,
-    const ChannelMetadataProto& metadata, absl::optional<int64_t> id) {
-  if (reset_value.has_value()) {
-    XLS_RETURN_IF_ERROR(VerifyValuesAreType({reset_value.value()}, type));
+absl::Status Package::RemoveChannel(Channel* channel) {
+  // First check that the channel is owned by this package.
+  auto it = std::find(channel_vec_.begin(), channel_vec_.end(), channel);
+  XLS_RET_CHECK(it != channel_vec_.end()) << "Channel not owned by package";
+
+  // Check that no send/receive nodes are associted with the channel.
+  // TODO(https://github.com/google/xls/issues/411) 2012/04/24 Avoid iterating
+  // through all the nodes after channels are mapped to send/receive nodes.
+  for (const auto& proc : procs()) {
+    for (Node* node : proc->nodes()) {
+      if ((node->Is<Send>() &&
+           node->As<Send>()->channel_id() == channel->id()) ||
+          (node->Is<Receive>() &&
+           node->As<Receive>()->channel_id() == channel->id())) {
+        return absl::InternalError(absl::StrFormat(
+            "Channel %s (%d) cannot be removed because it is used by node %s",
+            channel->name(), channel->id(), node->GetName()));
+      }
+    }
   }
-  int64_t actual_id = id.has_value() ? id.value() : next_channel_id_;
-  auto channel = absl::make_unique<RegisterChannel>(name, actual_id, type,
-                                                    reset_value, metadata);
-  RegisterChannel* channel_ptr = channel.get();
-  XLS_RETURN_IF_ERROR(AddChannel(std::move(channel)));
-  return channel_ptr;
+
+  // Remove from channel vector.
+  channel_vec_.erase(it);
+
+  // Remove from channel map.
+  XLS_RET_CHECK(channels_.contains(channel->id()));
+  channels_.erase(channel->id());
+
+  return absl::OkStatus();
 }
 
 absl::Status Package::AddChannel(std::unique_ptr<Channel> channel) {

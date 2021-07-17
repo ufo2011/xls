@@ -17,56 +17,50 @@
 
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "xls/interpreter/ir_interpreter_stats.h"
 #include "xls/ir/bits.h"
 #include "xls/ir/function.h"
 #include "xls/ir/function_builder.h"
 
 namespace xls {
 
+// Evaluates the given node using the given operand values and returns the
+// result.
+absl::StatusOr<Value> InterpretNode(Node* node,
+                                    absl::Span<const Value> operand_values);
+
 // A visitor for traversing and evaluating a Function.
 class IrInterpreter : public DfsVisitor {
  public:
-  IrInterpreter(absl::Span<const Value> args, InterpreterStats* stats)
-      : stats_(stats), args_(args.begin(), args.end()) {}
+  IrInterpreter() = default;
 
-  // Runs the interpreter on the given function. 'args' are the argument values
-  // indexed by parameter name.
-  static absl::StatusOr<Value> Run(Function* function,
-                                   absl::Span<const Value> args,
-                                   InterpreterStats* stats = nullptr);
+  // Sets the evaluated value for 'node' to the given Value. 'value' must be
+  // passed in by value (ha!) because a use case is passing in a previously
+  // evaluated value and inserting a into flat_hash_map (done below) invalidates
+  // all references to Values in the map.
+  absl::Status SetValueResult(Node* node, Value result);
 
-  // Runs the interpreter on the function where the arguments are given by name.
-  static absl::StatusOr<Value> RunKwargs(
-      Function* function, const absl::flat_hash_map<std::string, Value>& args,
-      InterpreterStats* stats = nullptr);
+  // Returns the previously evaluated value of 'node' as a Value.
+  const Value& ResolveAsValue(Node* node) const {
+    return node_values_.at(node);
+  }
 
-  // Evaluates the given node and returns the Value. Prerequisite: node must
-  // have only literal operands.
-  static absl::StatusOr<Value> EvaluateNodeWithLiteralOperands(Node* node);
-
-  // Evaluates the given node using the given operand values and returns the
-  // result.
-  static absl::StatusOr<Value> EvaluateNode(
-      Node* node, absl::Span<const Value* const> operand_values);
+  // Returns true if a value has been set for the result of the given node.
+  bool HasResult(Node* node) const { return node_values_.contains(node); }
 
   absl::Status HandleAdd(BinOp* add) override;
   absl::Status HandleAfterAll(AfterAll* after_all) override;
   absl::Status HandleAndReduce(BitwiseReductionOp* and_reduce) override;
   absl::Status HandleArray(Array* array) override;
+  absl::Status HandleArrayConcat(ArrayConcat* concat) override;
   absl::Status HandleArrayIndex(ArrayIndex* index) override;
   absl::Status HandleArraySlice(ArraySlice* slice) override;
   absl::Status HandleArrayUpdate(ArrayUpdate* update) override;
-  absl::Status HandleArrayConcat(ArrayConcat* concat) override;
   absl::Status HandleAssert(Assert* assert_op) override;
   absl::Status HandleBitSlice(BitSlice* bit_slice) override;
   absl::Status HandleBitSliceUpdate(BitSliceUpdate* update) override;
-  absl::Status HandleReceive(Receive* receive) override;
-  absl::Status HandleReceiveIf(ReceiveIf* receive_if) override;
-  absl::Status HandleSend(Send* send) override;
-  absl::Status HandleSendIf(SendIf* send_if) override;
   absl::Status HandleConcat(Concat* concat) override;
   absl::Status HandleCountedFor(CountedFor* counted_for) override;
+  absl::Status HandleCover(Cover* cover) override;
   absl::Status HandleDecode(Decode* decode) override;
   absl::Status HandleDynamicBitSlice(
       DynamicBitSlice* dynamic_bit_slice) override;
@@ -74,7 +68,9 @@ class IrInterpreter : public DfsVisitor {
       DynamicCountedFor* dynamic_counted_for) override;
   absl::Status HandleEncode(Encode* encode) override;
   absl::Status HandleEq(CompareOp* eq) override;
+  absl::Status HandleGate(Gate* gate) override;
   absl::Status HandleIdentity(UnOp* identity) override;
+  absl::Status HandleInputPort(InputPort* input_port) override;
   absl::Status HandleInvoke(Invoke* invoke) override;
   absl::Status HandleLiteral(Literal* literal) override;
   absl::Status HandleMap(Map* map) override;
@@ -89,7 +85,11 @@ class IrInterpreter : public DfsVisitor {
   absl::Status HandleOneHot(OneHot* one_hot) override;
   absl::Status HandleOneHotSel(OneHotSelect* sel) override;
   absl::Status HandleOrReduce(BitwiseReductionOp* or_reduce) override;
+  absl::Status HandleOutputPort(OutputPort* output_port) override;
   absl::Status HandleParam(Param* param) override;
+  absl::Status HandleReceive(Receive* receive) override;
+  absl::Status HandleRegisterRead(RegisterRead* reg_read) override;
+  absl::Status HandleRegisterWrite(RegisterWrite* reg_write) override;
   absl::Status HandleReverse(UnOp* reverse) override;
   absl::Status HandleSDiv(BinOp* div) override;
   absl::Status HandleSGe(CompareOp* ge) override;
@@ -99,6 +99,7 @@ class IrInterpreter : public DfsVisitor {
   absl::Status HandleSMod(BinOp* mod) override;
   absl::Status HandleSMul(ArithOp* mul) override;
   absl::Status HandleSel(Select* sel) override;
+  absl::Status HandleSend(Send* send) override;
   absl::Status HandleShll(BinOp* shll) override;
   absl::Status HandleShra(BinOp* shra) override;
   absl::Status HandleShrl(BinOp* shrl) override;
@@ -115,9 +116,6 @@ class IrInterpreter : public DfsVisitor {
   absl::Status HandleUMul(ArithOp* mul) override;
   absl::Status HandleXorReduce(BitwiseReductionOp* xor_reduce) override;
   absl::Status HandleZeroExtend(ExtendOp* zero_ext) override;
-
-  // Returns the previously evaluated value of 'node' as a Value.
-  const Value& ResolveAsValue(Node* node) { return node_values_.at(node); }
 
  protected:
   // Returns an error if the given node or any of its operands are not Bits
@@ -148,23 +146,11 @@ class IrInterpreter : public DfsVisitor {
   // error if 'node' is not a bits type.
   absl::Status SetBitsResult(Node* node, const Bits& result);
 
-  // Sets the evaluated value for 'node' to the given Value. 'value' must be
-  // passed in by value (ha!) because a use case is passing in a previously
-  // evaluated value and inserting a into flat_hash_map (done below) invalidates
-  // all references to Values in the map.
-  absl::Status SetValueResult(Node* node, Value result);
-
   // Performs a logical OR of the given inputs. If 'inputs' is a not a Bits type
   // (ie, tuple or array) the element a recursively traversed and the Bits-typed
   // leaves are OR-ed.
   absl::StatusOr<Value> DeepOr(Type* input_type,
                                absl::Span<const Value* const> inputs);
-
-  // Statistics on interpreter execution. May be nullptr.
-  InterpreterStats* stats_;
-
-  // The arguments to the Function being evaluated indexed by parameter name.
-  std::vector<Value> args_;
 
   // The evaluated values for the nodes in the Function.
   absl::flat_hash_map<Node*, Value> node_values_;

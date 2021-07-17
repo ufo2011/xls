@@ -161,4 +161,21 @@ absl::StatusOr<Op> OpToNonReductionOp(Op reduce_op) {
   }
 }
 
+bool IsChannelNode(Node* node) {
+  return node->Is<Send>() || node->Is<Receive>();
+}
+
+absl::StatusOr<Channel*> GetChannelUsedByNode(Node* node) {
+  int64_t channel_id;
+  if (node->Is<Send>()) {
+    channel_id = node->As<Send>()->channel_id();
+  } else if (node->Is<Receive>()) {
+    channel_id = node->As<Receive>()->channel_id();
+  } else {
+    return absl::NotFoundError(
+        absl::StrFormat("No channel associated with node %s", node->GetName()));
+  }
+  return node->package()->GetChannel(channel_id);
+}
+
 }  // namespace xls

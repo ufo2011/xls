@@ -224,6 +224,7 @@ class Property(enum.Enum):
   ASSOCIATIVE = 2
   COMMUTATIVE = 3
   COMPARISON = 4
+  SIDE_EFFECTING = 5
 
 
 class Operand(object):
@@ -264,8 +265,7 @@ class OpClass(object):
                extra_constructor_args=(),
                extra_data_members=(),
                extra_methods: List[Method] = (),
-               custom_clone_method: bool = False,
-               custom_equivalence_expression: Optional[str] = None):
+               custom_clone_method: bool = False):
     """Initializes an OpClass.
 
     Args:
@@ -281,10 +281,6 @@ class OpClass(object):
       extra_methods: List of additional class methods.
       custom_clone_method: Whether this class has a custom clone method. If true
         the method should be defined directly in nodes_source.tmpl.
-      custom_equivalence_expression: A C++ expression which indicates whether
-        the node is equivalent to another node. The variable name of the
-        other node is always 'other'. Used in construction of
-        IsDefinitelyEquivalent method.
     """
     self.name = name
     self.op = op
@@ -295,7 +291,6 @@ class OpClass(object):
     self.extra_data_members = extra_data_members
     self.extra_methods = extra_methods
     self.custom_clone_method = custom_clone_method
-    self.custom_equivalence_expression = custom_equivalence_expression
 
   def constructor_args_str(self) -> str:
     """The constructor arguments list as a single string."""
@@ -355,9 +350,6 @@ class OpClass(object):
 
   def equal_to_expr(self) -> str:
     """Returns expression used in IsDefinitelyEqualTo to compare expression."""
-
-    if self.custom_equivalence_expression:
-      return self.custom_equivalence_expression
 
     def data_member_equal(m):
       lhs = m.name
@@ -493,6 +485,21 @@ OpClass.kinds['ASSERT'] = OpClass(
     attributes=[StringAttribute('message'), OptionalStringAttribute('label')]
 )
 
+OpClass.kinds['COVER'] = OpClass(
+    name='Cover',
+    op='Op::kCover',
+    operands=[Operand('token'), Operand('condition')],
+    xls_type_expression='function->package()->GetTokenType()',
+    extra_methods=[Method(name='token',
+                          return_cpp_type='Node*',
+                          expression='operand(0)'),
+                   Method(name='condition',
+                          return_cpp_type='Node*',
+                          expression='operand(1)'),
+                   ],
+    attributes=[StringAttribute('label')]
+)
+
 OpClass.kinds['BITWISE_REDUCTION_OP'] = OpClass(
     name='BitwiseReductionOp',
     op='op',
@@ -506,57 +513,34 @@ OpClass.kinds['BITWISE_REDUCTION_OP'] = OpClass(
 OpClass.kinds['RECEIVE'] = OpClass(
     name='Receive',
     op='Op::kReceive',
-    operands=[Operand('token')],
-    xls_type_expression='function->package()->GetTupleType({function->package()->GetTokenType(),function->package()->GetChannel(channel_id).value()->type()})',
-    extra_methods=[Method(name='token',
-                          return_cpp_type='Node*',
-                          expression='operand(0)')],
-    attributes=[Int64Attribute('channel_id')]
-)
-
-OpClass.kinds['RECEIVE_IF'] = OpClass(
-    name='ReceiveIf',
-    op='Op::kReceiveIf',
-    operands=[Operand('token'), Operand('pred')],
+    operands=[Operand('token'), OptionalOperand('predicate')],
     xls_type_expression='function->package()->GetTupleType({function->package()->GetTokenType(),function->package()->GetChannel(channel_id).value()->type()})',
     extra_methods=[Method(name='token',
                           return_cpp_type='Node*',
                           expression='operand(0)'),
                    Method(name='predicate',
-                          return_cpp_type='Node*',
-                          expression='operand(1)')],
+                          return_cpp_type='absl::optional<Node*>',
+                          expression='operand_count() > 1 ? absl::optional<Node*>(operand(1)) : absl::nullopt'),
+                   ],
     attributes=[Int64Attribute('channel_id')]
 )
 
 OpClass.kinds['SEND'] = OpClass(
     name='Send',
     op='Op::kSend',
-    operands=[Operand('token'), Operand('data')],
+    operands=[Operand('token'), Operand('data'), OptionalOperand('predicate')],
     xls_type_expression='function->package()->GetTokenType()',
     attributes=[Int64Attribute('channel_id')],
     extra_methods=[Method(name='token',
                           return_cpp_type='Node*',
                           expression='operand(0)'),
                    Method(name='data',
-                          return_cpp_type='Node*',
-                          expression='operand(1)'),],
-)
-
-OpClass.kinds['SEND_IF'] = OpClass(
-    name='SendIf',
-    op='Op::kSendIf',
-    operands=[Operand('token'), Operand('pred'), Operand('data')],
-    xls_type_expression='function->package()->GetTokenType()',
-    attributes=[Int64Attribute('channel_id')],
-    extra_methods=[Method(name='token',
-                          return_cpp_type='Node*',
-                          expression='operand(0)'),
-                   Method(name='predicate',
                           return_cpp_type='Node*',
                           expression='operand(1)'),
-                   Method(name='data',
-                          return_cpp_type='Node*',
-                          expression='operand(2)'),],
+                   Method(name='predicate',
+                          return_cpp_type='absl::optional<Node*>',
+                          expression='operand_count() > 2 ? absl::optional<Node*>(operand(2)) : absl::nullopt'),
+                   ],
 )
 
 OpClass.kinds['NARY_OP'] = OpClass(
@@ -751,8 +735,6 @@ OpClass.kinds['PARAM'] = OpClass(
     extra_methods=[Method(name='name',
                           return_cpp_type='absl::string_view',
                           expression='name_')],
-    # Params are never equivalent to other nodes.
-    custom_equivalence_expression='false',
     custom_clone_method=True
 )
 
@@ -840,6 +822,82 @@ OpClass.kinds['ENCODE'] = OpClass(
     xls_type_expression='function->package()->GetBitsType(Bits::MinBitCountUnsigned(arg->BitCountOrDie() - 1))',
 )
 
+OpClass.kinds['INPUT_PORT'] = OpClass(
+    name='InputPort',
+    op='Op::kInputPort',
+    operands=[],
+    xls_type_expression='type',
+    extra_constructor_args=[ConstructorArgument(name='name',
+                                                cpp_type='absl::string_view',
+                                                clone_expression='name()'),
+                            ConstructorArgument(name='type',
+                                                cpp_type='Type*',
+                                                clone_expression='GetType()')],
+    extra_methods=[Method(name='name',
+                          return_cpp_type='absl::string_view',
+                          expression='name_')],
+)
+
+OpClass.kinds['OUTPUT_PORT'] = OpClass(
+    name='OutputPort',
+    op='Op::kOutputPort',
+    operands=[Operand('operand')],
+    xls_type_expression='function->package()->GetTupleType({})',
+    extra_constructor_args=[ConstructorArgument(name='name',
+                                                cpp_type='absl::string_view',
+                                                clone_expression='name()')],
+    extra_methods=[Method(name='name',
+                          return_cpp_type='absl::string_view',
+                          expression='name_')],
+)
+
+OpClass.kinds['REGISTER_READ'] = OpClass(
+    name='RegisterRead',
+    op='Op::kRegisterRead',
+    operands=[],
+    xls_type_expression='function->AsBlockOrDie()->GetRegister(register_name).value()->type()',
+    attributes=[StringAttribute('register_name')],
+)
+
+OpClass.kinds['REGISTER_WRITE'] = OpClass(
+    name='RegisterWrite',
+    op='Op::kRegisterWrite',
+    operands=[Operand('data'),
+              OptionalOperand('load_enable'),
+              OptionalOperand('reset')],
+    xls_type_expression='data->GetType()',
+    attributes=[StringAttribute('register_name')],
+    extra_data_members=[
+        DataMember(name='has_load_enable_',
+                   cpp_type='bool',
+                   init='load_enable.has_value()'),
+        DataMember(name='has_reset_',
+                   cpp_type='bool',
+                   init='reset.has_value()')],
+    extra_methods=[Method(name='data',
+                          return_cpp_type='Node*',
+                          expression='operand(0)'),
+                   Method(name='load_enable',
+                          return_cpp_type='absl::optional<Node*>',
+                          expression='has_load_enable_ ? absl::optional<Node*>(operand(1)) : absl::nullopt'),
+                   Method(name='reset',
+                          return_cpp_type='absl::optional<Node*>',
+                          expression='has_reset_ ? absl::optional<Node*>(operand(has_load_enable_ ? 2 : 1)) : absl::nullopt'),],
+)
+
+OpClass.kinds['GATE'] = OpClass(
+    name='Gate',
+    op='Op::kGate',
+    operands=[Operand('condition'), Operand('data')],
+    xls_type_expression='data->GetType()',
+    extra_methods=[Method(name='condition',
+                          return_cpp_type='Node*',
+                          expression='operand(0)'),
+                   Method(name='data',
+                          return_cpp_type='Node*',
+                          expression='operand(1)')]
+)
+
 OPS = [
     Op(
         enum_name='kAdd',
@@ -866,31 +924,25 @@ OPS = [
         enum_name='kAssert',
         name='assert',
         op_class=OpClass.kinds['ASSERT'],
-        properties=[],
+        properties=[Property.SIDE_EFFECTING],
+    ),
+    Op(
+        enum_name='kCover',
+        name='cover',
+        op_class=OpClass.kinds['COVER'],
+        properties=[Property.SIDE_EFFECTING],
     ),
     Op(
         enum_name='kReceive',
         name='receive',
         op_class=OpClass.kinds['RECEIVE'],
-        properties=[],
-    ),
-    Op(
-        enum_name='kReceiveIf',
-        name='receive_if',
-        op_class=OpClass.kinds['RECEIVE_IF'],
-        properties=[],
+        properties=[Property.SIDE_EFFECTING],
     ),
     Op(
         enum_name='kSend',
         name='send',
         op_class=OpClass.kinds['SEND'],
-        properties=[],
-    ),
-    Op(
-        enum_name='kSendIf',
-        name='send_if',
-        op_class=OpClass.kinds['SEND_IF'],
-        properties=[],
+        properties=[Property.SIDE_EFFECTING],
     ),
     Op(
         enum_name='kNand',
@@ -1013,6 +1065,12 @@ OPS = [
         properties=[],
     ),
     Op(
+        enum_name='kInputPort',
+        name='input_port',
+        op_class=OpClass.kinds['INPUT_PORT'],
+        properties=[Property.SIDE_EFFECTING],
+    ),
+    Op(
         enum_name='kLiteral',
         name='literal',
         op_class=OpClass.kinds['LITERAL'],
@@ -1070,10 +1128,28 @@ OPS = [
         properties=[],
     ),
     Op(
+        enum_name='kOutputPort',
+        name='output_port',
+        op_class=OpClass.kinds['OUTPUT_PORT'],
+        properties=[Property.SIDE_EFFECTING],
+    ),
+    Op(
         enum_name='kParam',
         name='param',
         op_class=OpClass.kinds['PARAM'],
-        properties=[],
+        properties=[Property.SIDE_EFFECTING],
+    ),
+    Op(
+        enum_name='kRegisterRead',
+        name='register_read',
+        op_class=OpClass.kinds['REGISTER_READ'],
+        properties=[Property.SIDE_EFFECTING],
+    ),
+    Op(
+        enum_name='kRegisterWrite',
+        name='register_write',
+        op_class=OpClass.kinds['REGISTER_WRITE'],
+        properties=[Property.SIDE_EFFECTING],
     ),
     Op(
         enum_name='kReverse',
@@ -1234,6 +1310,12 @@ OPS = [
         name='zero_ext',
         op_class=OpClass.kinds['EXTEND_OP'],
         properties=[],
+    ),
+    Op(
+        enum_name='kGate',
+        name='gate',
+        op_class=OpClass.kinds['GATE'],
+        properties=[Property.SIDE_EFFECTING],
     ),
 ]
 # pyformat: enable

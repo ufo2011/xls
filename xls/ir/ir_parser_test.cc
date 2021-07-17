@@ -1122,6 +1122,16 @@ fn bar(tkn: token, cond: bits[1]) -> token {
   ParsePackageAndCheckDump(input);
 }
 
+TEST(IrParserTest, ParseCover) {
+  const std::string input = R"(package foobar
+
+fn bar(tkn: token, cond: bits[1]) -> token {
+  ret cover.1: token = cover(tkn, cond, label="The foo is bar", id=1)
+}
+)";
+  ParsePackageAndCheckDump(input);
+}
+
 TEST(IrParserTest, ParseBitSliceUpdate) {
   const std::string input = R"(package foobar
 
@@ -1135,13 +1145,70 @@ fn bar(to_update: bits[123], start: bits[8], value: bits[23]) -> bits[123] {
 TEST(IrParserTest, ParseSimpleProc) {
   const std::string input = R"(package test
 
-chan ch(bits[32], id=0, kind=streaming, ops=send_receive, metadata="""""")
+chan ch(bits[32], id=0, kind=streaming, ops=send_receive, flow_control=none, metadata="""""")
 
 proc my_proc(my_token: token, my_state: bits[32], init=42) {
   send.1: token = send(my_token, my_state, channel_id=0, id=1)
-  receive.2: (token, bits[32]) = receive(send.1, channel_id=0, id=2)
-  tuple_index.3: token = tuple_index(receive.2, index=0, id=3)
-  next (tuple_index.3, my_state)
+  literal.2: bits[1] = literal(value=1, id=2)
+  receive.3: (token, bits[32]) = receive(send.1, predicate=literal.2, channel_id=0, id=3)
+  tuple_index.4: token = tuple_index(receive.3, index=0, id=4)
+  next (tuple_index.4, my_state)
+}
+)";
+  ParsePackageAndCheckDump(input);
+}
+
+TEST(IrParserTest, ParseSimpleBlock) {
+  const std::string input = R"(package test
+
+block my_block(a: bits[32], b: bits[32], out: bits[32]) {
+  a: bits[32] = input_port(name=a, id=2)
+  b: bits[32] = input_port(name=b, id=3)
+  add.4: bits[32] = add(a, b, id=4)
+  out: () = output_port(add.4, name=out, id=5)
+}
+)";
+  ParsePackageAndCheckDump(input);
+}
+
+TEST(IrParserTest, ParseBlockWithRegister) {
+  const std::string input = R"(package test
+
+block my_block(in: bits[32], clk: clock, out: bits[32]) {
+  reg foo(bits[32])
+  in: bits[32] = input_port(name=in, id=1)
+  foo_q: bits[32] = register_read(register=foo, id=3)
+  foo_d: bits[32] = register_write(in, register=foo, id=2)
+  out: () = output_port(foo_q, name=out, id=4)
+}
+)";
+  ParsePackageAndCheckDump(input);
+}
+
+TEST(IrParserTest, ParseBlockWithRegisterWithResetValue) {
+  const std::string input = R"(package test
+
+block my_block(clk: clock, in: bits[32], out: bits[32]) {
+  reg foo(bits[32], reset_value=42, asynchronous=true, active_low=false)
+  in: bits[32] = input_port(name=in, id=1)
+  foo_q: bits[32] = register_read(register=foo, id=3)
+  foo_d: bits[32] = register_write(in, register=foo, id=2)
+  out: () = output_port(foo_q, name=out, id=4)
+}
+)";
+  ParsePackageAndCheckDump(input);
+}
+
+TEST(IrParserTest, ParseBlockWithRegisterWithLoadEnable) {
+  const std::string input = R"(package test
+
+block my_block(clk: clock, in: bits[32], le: bits[1], out: bits[32]) {
+  reg foo(bits[32])
+  in: bits[32] = input_port(name=in, id=1)
+  le: bits[1] = input_port(name=le, id=2)
+  foo_q: bits[32] = register_read(register=foo, id=3)
+  foo_d: bits[32] = register_write(in, register=foo, load_enable=le, id=4)
+  out: () = output_port(foo_q, name=out, id=5)
 }
 )";
   ParsePackageAndCheckDump(input);
@@ -1567,6 +1634,15 @@ fn foo(x: bits[16]) -> bits[4] {
   ParseFunctionAndCheckDump(input);
 }
 
+TEST(IrParserTest, Gate) {
+  const std::string input = R"(
+fn foo(cond: bits[1], x: bits[16]) -> bits[16] {
+  ret gate.1: bits[16] = gate(cond, x, id=1)
+}
+)";
+  ParseFunctionAndCheckDump(input);
+}
+
 TEST(IrParserTest, ArrayIndexOfTuple) {
   const std::string input = R"(
 fn foo(x: (bits[8])) -> bits[32] {
@@ -1756,7 +1832,7 @@ proc foo(my_token: bits[1], my_state: bits[32], init=42) {
   EXPECT_THAT(
       Parser::ParsePackage(program).status(),
       StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("Expected second argument of proc to be token type")));
+               HasSubstr("Expected first argument of proc to be token type")));
 }
 
 TEST(IrParserTest, ProcWrongInitValueType) {
@@ -1849,14 +1925,14 @@ TEST(IrParserTest, ParseSendReceiveChannel) {
   Package p("my_package");
   XLS_ASSERT_OK_AND_ASSIGN(Channel * ch,
                            Parser::ParseChannel(
-                               R"(chan foo(bits[32], id=42, kind=port,
+                               R"(chan foo(bits[32], id=42, kind=single_value,
                       ops=send_receive,
                       metadata="module_port { flopped: true }"))",
                                &p));
   EXPECT_EQ(ch->name(), "foo");
   EXPECT_EQ(ch->id(), 42);
   EXPECT_EQ(ch->supported_ops(), ChannelOps::kSendReceive);
-  EXPECT_TRUE(ch->IsPort());
+  EXPECT_EQ(ch->kind(), ChannelKind::kSingleValue);
   EXPECT_EQ(ch->type(), p.GetBitsType(32));
   EXPECT_TRUE(ch->initial_values().empty());
   EXPECT_EQ(ch->metadata().channel_oneof_case(),
@@ -1869,13 +1945,14 @@ TEST(IrParserTest, ParseSendReceiveChannelWithInitialValues) {
   XLS_ASSERT_OK_AND_ASSIGN(
       Channel * ch,
       Parser::ParseChannel(
-          R"(chan foo(bits[32], initial_values={2, 4, 5}, id=42, kind=streaming, ops=send_receive,
+          R"(chan foo(bits[32], initial_values={2, 4, 5}, id=42, kind=streaming,
+                         flow_control=none, ops=send_receive,
                          metadata="module_port { flopped: true }"))",
           &p));
   EXPECT_EQ(ch->name(), "foo");
   EXPECT_EQ(ch->id(), 42);
   EXPECT_EQ(ch->supported_ops(), ChannelOps::kSendReceive);
-  EXPECT_TRUE(ch->IsStreaming());
+  EXPECT_EQ(ch->kind(), ChannelKind::kStreaming);
   EXPECT_EQ(ch->type(), p.GetBitsType(32));
   EXPECT_THAT(ch->initial_values(),
               ElementsAre(Value(UBits(2, 32)), Value(UBits(4, 32)),
@@ -1885,26 +1962,13 @@ TEST(IrParserTest, ParseSendReceiveChannelWithInitialValues) {
   EXPECT_TRUE(ch->metadata().module_port().flopped());
 }
 
-TEST(IrParserTest, ParseSendReceiveChannelWithEmptyInitialValues) {
-  Package p("my_package");
-  XLS_ASSERT_OK_AND_ASSIGN(
-      Channel * ch,
-      Parser::ParseChannel(
-          R"(chan foo(bits[32], initial_values={}, id=42, kind=register,
-                      ops=send_receive,
-                      metadata="module_port { flopped: true }"))",
-          &p));
-  EXPECT_EQ(ch->name(), "foo");
-  EXPECT_TRUE(ch->IsRegister());
-  EXPECT_TRUE(ch->initial_values().empty());
-}
-
 TEST(IrParserTest, ParseSendReceiveChannelWithTupleType) {
   Package p("my_package");
   XLS_ASSERT_OK_AND_ASSIGN(Channel * ch, Parser::ParseChannel(
                                              R"(chan foo((bits[32], bits[1]),
                       initial_values={(123, 1), (42, 0)},
-                      id=42, kind=streaming,  ops=send_receive,
+                      id=42, kind=streaming, flow_control=ready_valid,
+                      ops=send_receive,
                       metadata="module_port { flopped: true }"))",
                                              &p));
   EXPECT_EQ(ch->name(), "foo");
@@ -1918,7 +1982,7 @@ TEST(IrParserTest, ParseSendOnlyChannel) {
   Package p("my_package");
   XLS_ASSERT_OK_AND_ASSIGN(Channel * ch, Parser::ParseChannel(
                                              R"(chan bar((bits[32], bits[1]),
-                         id=7, kind=port, ops=send_only,
+                         id=7, kind=single_value, ops=send_only,
                          metadata="module_port { flopped: false }"))",
                                              &p));
   EXPECT_EQ(ch->name(), "bar");
@@ -1934,7 +1998,7 @@ TEST(IrParserTest, ParseReceiveOnlyChannel) {
   Package p("my_package");
   XLS_ASSERT_OK_AND_ASSIGN(Channel * ch, Parser::ParseChannel(
                                              R"(chan meh(bits[32][4], id=0,
-                         kind=port, ops=receive_only,
+                         kind=single_value, ops=receive_only,
                          metadata="module_port { flopped: true }"))",
                                              &p));
   EXPECT_EQ(ch->name(), "meh");
@@ -1949,7 +2013,7 @@ TEST(IrParserTest, ParseReceiveOnlyChannel) {
 TEST(IrParserTest, ChannelParsingErrors) {
   Package p("my_package");
   EXPECT_THAT(Parser::ParseChannel(
-                  R"(chan meh(bits[32][4], kind=port,
+                  R"(chan meh(bits[32][4], kind=single_value,
                          ops=receive_only,
                          metadata="module_port { flopped: true }"))",
                   &p)
@@ -2041,9 +2105,9 @@ TEST(IrParserTest, PackageWithSingleDataElementChannels) {
   std::string program = R"(
 package test
 
-chan hbo(bits[32], id=0, kind=streaming, ops=receive_only,
+chan hbo(bits[32], id=0, kind=streaming, flow_control=none, ops=receive_only,
             metadata="module_port { flopped: true }")
-chan mtv(bits[32], id=1, kind=streaming, ops=send_only,
+chan mtv(bits[32], id=1, kind=streaming, flow_control=none, ops=send_only,
             metadata="module_port { flopped: true }")
 
 proc my_proc(my_token: token, my_state: bits[32], init=42) {
@@ -2150,6 +2214,207 @@ fn f(x: bits[4]) -> bits[4] {
       StatusIs(absl::StatusCode::kInvalidArgument,
                HasSubstr("The id '30' in node name add.30 does not match the "
                          "id '42' specified as an attribute")));
+}
+
+TEST(IrParserTest, FunctionWithPort) {
+  const std::string input = R"(
+fn foo(a: bits[32]) -> bits[32][3] {
+  b: bits[32] = input_port(name=b, id=1)
+  ret sum: bits[32] = add(a, b)
+}
+)";
+  Package p("my_package");
+  EXPECT_THAT(
+      Parser::ParseFunction(input, &p).status(),
+      StatusIs(absl::StatusCode::kInvalidArgument,
+               HasSubstr("input_port operations only supported in blocks")));
+}
+
+TEST(IrParserTest, BlockWithReturnValue) {
+  const std::string input = R"(
+block my_block(a: bits[32]) {
+  ret a: bits[32] = input_port(name=a)
+}
+)";
+  Package p("my_package");
+  EXPECT_THAT(Parser::ParseBlock(input, &p).status(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("ret keyword only supported in functions")));
+}
+
+TEST(IrParserTest, WriteOfNonexistentRegister) {
+  const std::string input = R"(
+block my_block(clk: clock, in: bits[32], out: bits[32]) {
+  reg foo(bits[32])
+  in: bits[32] = input_port(name=in, id=1)
+  foo_d: bits[32] = register_write(in, register=bar, id=2)
+  foo_q: bits[32] = register_read(register=foo, id=3)
+  out: () = output_port(foo_q, name=out, id=4)
+}
+)";
+  Package p("my_package");
+  EXPECT_THAT(Parser::ParseBlock(input, &p).status(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("No such register named bar")));
+}
+
+TEST(IrParserTest, ReadOfNonexistentRegister) {
+  const std::string input = R"(
+block my_block(clk: clock, in: bits[32], out: bits[32]) {
+  reg foo(bits[32])
+  in: bits[32] = input_port(name=in, id=1)
+  foo_d: bits[32] = register_write(in, register=foo, id=2)
+  foo_q: bits[32] = register_read(register=bar, id=3)
+  out: () = output_port(foo_q, name=out, id=4)
+}
+)";
+  Package p("my_package");
+  EXPECT_THAT(Parser::ParseBlock(input, &p).status(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("No such register named bar")));
+}
+
+TEST(IrParserTest, ParseBlockWithRegisterWithWrongResetValueType) {
+  const std::string input = R"(
+block my_block(clk: clock, in: bits[32], out: bits[32]) {
+  reg foo(bits[32], reset_value=(42, 43))
+  in: bits[32] = input_port(name=in, id=1)
+  foo_q: bits[32] = register_read(register=foo, id=3)
+  foo_d: bits[32] = register_write(in, register=foo, id=2)
+  out: () = output_port(foo_q, name=out, id=4)
+}
+)";
+  Package p("my_package");
+  EXPECT_THAT(Parser::ParseBlock(input, &p).status(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Expected token of type \"literal\"")));
+}
+
+TEST(IrParserTest, RegisterInFunction) {
+  const std::string input = R"(package my_package
+
+fn f(foo: bits[32]) -> bits[32] {
+  reg bar(bits[32], reset_value=(42, 43))
+  ret result: bits[32] not(foo)
+}
+)";
+  EXPECT_THAT(Parser::ParsePackage(input).status(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("reg keyword only supported in blocks")));
+}
+
+TEST(IrParserTest, ParseBlockWithDuplicateRegisters) {
+  const std::string input = R"(
+block my_block(clk: clock, in: bits[32], out: bits[32]) {
+  reg foo(bits[32])
+  reg foo(bits[32])
+  in: bits[32] = input_port(name=in, id=1)
+  foo_q: bits[32] = register_read(register=foo, id=3)
+  foo_d: bits[32] = register_write(in, register=foo, id=2)
+  out: () = output_port(foo_q, name=out, id=4)
+}
+)";
+  Package p("my_package");
+  EXPECT_THAT(Parser::ParseBlock(input, &p).status(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Register already exists with name foo")));
+}
+
+TEST(IrParserTest, ParseBlockWithIncompleteResetDefinition) {
+  const std::string input = R"(
+block my_block(clk: clock, in: bits[32], out: bits[32]) {
+  reg foo(bits[32], reset_value=42)
+  in: bits[32] = input_port(name=in, id=1)
+  foo_q: bits[32] = register_read(register=foo, id=3)
+  foo_d: bits[32] = register_write(in, register=foo, id=2)
+  out: () = output_port(foo_q, name=out, id=4)
+}
+)";
+  Package p("my_package");
+  EXPECT_THAT(Parser::ParseBlock(input, &p).status(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Register reset incompletely specified")));
+}
+
+TEST(IrParserTest, BlockWithRegistersButNoClock) {
+  const std::string input = R"(
+block my_block(in: bits[32], out: bits[32]) {
+  reg foo(bits[32])
+  in: bits[32] = input_port(name=in, id=1)
+  foo_q: bits[32] = register_read(register=foo, id=3)
+  foo_d: bits[32] = register_write(in, register=foo, id=2)
+  out: () = output_port(foo_q, name=out, id=4)
+}
+)";
+  Package p("my_package");
+  EXPECT_THAT(Parser::ParseBlock(input, &p).status(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Block has registers but no clock port")));
+}
+
+TEST(IrParserTest, BlockWithTwoClocks) {
+  const std::string input = R"(
+block my_block(clk1: clock, clk2: clock, in: bits[32], out: bits[32]) {
+  reg foo(bits[32])
+  in: bits[32] = input_port(name=in, id=1)
+  foo_q: bits[32] = register_read(register=foo, id=3)
+  foo_d: bits[32] = register_write(in, register=foo, id=2)
+  out: () = output_port(foo_q, name=out, id=4)
+}
+)";
+  Package p("my_package");
+  EXPECT_THAT(Parser::ParseBlock(input, &p).status(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Block has multiple clocks")));
+}
+
+TEST(IrParserTest, BlockWithIncompletePortList) {
+  const std::string input = R"(
+block my_block(clk: clock, in: bits[32]) {
+  reg foo(bits[32])
+  in: bits[32] = input_port(name=in, id=1) foo_q: bits[32] = register_read(register=foo, id=3)
+  foo_d: bits[32] = register_write(in, register=foo, id=2)
+  out: () = output_port(foo_q, name=out, id=4)
+}
+)";
+  Package p("my_package");
+  EXPECT_THAT(
+      Parser::ParseBlock(input, &p).status(),
+      StatusIs(absl::StatusCode::kInvalidArgument,
+               HasSubstr("Block signature does not contain port \"out\"")));
+}
+
+TEST(IrParserTest, BlockWithExtraPort) {
+  const std::string input = R"(
+block my_block(clk: clock, in: bits[32], out: bits[32], bogus_port: bits[32]) {
+  reg foo(bits[32])
+  in: bits[32] = input_port(name=in, id=1)
+  foo_q: bits[32] = register_read(register=foo, id=3)
+  foo_d: bits[32] = register_write(in, register=foo, id=2)
+  out: () = output_port(foo_q, name=out, id=4)
+}
+)";
+  Package p("my_package");
+  EXPECT_THAT(Parser::ParseBlock(input, &p).status(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Block port bogus_port has no corresponding "
+                                 "input_port or output_port node")));
+}
+
+TEST(IrParserTest, BlockWithDuplicatePort) {
+  const std::string input = R"(
+block my_block(clk: clock, in: bits[32], out: bits[32], out: bits[32]) {
+  reg foo(bits[32])
+  in: bits[32] = input_port(name=in, id=1)
+  foo_q: bits[32] = register_read(register=foo, id=3)
+  foo_d: bits[32] = register_write(in, register=foo, id=2)
+  out: () = output_port(foo_q, name=out, id=4)
+}
+)";
+  Package p("my_package");
+  EXPECT_THAT(Parser::ParseBlock(input, &p).status(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Duplicate port name \"out\"")));
 }
 
 }  // namespace xls

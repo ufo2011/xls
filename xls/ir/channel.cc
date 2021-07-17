@@ -25,12 +25,8 @@ std::string ChannelKindToString(ChannelKind kind) {
   switch (kind) {
     case ChannelKind::kStreaming:
       return "streaming";
-    case ChannelKind::kPort:
-      return "port";
-    case ChannelKind::kRegister:
-      return "register";
-    case ChannelKind::kLogical:
-      return "logical";
+    case ChannelKind::kSingleValue:
+      return "single_value";
   }
   XLS_LOG(FATAL) << "Invalid channel kind: " << static_cast<int64_t>(kind);
 }
@@ -38,12 +34,8 @@ std::string ChannelKindToString(ChannelKind kind) {
 absl::StatusOr<ChannelKind> StringToChannelKind(absl::string_view str) {
   if (str == "streaming") {
     return ChannelKind::kStreaming;
-  } else if (str == "port") {
-    return ChannelKind::kPort;
-  } else if (str == "register") {
-    return ChannelKind::kRegister;
-  } else if (str == "logical") {
-    return ChannelKind::kLogical;
+  } else if (str == "single_value") {
+    return ChannelKind::kSingleValue;
   }
   return absl::InvalidArgumentError(
       absl::StrFormat("Invalid channel kind '%s'", str));
@@ -51,35 +43,6 @@ absl::StatusOr<ChannelKind> StringToChannelKind(absl::string_view str) {
 
 std::ostream& operator<<(std::ostream& os, ChannelKind kind) {
   os << ChannelKindToString(kind);
-  return os;
-}
-
-std::string ChannelOpsToString(ChannelOps ops) {
-  switch (ops) {
-    case ChannelOps::kSendOnly:
-      return "send_only";
-    case ChannelOps::kReceiveOnly:
-      return "receive_only";
-    case ChannelOps::kSendReceive:
-      return "send_receive";
-  }
-  XLS_LOG(FATAL) << "Invalid channel kind: " << static_cast<int64_t>(ops);
-}
-
-absl::StatusOr<ChannelOps> StringToChannelOps(absl::string_view str) {
-  if (str == "send_only") {
-    return ChannelOps::kSendOnly;
-  } else if (str == "receive_only") {
-    return ChannelOps::kReceiveOnly;
-  } else if (str == "send_receive") {
-    return ChannelOps::kSendReceive;
-  }
-  return absl::InvalidArgumentError(
-      absl::StrCat("Unknown channel ops value: ", str));
-}
-
-std::ostream& operator<<(std::ostream& os, ChannelOps ops) {
-  os << ChannelOpsToString(ops);
   return os;
 }
 
@@ -94,20 +57,46 @@ std::string Channel::ToString() const {
                                                           v.ToHumanString());
                                         }));
   }
-  absl::StrAppendFormat(
-      &result, "id=%d, kind=%s, ops=%s, metadata=\"\"\"%s\"\"\")", id(),
-      ChannelKindToString(kind_), ChannelOpsToString(supported_ops()),
-      metadata().ShortDebugString());
+  absl::StrAppendFormat(&result, "id=%d, kind=%s, ops=%s, ", id(),
+                        ChannelKindToString(kind_),
+                        ChannelOpsToString(supported_ops()));
+
+  if (kind() == ChannelKind::kStreaming) {
+    absl::StrAppendFormat(
+        &result, "flow_control=%s, ",
+        FlowControlToString(
+            down_cast<const StreamingChannel*>(this)->flow_control()));
+  }
+
+  absl::StrAppendFormat(&result, "metadata=\"\"\"%s\"\"\")",
+                        metadata().ShortDebugString());
 
   return result;
 }
 
-bool Channel::IsStreaming() const { return kind_ == ChannelKind::kStreaming; }
+std::string FlowControlToString(FlowControl fc) {
+  switch (fc) {
+    case FlowControl::kNone:
+      return "none";
+    case FlowControl::kReadyValid:
+      return "ready_valid";
+  }
+  XLS_LOG(FATAL) << "Invalid flow control value: " << static_cast<int64_t>(fc);
+}
 
-bool Channel::IsRegister() const { return kind_ == ChannelKind::kRegister; }
+absl::StatusOr<FlowControl> StringToFlowControl(absl::string_view str) {
+  if (str == "none") {
+    return FlowControl::kNone;
+  } else if (str == "ready_valid") {
+    return FlowControl::kReadyValid;
+  }
+  return absl::InvalidArgumentError(
+      absl::StrFormat("Invalid channel kind '%s'", str));
+}
 
-bool Channel::IsPort() const { return kind_ == ChannelKind::kPort; }
-
-bool Channel::IsLogical() const { return kind_ == ChannelKind::kLogical; }
+std::ostream& operator<<(std::ostream& os, FlowControl fc) {
+  os << FlowControlToString(fc);
+  return os;
+}
 
 }  // namespace xls

@@ -236,8 +236,8 @@ TEST_F(ProcBuilderVisitorTest, CanCompileProcs) {
   const std::string kIrText = R"(
 package p
 
-chan c_i(bits[32], id=0, kind=streaming, ops=receive_only, metadata="")
-chan c_o(bits[32], id=1, kind=streaming, ops=send_only, metadata="")
+chan c_i(bits[32], id=0, kind=streaming, ops=receive_only, flow_control=none, metadata="")
+chan c_o(bits[32], id=1, kind=streaming, ops=send_only, flow_control=none, metadata="")
 
 proc the_proc(my_token: token, state: (), init=()) {
   literal.1: bits[32] = literal(value=3)
@@ -282,13 +282,13 @@ TEST_F(ProcBuilderVisitorTest, RecvIf) {
   const std::string kIrText = R"(
 package p
 
-chan c_i(bits[32], id=0, kind=streaming, ops=receive_only, metadata="")
-chan c_o(bits[32], id=1, kind=streaming, ops=send_only, metadata="")
+chan c_i(bits[32], id=0, kind=streaming, ops=receive_only, flow_control=none, metadata="")
+chan c_o(bits[32], id=1, kind=streaming, ops=send_only, flow_control=none, metadata="")
 
 proc the_proc(my_token: token, state: bits[1], init=0) {
-  receive_if.2: (token, bits[32]) = receive_if(my_token, state, channel_id=0)
-  tuple_index.3: token = tuple_index(receive_if.2, index=0)
-  tuple_index.4: bits[32] = tuple_index(receive_if.2, index=1)
+  receive.2: (token, bits[32]) = receive(my_token, predicate=state, channel_id=0)
+  tuple_index.3: token = tuple_index(receive.2, index=0)
+  tuple_index.4: bits[32] = tuple_index(receive.2, index=1)
   send.5: token = send(tuple_index.3, tuple_index.4, channel_id=1)
   next (send.5, state)
 }
@@ -324,19 +324,19 @@ proc the_proc(my_token: token, state: bits[1], init=0) {
   EXPECT_EQ(DequeueData(queue_mgr->GetQueueById(1).value()), kQueueData);
 }
 
-TEST_F(ProcBuilderVisitorTest, SendIf) {
+TEST_F(ProcBuilderVisitorTest, ConditionalSend) {
   const std::string kIrText = R"(
 package p
 
-chan c_i(bits[32], id=0, kind=streaming, ops=receive_only, metadata="")
-chan c_o(bits[32], id=1, kind=streaming, ops=send_only, metadata="")
+chan c_i(bits[32], id=0, kind=streaming, ops=receive_only, flow_control=none, metadata="")
+chan c_o(bits[32], id=1, kind=streaming, ops=send_only, flow_control=none, metadata="")
 
 proc the_proc(my_token: token, state: bits[1], init=0) {
   receive.2: (token, bits[32]) = receive(my_token, channel_id=0)
   tuple_index.3: token = tuple_index(receive.2, index=0)
   tuple_index.4: bits[32] = tuple_index(receive.2, index=1)
-  send_if.5: token = send_if(tuple_index.3, state, tuple_index.4, channel_id=1)
-  next (send_if.5, state)
+  send.5: token = send(tuple_index.3, tuple_index.4, predicate=state, channel_id=1)
+  next (send.5, state)
 }
 )";
   XLS_ASSERT_OK(InitPackage(kIrText));
@@ -392,8 +392,8 @@ TEST_F(ProcBuilderVisitorTest, GetsUserData) {
   const std::string kIrText = R"(
 package p
 
-chan c_i(bits[32], id=0, kind=streaming, ops=receive_only, metadata="")
-chan c_o(bits[32], id=1, kind=streaming, ops=send_only, metadata="")
+chan c_i(bits[32], id=0, kind=streaming, ops=receive_only, flow_control=none, metadata="")
+chan c_o(bits[32], id=1, kind=streaming, ops=send_only, flow_control=none, metadata="")
 
 proc the_proc(my_token: token, state: (), init=()) {
   literal.1: bits[32] = literal(value=3)

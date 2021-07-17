@@ -19,6 +19,7 @@
 
 # cc_proto_library is used in this file
 load("//xls/build_rules:py_proto_library.bzl", "xls_py_proto_library")
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
 
 package(
     default_visibility = ["//xls:xls_internal"],
@@ -50,13 +51,22 @@ proto_library(
 
 cc_proto_library(
     name = "metadata_output_cc_proto",
+    visibility = ["//xls:xls_users"],
     deps = [":metadata_output_proto"],
 )
 
 xls_py_proto_library(
     name = "metadata_output_py_pb2",
     srcs = ["metadata_output.proto"],
-    internal_deps = [":metadat_oautput_proto"],
+    internal_deps = [":metadata_output_proto"],
+)
+
+build_test(
+    name = "metadata_proto_libraries_build",
+    targets = [
+        ":metadata_output_cc_proto",
+        ":metadata_output_py_pb2",
+    ],
 )
 
 cc_library(
@@ -68,7 +78,6 @@ cc_library(
         ":translator",
         "//xls/codegen:combinational_generator",
         "//xls/common:xls_gunit_main",
-        "//xls/common/file:get_runfile_path",
         "//xls/common/file:temp_file",
         "//xls/common/status:matchers",
         "//xls/common/status:ret_check",
@@ -98,6 +107,7 @@ cc_library(
         "//xls/interpreter:ir_interpreter",
         "//xls/ir",
         "//xls/ir:bits",
+        "//xls/ir:channel",
         "//xls/ir:function_builder",
         "//xls/ir:ir_parser",
         "//xls/ir:op",
@@ -136,9 +146,13 @@ cc_test(
         ":metadata_output_cc_proto",
         ":translator",
         ":unit_test",
+        "//xls/codegen:block_conversion",
+        "//xls/codegen:block_generator",
+        "//xls/codegen:codegen_options",
         "//xls/codegen:combinational_generator",
         "//xls/common:xls_gunit_main",
         "//xls/common/file:temp_file",
+        "//xls/common/logging",
         "//xls/common/status:matchers",
         "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
@@ -155,6 +169,32 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "translator_verilog_test",
+    srcs = ["translator_verilog_test.cc"],
+    data = glob([
+        "testdata/translator_verilog_test_*",
+    ]),
+    deps = [
+        ":hls_block_cc_proto",
+        ":translator",
+        ":unit_test",
+        "//xls/codegen:block_conversion",
+        "//xls/codegen:block_generator",
+        "//xls/codegen:signature_generator",
+        "//xls/common:xls_gunit_main",
+        "//xls/common/logging",
+        "//xls/common/status:matchers",
+        "//xls/ir",
+        "//xls/ir:bits",
+        "//xls/ir:channel",
+        "//xls/simulation:module_simulator",
+        "//xls/simulation:verilog_simulators",
+        "//xls/simulation:verilog_test_base",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
 cc_binary(
     name = "xlscc",
     srcs = ["main.cc"],
@@ -163,10 +203,12 @@ cc_binary(
         ":hls_block_cc_proto",
         ":metadata_output_cc_proto",
         ":translator",
-        "//xls/codegen:combinational_generator",
+        "//xls/codegen:block_conversion",
+        "//xls/codegen:block_generator",
         "//xls/common:init_xls",
         "//xls/common/logging",
         "//xls/common/status:status_macros",
+        "//xls/ir",
         "//xls/passes:standard_pipeline",
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/status",

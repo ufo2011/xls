@@ -59,6 +59,7 @@ cc_binary(
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "//xls/common:case_converters",
         "//xls/common:init_xls",
         "//xls/common/file:filesystem",
         "//xls/common/logging",
@@ -144,7 +145,7 @@ cc_test(
         "//xls/common/status:matchers",
         "//xls/common/status:status_macros",
         "//xls/interpreter:channel_queue",
-        "//xls/interpreter:ir_evaluator_test",
+        "//xls/interpreter:ir_evaluator_test_base",
         "//xls/ir:function_builder",
         "//xls/ir:random_value",
         "@com_github_google_re2//:re2",
@@ -164,6 +165,7 @@ cc_library(
         "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
         "//xls/ir",
+        "//xls/ir:channel",
     ],
 )
 

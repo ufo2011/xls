@@ -31,11 +31,26 @@ signature which includes metadata about the block. The tool does not run any XLS
 passes so unoptimized IR may fail if the IR contains constructs not expected by
 the backend.
 
+## [`delay_info_main`](https://github.com/google/xls/tree/main/xls/tools/delay_info_main.cc)
+
+Dumps delay information about an XLS function including per-node delay
+information and critical-path.
+
 ## [`eval_ir_main`](https://github.com/google/xls/tree/main/xls/tools/eval_ir_main.cc)
 
 Evaluates an XLS IR file with user-specified or random inputs. Includes
 features for evaluating the IR before and after optimizations which makes this
 tool very useful for identifying optimization bugs.
+
+This tool accepts two [mutually exclusive] optional args,
+`--input_validator_expr` and `--input_validator_path`, which allow the user to
+specify an expression to "filter" potential input values to discard invalid
+ones. For both, the filter must be a function, named `validator`, and must take
+params of the same layout as the function under test. This function should
+return true if the inputs are valid for the function and false otherwise.
+`--input_validator_expr` lists the function as an inline command-line argument,
+whereas `--input_validator_path` holds the path to a .x file containing the
+validation function.
 
 ## [`ir_minimizer_main`](https://github.com/google/xls/tree/main/xls/tools/ir_minimizer_main.cc)
 
@@ -114,6 +129,16 @@ or other behaviors requiring explanation:
     `./xls/tools/testdata/proto_to_dslx_main.*` demonstrates this
     behavior.
 
+## [`repl`](https://github.com/google/xls/tree/main/xls/tools/repl.cc)
+
+Allows you to interactively run various parts of the compiler, including
+parsing/typechecking (`:reload`), lowering/optimization (`:ir`), Verilog
+codegen (`:verilog [identifier]`), and LLVM codegen (`:llvm`, not yet
+implemented). You can also inspect the IR types of identifiers with `:type`,
+and even imported identifiers can be accessed with `:type foo::bar`.
+
+![animated GIF](./repl.gif)
+
 ## [`simulate_module_main`](https://github.com/google/xls/tree/main/xls/tools/simulate_module_main.cc)
 
 Runs an Verilog block emitted by XLS through a Verilog simulator. Requires both
@@ -140,3 +165,7 @@ to prove equivalence of transformed representations with their original version.
 Parses a cell library ".lib" file and extracts boolean formulas from it that
 determine the functionality of cells. This is useful for LEC of the XLS IR
 against the post-sythesis netlist.
+
+## [`dslx/highlight_main`](https://github.com/google/xls/tree/main/xls/dslx/highlight_main.cc)
+
+Performs terminal-based color code highlighting of a DSL file.

@@ -19,8 +19,10 @@
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "xls/common/status/matchers.h"
 #include "xls/ir/big_int.h"
 #include "xls/ir/bits.h"
+#include "xls/tools/testbench_builder.h"
 
 namespace xls {
 namespace {
@@ -69,17 +71,17 @@ TEST(AbstractEvaluatorTest, Add) {
   Bits a = UBits(2, 32);
   Bits b = UBits(4, 32);
   Bits c = FromBoxedVector(eval.Add(ToBoxedVector(a), ToBoxedVector(b)));
-  EXPECT_EQ(c.ToInt64().value(), 6);
+  EXPECT_EQ(c.ToUint64().value(), 6);
 
   a = UBits(1024, 32);
   b = UBits(1023, 32);
   c = FromBoxedVector(eval.Add(ToBoxedVector(a), ToBoxedVector(b)));
-  EXPECT_EQ(c.ToInt64().value(), 2047);
+  EXPECT_EQ(c.ToUint64().value(), 2047);
 
   a = UBits(1024768, 32);
   b = UBits(5893798, 32);
   c = FromBoxedVector(eval.Add(ToBoxedVector(a), ToBoxedVector(b)));
-  EXPECT_EQ(c.ToInt64().value(), 6918566);
+  EXPECT_EQ(c.ToUint64().value(), 6918566);
 
   a = SBits(-1024, 32);
   b = SBits(1023, 32);
@@ -115,12 +117,12 @@ TEST(AbstractEvaluatorTest, UMul) {
   Bits a = UBits(3, 8);
   Bits b = UBits(3, 8);
   Bits c = FromBoxedVector(eval.UMul(ToBoxedVector(a), ToBoxedVector(b)));
-  EXPECT_EQ(c.ToInt64().value(), 9);
+  EXPECT_EQ(c.ToUint64().value(), 9);
 
   a = UBits(127, 10);
   b = UBits(64, 7);
   c = FromBoxedVector(eval.UMul(ToBoxedVector(a), ToBoxedVector(b)));
-  EXPECT_EQ(c.ToInt64().value(), 8128);
+  EXPECT_EQ(c.ToUint64().value(), 8128);
 }
 
 // Performs random UMul and SMul implementations as constructed by the
@@ -395,6 +397,30 @@ TEST(AbstractEvaluatorTest, BitSliceUpdate) {
   test_eq(0xcd, UBits(0x12, 8), UBits(0, 32), UBits(0xabcd, 16));
   test_eq(0xd2, UBits(0x12, 8), UBits(4, 32), UBits(0xabcd, 16));
   test_eq(0x12, UBits(0x12, 8), UBits(8, 32), UBits(0xabcd, 16));
+}
+
+// This test is temporary - the goal is to replace it (and the other random UMul
+// testing above) with a RapidCheck-like macro. Currently this test demonstrates
+// a non-JIT Testbench use case to try and simplify.
+TEST(AbstractEvaluatorTest, SpeedyCheckUMul) {
+  using InputT = std::tuple<uint32_t, uint32_t>;
+  using ResultT = uint32_t;
+
+  auto compute_expected = [](InputT input) {
+    return std::get<0>(input) * std::get<1>(input);
+  };
+  auto compute_actual = [](InputT input) {
+    TestAbstractEvaluator eval;
+    uint32_t a = std::get<0>(input);
+    uint32_t b = std::get<1>(input);
+    Bits a_bits = UBits(a, 32);
+    Bits b_bits = UBits(b, 32);
+    Bits c = FromBoxedVector(
+        eval.UMul(ToBoxedVector(a_bits), ToBoxedVector(b_bits)));
+    return static_cast<uint32_t>(c.ToUint64().value());
+  };
+  TestbenchBuilder<InputT, ResultT> builder(compute_expected, compute_actual);
+  XLS_ASSERT_OK(builder.Build().Run());
 }
 
 }  // namespace

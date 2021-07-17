@@ -227,6 +227,8 @@ bool InterpValue::Eq(const InterpValue& other) const {
   XLS_LOG(FATAL) << "Unhandled tag: " << tag_;
 }
 
+bool InterpValue::operator==(const InterpValue& rhs) const { return Eq(rhs); }
+
 /* static */ absl::StatusOr<InterpValue> InterpValue::Compare(
     const InterpValue& lhs, const InterpValue& rhs, CompareF ucmp,
     CompareF scmp) {
@@ -388,17 +390,25 @@ absl::StatusOr<InterpValue> InterpValue::Slice(
         TagToString(length.tag())));
   }
   const std::vector<InterpValue>& subject = GetValuesOrDie();
-  XLS_ASSIGN_OR_RETURN(Bits start_bits, start.GetBits());
   XLS_ASSIGN_OR_RETURN(const auto* length_values, length.GetValues());
-  XLS_ASSIGN_OR_RETURN(int64_t start_index, start_bits.ToUint64());
   int64_t length_value = length_values->size();
+  XLS_ASSIGN_OR_RETURN(int64_t start_width, start.GetBitCount());
+  int64_t width = start_width +
+                  Bits::MinBitCountSigned(length_value) +
+                  Bits::MinBitCountUnsigned(subject.size()) + 1;
   std::vector<InterpValue> result;
-  for (int64_t i = start_index; i < start_index + length_value; ++i) {
-    if (i < 0 || i >= subject.size()) {
-      return absl::InvalidArgumentError(absl::StrFormat(
-          "Out of bounds slice; index %d size %d", i, subject.size()));
+  for (int64_t i = 0; i < length_value; ++i) {
+    XLS_ASSIGN_OR_RETURN(InterpValue start_big, start.ZeroExt(width));
+    XLS_ASSIGN_OR_RETURN(InterpValue offset,
+                         start_big.Add(MakeUBits(width, i)));
+    XLS_ASSIGN_OR_RETURN(InterpValue out_of_bounds,
+                         offset.Ge(MakeUBits(width, subject.size())));
+    if (out_of_bounds.IsTrue()) {
+      result.push_back(subject.back());
+    } else {
+      XLS_ASSIGN_OR_RETURN(uint64_t offset_int, offset.GetBitValueUint64());
+      result.push_back(subject[offset_int]);
     }
-    result.push_back(subject[i]);
   }
   return InterpValue(InterpValueTag::kArray, result);
 }
@@ -665,7 +675,7 @@ bool InterpValue::operator<(const InterpValue& rhs) const {
   }
 
   for (int i = 0; i < lhs_length; i++) {
-    InterpValue index = MakeU64(i);
+    InterpValue index = MakeU32(i);
     InterpValue lhs_element = Index(index).value();
     InterpValue rhs_element = rhs.Index(index).value();
     if (lhs_element < rhs_element) {

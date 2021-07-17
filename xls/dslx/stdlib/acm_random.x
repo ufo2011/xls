@@ -38,7 +38,7 @@ pub fn rng_next(s: State) -> (State, u32) {
   const A = u64:16807;
   let product = (s.seed as u64) * A;
   let new_seed = ((product >> u64:31) + (product & (M as u64))) as u32;
-  let new_seed = new_seed - M if sgt(new_seed, M) else new_seed;
+  let new_seed = new_seed - M if std::sgt(new_seed, M) else new_seed;
   (State{seed: new_seed}, new_seed)
 }
 
@@ -54,10 +54,12 @@ pub fn rng_next64(s: State) -> (State, u64) {
   (s, result as u64)
 }
 
+// Returns a fixed seed for use in the random number generator.
 pub fn rng_deterministic_seed() -> u32 {
   u32:301
 }
 
+// Create the state for a new random number generator using the given seed.
 fn rng_sanitize_seed(seed: u32) -> u32 {
   let seed = seed & u32:0x7fffffff;
   match seed {

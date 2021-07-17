@@ -25,7 +25,7 @@
 #include "xls/common/status/status_macros.h"
 #include "xls/delay_model/delay_estimator.h"
 #include "xls/delay_model/delay_estimators.h"
-#include "xls/interpreter/ir_interpreter.h"
+#include "xls/interpreter/function_interpreter.h"
 #include "xls/ir/ir_parser.h"
 #include "xls/ir/value_test_util.h"
 #include "xls/ir/verifier.h"
@@ -72,7 +72,7 @@ absl::StatusOr<Proc*> IrTestBase::ParseProc(absl::string_view text,
 }
 
 Node* IrTestBase::FindNode(absl::string_view name, Package* package) {
-  for (FunctionBase* function : package->GetFunctionsAndProcs()) {
+  for (FunctionBase* function : package->GetFunctionBases()) {
     for (Node* node : function->nodes()) {
       if (node->GetName() == name) {
         return node;
@@ -108,6 +108,15 @@ Proc* IrTestBase::FindProc(absl::string_view name, Package* package) {
     }
   }
   XLS_LOG(FATAL) << "No proc named " << name << " in package:\n" << *package;
+}
+
+Block* IrTestBase::FindBlock(absl::string_view name, Package* package) {
+  for (auto& block : package->blocks()) {
+    if (block->name() == name) {
+      return block.get();
+    }
+  }
+  XLS_LOG(FATAL) << "No block named " << name << " in package:\n" << *package;
 }
 
 void IrTestBase::RunAndExpectEq(
@@ -206,7 +215,7 @@ void IrTestBase::RunAndExpectEq(
   {
     XLS_ASSERT_OK_AND_ASSIGN(Function * entry, package->EntryFunction());
     XLS_ASSERT_OK_AND_ASSIGN(Value actual,
-                             IrInterpreter::RunKwargs(entry, args));
+                             InterpretFunctionKwargs(entry, args));
     ASSERT_TRUE(ValuesEqual(expected, actual))
         << "(interpreted unoptimized IR)";
   }
@@ -219,7 +228,7 @@ void IrTestBase::RunAndExpectEq(
     {
       XLS_ASSERT_OK_AND_ASSIGN(Function * main, package->EntryFunction());
       XLS_ASSERT_OK_AND_ASSIGN(Value actual,
-                               IrInterpreter::RunKwargs(main, args));
+                               InterpretFunctionKwargs(main, args));
       ASSERT_TRUE(ValuesEqual(expected, actual))
           << "(interpreted optimized IR)";
     }

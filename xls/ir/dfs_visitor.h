@@ -15,6 +15,8 @@
 #ifndef XLS_IR_DFS_VISITOR_H_
 #define XLS_IR_DFS_VISITOR_H_
 
+#include <cstdint>
+
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "xls/ir/node.h"
@@ -28,8 +30,15 @@ class DfsVisitor {
  public:
   virtual ~DfsVisitor() = default;
 
+  // Let the visitor know that 'count' nodes are likely to be visited in the
+  // near future. This is purely advisory to allow the visitor to reserve space
+  // to avoid reallocations. The visitor is free to ignore this hint. The user
+  // is free to call this method or not.
+  virtual void ReserveNodes(int64_t count) { visited_.reserve(count); }
+
   virtual absl::Status HandleAdd(BinOp* add) = 0;
   virtual absl::Status HandleAfterAll(AfterAll* after_all) = 0;
+  virtual absl::Status HandleMinDelay(MinDelay* min_delay) = 0;
   virtual absl::Status HandleAndReduce(BitwiseReductionOp* and_reduce) = 0;
   virtual absl::Status HandleArray(Array* array) = 0;
   virtual absl::Status HandleArrayConcat(ArrayConcat* array_concat) = 0;
@@ -38,15 +47,20 @@ class DfsVisitor {
   virtual absl::Status HandleBitSliceUpdate(BitSliceUpdate* update) = 0;
   virtual absl::Status HandleConcat(Concat* concat) = 0;
   virtual absl::Status HandleCountedFor(CountedFor* counted_for) = 0;
+  virtual absl::Status HandleCover(Cover* cover) = 0;
   virtual absl::Status HandleDecode(Decode* decode) = 0;
   virtual absl::Status HandleDynamicBitSlice(
       DynamicBitSlice* dynamic_bit_slice) = 0;
-  virtual absl::Status HandleDynamicCountedFor(
-      DynamicCountedFor* dynamic_counted_for) = 0;
   virtual absl::Status HandleEncode(Encode* encode) = 0;
   virtual absl::Status HandleEq(CompareOp* eq) = 0;
+  virtual absl::Status HandleGate(Gate* gate) = 0;
   virtual absl::Status HandleIdentity(UnOp* identity) = 0;
+  virtual absl::Status HandleInputPort(InputPort* input_port) = 0;
   virtual absl::Status HandleInvoke(Invoke* invoke) = 0;
+  virtual absl::Status HandleInstantiationInput(
+      InstantiationInput* instantiation_input) = 0;
+  virtual absl::Status HandleInstantiationOutput(
+      InstantiationOutput* instantiation_output) = 0;
   virtual absl::Status HandleLiteral(Literal* literal) = 0;
   virtual absl::Status HandleMap(Map* map) = 0;
   virtual absl::Status HandleArrayIndex(ArrayIndex* index) = 0;
@@ -62,10 +76,18 @@ class DfsVisitor {
   virtual absl::Status HandleNot(UnOp* not_op) = 0;
   virtual absl::Status HandleOneHot(OneHot* one_hot) = 0;
   virtual absl::Status HandleOneHotSel(OneHotSelect* sel) = 0;
+  virtual absl::Status HandlePrioritySel(PrioritySelect* sel) = 0;
   virtual absl::Status HandleOrReduce(BitwiseReductionOp* or_reduce) = 0;
+  virtual absl::Status HandleOutputPort(OutputPort* output_port) = 0;
   virtual absl::Status HandleParam(Param* param) = 0;
+  virtual absl::Status HandleStateRead(StateRead* state_read) = 0;
+  virtual absl::Status HandleNext(Next* next) = 0;
+  virtual absl::Status HandleNewChannel(NewChannel* new_channel) = 0;
+  virtual absl::Status HandleRecvChannelEnd(RecvChannelEnd* rce) = 0;
+  virtual absl::Status HandleSendChannelEnd(SendChannelEnd* sce) = 0;
   virtual absl::Status HandleReceive(Receive* receive) = 0;
-  virtual absl::Status HandleReceiveIf(ReceiveIf* receive_if) = 0;
+  virtual absl::Status HandleRegisterRead(RegisterRead* reg_read) = 0;
+  virtual absl::Status HandleRegisterWrite(RegisterWrite* reg_write) = 0;
   virtual absl::Status HandleReverse(UnOp* reverse) = 0;
   virtual absl::Status HandleSDiv(BinOp* div) = 0;
   virtual absl::Status HandleSGe(CompareOp* ge) = 0;
@@ -74,14 +96,15 @@ class DfsVisitor {
   virtual absl::Status HandleSLt(CompareOp* lt) = 0;
   virtual absl::Status HandleSMod(BinOp* mod) = 0;
   virtual absl::Status HandleSMul(ArithOp* mul) = 0;
+  virtual absl::Status HandleSMulp(PartialProductOp* mul) = 0;
   virtual absl::Status HandleSel(Select* sel) = 0;
   virtual absl::Status HandleSend(Send* send) = 0;
-  virtual absl::Status HandleSendIf(SendIf* send_if) = 0;
   virtual absl::Status HandleShll(BinOp* shll) = 0;
   virtual absl::Status HandleShra(BinOp* shra) = 0;
   virtual absl::Status HandleShrl(BinOp* shrl) = 0;
   virtual absl::Status HandleSignExtend(ExtendOp* sign_ext) = 0;
   virtual absl::Status HandleSub(BinOp* sub) = 0;
+  virtual absl::Status HandleTrace(Trace* trace_op) = 0;
   virtual absl::Status HandleTuple(Tuple* tuple) = 0;
   virtual absl::Status HandleTupleIndex(TupleIndex* index) = 0;
   virtual absl::Status HandleUDiv(BinOp* div) = 0;
@@ -91,6 +114,7 @@ class DfsVisitor {
   virtual absl::Status HandleULt(CompareOp* lt) = 0;
   virtual absl::Status HandleUMod(BinOp* mod) = 0;
   virtual absl::Status HandleUMul(ArithOp* mul) = 0;
+  virtual absl::Status HandleUMulp(PartialProductOp* mul) = 0;
   virtual absl::Status HandleXorReduce(BitwiseReductionOp* xor_reduce) = 0;
   virtual absl::Status HandleZeroExtend(ExtendOp* zero_ext) = 0;
 
@@ -119,6 +143,9 @@ class DfsVisitor {
     traversing_.clear();
   }
 
+  // Return the total number of nodes visited.
+  int64_t GetVisitedCount() const { return visited_.size(); }
+
  private:
   // Set of nodes which have been visited.
   absl::flat_hash_set<Node*> visited_;
@@ -136,6 +163,7 @@ class DfsVisitorWithDefault : public DfsVisitor {
 
   absl::Status HandleAdd(BinOp* add) override;
   absl::Status HandleAfterAll(AfterAll* after_all) override;
+  absl::Status HandleMinDelay(MinDelay* min_delay) override;
   absl::Status HandleAndReduce(BitwiseReductionOp* and_reduce) override;
   absl::Status HandleArray(Array* array) override;
   absl::Status HandleArrayConcat(ArrayConcat* array_concat) override;
@@ -144,15 +172,20 @@ class DfsVisitorWithDefault : public DfsVisitor {
   absl::Status HandleBitSliceUpdate(BitSliceUpdate* update) override;
   absl::Status HandleConcat(Concat* concat) override;
   absl::Status HandleCountedFor(CountedFor* counted_for) override;
+  absl::Status HandleCover(Cover* cover) override;
   absl::Status HandleDecode(Decode* decode) override;
   absl::Status HandleDynamicBitSlice(
       DynamicBitSlice* dynamic_bit_slice) override;
-  absl::Status HandleDynamicCountedFor(
-      DynamicCountedFor* dynamic_counted_for) override;
   absl::Status HandleEncode(Encode* encode) override;
   absl::Status HandleEq(CompareOp* eq) override;
+  absl::Status HandleGate(Gate* gate) override;
   absl::Status HandleIdentity(UnOp* identity) override;
+  absl::Status HandleInputPort(InputPort* input_port) override;
   absl::Status HandleInvoke(Invoke* invoke) override;
+  absl::Status HandleInstantiationInput(
+      InstantiationInput* instantiation_input) override;
+  absl::Status HandleInstantiationOutput(
+      InstantiationOutput* instantiation_output) override;
   absl::Status HandleLiteral(Literal* literal) override;
   absl::Status HandleMap(Map* map) override;
   absl::Status HandleArrayIndex(ArrayIndex* index) override;
@@ -168,10 +201,18 @@ class DfsVisitorWithDefault : public DfsVisitor {
   absl::Status HandleNot(UnOp* not_op) override;
   absl::Status HandleOneHot(OneHot* one_hot) override;
   absl::Status HandleOneHotSel(OneHotSelect* sel) override;
+  absl::Status HandlePrioritySel(PrioritySelect* sel) override;
   absl::Status HandleOrReduce(BitwiseReductionOp* or_reduce) override;
+  absl::Status HandleOutputPort(OutputPort* output_port) override;
   absl::Status HandleParam(Param* param) override;
+  absl::Status HandleStateRead(StateRead* state_read) override;
+  absl::Status HandleNext(Next* next) override;
+  absl::Status HandleNewChannel(NewChannel* new_channel) override;
+  absl::Status HandleRecvChannelEnd(RecvChannelEnd* rce) override;
+  absl::Status HandleSendChannelEnd(SendChannelEnd* sce) override;
   absl::Status HandleReceive(Receive* receive) override;
-  absl::Status HandleReceiveIf(ReceiveIf* receive_if) override;
+  absl::Status HandleRegisterRead(RegisterRead* reg_read) override;
+  absl::Status HandleRegisterWrite(RegisterWrite* reg_write) override;
   absl::Status HandleReverse(UnOp* reverse) override;
   absl::Status HandleSDiv(BinOp* div) override;
   absl::Status HandleSGe(CompareOp* ge) override;
@@ -180,14 +221,15 @@ class DfsVisitorWithDefault : public DfsVisitor {
   absl::Status HandleSLt(CompareOp* lt) override;
   absl::Status HandleSMod(BinOp* mod) override;
   absl::Status HandleSMul(ArithOp* mul) override;
+  absl::Status HandleSMulp(PartialProductOp* mul) override;
   absl::Status HandleSel(Select* sel) override;
   absl::Status HandleSend(Send* send) override;
-  absl::Status HandleSendIf(SendIf* send_if) override;
   absl::Status HandleShll(BinOp* shll) override;
   absl::Status HandleShra(BinOp* shra) override;
   absl::Status HandleShrl(BinOp* shrl) override;
   absl::Status HandleSignExtend(ExtendOp* sign_ext) override;
   absl::Status HandleSub(BinOp* sub) override;
+  absl::Status HandleTrace(Trace* trace_op) override;
   absl::Status HandleTuple(Tuple* tuple) override;
   absl::Status HandleTupleIndex(TupleIndex* index) override;
   absl::Status HandleUDiv(BinOp* div) override;
@@ -197,6 +239,7 @@ class DfsVisitorWithDefault : public DfsVisitor {
   absl::Status HandleULt(CompareOp* lt) override;
   absl::Status HandleUMod(BinOp* mod) override;
   absl::Status HandleUMul(ArithOp* mul) override;
+  absl::Status HandleUMulp(PartialProductOp* mul) override;
   absl::Status HandleXorReduce(BitwiseReductionOp* xor_reduce) override;
   absl::Status HandleZeroExtend(ExtendOp* zero_ext) override;
 };

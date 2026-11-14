@@ -12,17 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "absl/flags/flag.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_format.h"
+#include "google/protobuf/repeated_ptr_field.h"
 #include "google/protobuf/text_format.h"
+#include "xls/common/exit_status.h"
 #include "xls/common/file/filesystem.h"
 #include "xls/common/init_xls.h"
-#include "xls/common/logging/logging.h"
 #include "xls/common/status/status_macros.h"
 #include "xls/fuzzer/sample_summary.pb.h"
 #include "xls/ir/ir_parser.h"
 #include "xls/ir/op.h"
 #include "xls/ir/package.h"
+#include "xls/ir/type.h"
 
-const char kUsage[] = R"(
+static constexpr std::string_view kUsage = R"(
 
 Appends a summary of a given IR file(s) to the specified Protobuf summary
 file. emitted. The summary information includes information such as op types,
@@ -36,12 +49,12 @@ The summary file will be created if it does not exist. Otherwise the summary
 file is appended to.
 )";
 
-ABSL_FLAG(std::string, unoptimized_ir, "", "Unoptimized IR file to summarize.");
 ABSL_FLAG(std::string, optimized_ir, "", "Optimized IR file to summarize.");
+ABSL_FLAG(std::string, summary_file, "", "Summary file to append to.");
 ABSL_FLAG(
     std::string, timing, "",
     "A serialized fuzzer::SampleTimingProto to write into the summary file.");
-ABSL_FLAG(std::string, summary_file, "", "Summary file to append to.");
+ABSL_FLAG(std::string, unoptimized_ir, "", "Unoptimized IR file to summarize.");
 
 namespace xls {
 namespace {
@@ -49,9 +62,11 @@ namespace {
 std::string TypeToString(Type* type) {
   if (type->IsBits()) {
     return "bits";
-  } else if (type->IsArray()) {
+  }
+  if (type->IsArray()) {
     return "array";
-  } else if (type->IsTuple()) {
+  }
+  if (type->IsTuple()) {
     return "tuple";
   }
   return "other";
@@ -59,8 +74,8 @@ std::string TypeToString(Type* type) {
 
 void SummarizePackage(Package* package,
                       google::protobuf::RepeatedPtrField<fuzzer::NodeProto>* nodes) {
-  for (const auto& function : package->functions()) {
-    for (Node* node : function->nodes()) {
+  for (const FunctionBase* fb : package->GetFunctionBases()) {
+    for (Node* node : fb->nodes()) {
       fuzzer::NodeProto* node_proto = nodes->Add();
       node_proto->set_op(OpToString(node->op()));
       node_proto->set_type(TypeToString(node->GetType()));
@@ -74,14 +89,14 @@ void SummarizePackage(Package* package,
     }
   }
 }
-absl::StatusOr<std::unique_ptr<Package>> ParseFile(absl::string_view path) {
+absl::StatusOr<std::unique_ptr<Package>> ParseFile(std::string_view path) {
   XLS_ASSIGN_OR_RETURN(std::string contents, GetFileContents(path));
   return Parser::ParsePackage(contents, path);
 }
 
-absl::Status RealMain(absl::string_view unoptimized_path,
-                      absl::string_view optimized_path,
-                      absl::string_view timing_str) {
+absl::Status RealMain(std::string_view unoptimized_path,
+                      std::string_view optimized_path,
+                      std::string_view timing_str) {
   fuzzer::SampleSummariesProto summaries;
   fuzzer::SampleSummaryProto* summary_proto = summaries.add_samples();
 
@@ -108,7 +123,7 @@ absl::Status RealMain(absl::string_view unoptimized_path,
     SummarizePackage(package.get(), summary_proto->mutable_optimized_nodes());
   }
 
-  XLS_QCHECK(!absl::GetFlag(FLAGS_summary_file).empty())
+  QCHECK(!absl::GetFlag(FLAGS_summary_file).empty())
       << "Must specify --summary_file.";
   // Since SampleSummariesProto contains just a repeated field, appending a new
   // such proto to a file that could potentially contain a SampleSummariesProto
@@ -126,15 +141,14 @@ absl::Status RealMain(absl::string_view unoptimized_path,
 }  // namespace xls
 
 int main(int argc, char** argv) {
-  std::vector<absl::string_view> positional_arguments =
+  std::vector<std::string_view> positional_arguments =
       xls::InitXls(kUsage, argc, argv);
 
   if (!positional_arguments.empty()) {
-    XLS_LOG(QFATAL) << "Usage:\n" << kUsage;
+    LOG(QFATAL) << "Usage:\n" << kUsage;
   }
 
-  XLS_QCHECK_OK(xls::RealMain(absl::GetFlag(FLAGS_unoptimized_ir),
-                              absl::GetFlag(FLAGS_optimized_ir),
-                              absl::GetFlag(FLAGS_timing)));
-  return EXIT_SUCCESS;
+  return xls::ExitStatus(xls::RealMain(absl::GetFlag(FLAGS_unoptimized_ir),
+                                       absl::GetFlag(FLAGS_optimized_ir),
+                                       absl::GetFlag(FLAGS_timing)));
 }

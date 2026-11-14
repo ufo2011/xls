@@ -15,7 +15,10 @@
 #ifndef XLS_NOC_CONFIG_LINK_CONFIG_PROTO_BUILDER_H_
 #define XLS_NOC_CONFIG_LINK_CONFIG_PROTO_BUILDER_H_
 
-#include "xls/common/logging/logging.h"
+#include <cstdint>
+#include <string_view>
+
+#include "absl/log/die_if_null.h"
 #include "xls/noc/config/network_config.pb.h"
 
 namespace xls::noc {
@@ -25,16 +28,16 @@ class LinkConfigProtoBuilder {
  public:
   // proto cannot be nullptr.
   explicit LinkConfigProtoBuilder(LinkConfigProto* proto)
-      : proto_(XLS_DIE_IF_NULL(proto)) {}
+      : proto_(ABSL_DIE_IF_NULL(proto)) {}
 
   // Adds the name of the link.
-  LinkConfigProtoBuilder& WithName(absl::string_view name);
+  LinkConfigProtoBuilder& WithName(std::string_view name);
 
   // Adds the source port name configuration to the link.
-  LinkConfigProtoBuilder& WithSourcePort(absl::string_view port_name);
+  LinkConfigProtoBuilder& WithSourcePort(std::string_view port_name);
 
   // Adds the sink port name configuration to the link.
-  LinkConfigProtoBuilder& WithSinkPort(absl::string_view port_name);
+  LinkConfigProtoBuilder& WithSinkPort(std::string_view port_name);
 
   // Adds the phit bit width configuration to the link.
   LinkConfigProtoBuilder& WithPhitBitWidth(int64_t phit_bit_width);

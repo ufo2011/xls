@@ -15,7 +15,8 @@
 # Description:
 #   Z3 is a theorem prover from Microsoft Research.
 
-load("@com_google_xls//dependency_support/z3:build_defs.bzl", "gen_srcs", "GEN_SRCS", "GEN_HDRS")
+load("@com_google_xls//dependency_support/z3:build_defs.bzl", "GEN_HDRS", "GEN_SRCS", "gen_srcs")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 
 licenses(["notice"])
 
@@ -30,6 +31,13 @@ package(
 )
 
 gen_srcs()
+
+# Z3 declares its 4-argument `allocate` under `Z3DEBUG` but gates the `alloc()`
+# macro that calls it on `_DEBUG`, which our toolchain sets in `-c dbg` builds.
+config_setting(
+    name = "dbg_build",
+    values = {"compilation_mode": "dbg"},
+)
 
 common_copts = [
     "-fexceptions",
@@ -48,7 +56,10 @@ common_copts = [
     "-D_EXTERNAL_RELEASE",
     "-D_LINUX_",
     "-D_NO_OMP_",
-]
+] + select({
+    ":dbg_build": ["-DZ3DEBUG"],
+    "//conditions:default": [],
+})
 
 common_linkopts = [
     "-lpthread",
@@ -56,72 +67,84 @@ common_linkopts = [
 
 cc_library(
     name = "z3lib",
-    srcs = GEN_SRCS + glob([
-        "src/ackermannization/*.cpp",
-        "src/api/*.cpp",
-        "src/ast/*.cpp",
-        "src/ast/fpa/*.cpp",
-        "src/ast/macros/*.cpp",
-        "src/ast/normal_forms/*.cpp",
-        "src/ast/pattern/*.cpp",
-        "src/ast/proofs/*.cpp",
-        "src/ast/rewriter/*.cpp",
-        "src/ast/rewriter/bit_blaster/*.cpp",
-        "src/ast/substitution/*.cpp",
-        "src/cmd_context/*.cpp",
-        "src/cmd_context/extra_cmds/*.cpp",
-        "src/math/automata/*.cpp",
-        "src/math/dd/*.cpp",
-        "src/math/euclid/*.cpp",
-        "src/math/grobner/*.cpp",
-        "src/math/hilbert/*.cpp",
-        "src/math/interval/*.cpp",
-        "src/math/lp/*.cpp",
-        "src/math/polynomial/*.cpp",
-        "src/math/realclosure/*.cpp",
-        "src/math/simplex/*.cpp",
-        "src/math/subpaving/*.cpp",
-        "src/math/subpaving/tactic/*.cpp",
-        "src/model/*.cpp",
-        "src/muz/base/*.cpp",
-        "src/muz/bmc/*.cpp",
-        "src/muz/clp/*.cpp",
-        "src/muz/dataflow/*.cpp",
-        "src/muz/ddnf/*.cpp",
-        "src/muz/fp/*.cpp",
-        "src/muz/rel/*.cpp",
-        "src/muz/spacer/*.cpp",
-        "src/muz/tab/*.cpp",
-        "src/muz/transforms/*.cpp",
-        "src/nlsat/*.cpp",
-        "src/nlsat/tactic/*.cpp",
-        "src/opt/*.cpp",
-        "src/parsers/smt2/*.cpp",
-        "src/parsers/util/*.cpp",
-        "src/qe/*.cpp",
-        "src/sat/*.cpp",
-        "src/sat/sat_solver/*.cpp",
-        "src/sat/tactic/*.cpp",
-        "src/smt/*.cpp",
-        "src/smt/params/*.cpp",
-        "src/smt/proto_model/*.cpp",
-        "src/smt/tactic/*.cpp",
-        "src/solver/*.cpp",
-        "src/tactic/*.cpp",
-        "src/tactic/aig/*.cpp",
-        "src/tactic/arith/*.cpp",
-        "src/tactic/bv/*.cpp",
-        "src/tactic/core/*.cpp",
-        "src/tactic/fd_solver/*.cpp",
-        "src/tactic/fpa/*.cpp",
-        "src/tactic/portfolio/*.cpp",
-        "src/tactic/sls/*.cpp",
-        "src/tactic/smtlogics/*.cpp",
-        "src/tactic/ufbv/*.cpp",
-        "src/test/fuzzing/*.cpp",
-        "src/util/*.cpp",
-        "src/util/lp/*.cpp",
-    ]),
+    srcs = GEN_SRCS + glob(
+        [
+            "src/ackermannization/*.cpp",
+            "src/api/*.cpp",
+            "src/ast/*.cpp",
+            "src/ast/converters/*.cpp",
+            "src/ast/euf/*.cpp",
+            "src/ast/fpa/*.cpp",
+            "src/ast/macros/*.cpp",
+            "src/ast/normal_forms/*.cpp",
+            "src/ast/pattern/*.cpp",
+            "src/ast/proofs/*.cpp",
+            "src/ast/rewriter/*.cpp",
+            "src/ast/rewriter/bit_blaster/*.cpp",
+            "src/ast/simplifiers/*.cpp",
+            "src/ast/sls/*.cpp",
+            "src/ast/substitution/*.cpp",
+            "src/cmd_context/*.cpp",
+            "src/cmd_context/extra_cmds/*.cpp",
+            "src/math/automata/*.cpp",
+            "src/math/dd/*.cpp",
+            "src/math/euclid/*.cpp",
+            "src/math/grobner/*.cpp",
+            "src/math/hilbert/*.cpp",
+            "src/math/interval/*.cpp",
+            "src/math/lp/*.cpp",
+            "src/math/polynomial/*.cpp",
+            "src/math/realclosure/*.cpp",
+            "src/math/simplex/*.cpp",
+            "src/math/subpaving/*.cpp",
+            "src/math/subpaving/tactic/*.cpp",
+            "src/model/*.cpp",
+            "src/muz/base/*.cpp",
+            "src/muz/bmc/*.cpp",
+            "src/muz/clp/*.cpp",
+            "src/muz/dataflow/*.cpp",
+            "src/muz/ddnf/*.cpp",
+            "src/muz/fp/*.cpp",
+            "src/muz/rel/*.cpp",
+            "src/muz/spacer/*.cpp",
+            "src/muz/tab/*.cpp",
+            "src/muz/transforms/*.cpp",
+            "src/nlsat/*.cpp",
+            "src/nlsat/tactic/*.cpp",
+            "src/opt/*.cpp",
+            "src/params/*.cpp",
+            "src/parsers/smt2/*.cpp",
+            "src/parsers/util/*.cpp",
+            "src/qe/*.cpp",
+            "src/qe/lite/*.cpp",
+            "src/qe/mbp/*.cpp",
+            "src/sat/*.cpp",
+            "src/sat/sat_solver/*.cpp",
+            "src/sat/smt/*.cpp",
+            "src/sat/tactic/*.cpp",
+            "src/smt/*.cpp",
+            "src/smt/params/*.cpp",
+            "src/smt/proto_model/*.cpp",
+            "src/smt/tactic/*.cpp",
+            "src/solver/*.cpp",
+            "src/solver/assertions/*.cpp",
+            "src/tactic/*.cpp",
+            "src/tactic/aig/*.cpp",
+            "src/tactic/arith/*.cpp",
+            "src/tactic/bv/*.cpp",
+            "src/tactic/core/*.cpp",
+            "src/tactic/fd_solver/*.cpp",
+            "src/tactic/fpa/*.cpp",
+            "src/tactic/portfolio/*.cpp",
+            "src/tactic/sls/*.cpp",
+            "src/tactic/smtlogics/*.cpp",
+            "src/tactic/ufbv/*.cpp",
+            "src/test/fuzzing/*.cpp",
+            "src/util/*.cpp",
+            "src/util/lp/*.cpp",
+        ],
+        exclude = GEN_SRCS,
+    ),
     hdrs = GEN_HDRS + glob([
         "src/ackermannization/*.h",
         "src/ackermannization/*.hpp",
@@ -129,6 +152,10 @@ cc_library(
         "src/api/*.hpp",
         "src/ast/*.h",
         "src/ast/*.hpp",
+        "src/ast/converters/*.h",
+        "src/ast/converters/*.hpp",
+        "src/ast/euf/*.h",
+        "src/ast/euf/*.hpp",
         "src/ast/fpa/*.h",
         "src/ast/fpa/*.hpp",
         "src/ast/macros/*.h",
@@ -143,6 +170,10 @@ cc_library(
         "src/ast/rewriter/*.hpp",
         "src/ast/rewriter/bit_blaster/*.h",
         "src/ast/rewriter/bit_blaster/*.hpp",
+        "src/ast/simplifiers/*.h",
+        "src/ast/simplifiers/*.hpp",
+        "src/ast/sls/*.h",
+        "src/ast/sls/*.hpp",
         "src/ast/substitution/*.h",
         "src/ast/substitution/*.hpp",
         "src/cmd_context/*.h",
@@ -201,16 +232,24 @@ cc_library(
         "src/nlsat/tactic/*.hpp",
         "src/opt/*.h",
         "src/opt/*.hpp",
+        "src/params/*.h",
+        "src/params/*.hpp",
         "src/parsers/smt2/*.h",
         "src/parsers/smt2/*.hpp",
         "src/parsers/util/*.h",
         "src/parsers/util/*.hpp",
         "src/qe/*.h",
         "src/qe/*.hpp",
+        "src/qe/lite/*.h",
+        "src/qe/lite/*.hpp",
+        "src/qe/mbp/*.h",
+        "src/qe/mbp/*.hpp",
         "src/sat/*.h",
         "src/sat/*.hpp",
         "src/sat/sat_solver/*.h",
         "src/sat/sat_solver/*.hpp",
+        "src/sat/smt/*.h",
+        "src/sat/smt/*.hpp",
         "src/sat/tactic/*.h",
         "src/sat/tactic/*.hpp",
         "src/smt/*.h",
@@ -220,6 +259,8 @@ cc_library(
         "src/smt/tactic/*.hpp",
         "src/solver/*.h",
         "src/solver/*.hpp",
+        "src/solver/assertions/*.h",
+        "src/solver/assertions/*.hpp",
         "src/tactic/*.h",
         "src/tactic/*.hpp",
         "src/tactic/aig/*.h",
@@ -250,10 +291,11 @@ cc_library(
         "src/util/lp/*.hpp",
     ]),
     copts = common_copts,
+    include_prefix = "z3",
     #features = ["-use_header_modules"],  # Incompatible with -fexceptions.
     includes = [
-        "src/util",
         "src/",
+        "src/util",
     ],
 )
 
@@ -265,8 +307,12 @@ cc_library(
             "src/api/c++/z3++.h",
         ],
     ),
-    deps = [":z3lib"],
+    include_prefix = "z3",
+    includes = [
+        "src/api",
+    ],
     visibility = ["//visibility:public"],
+    deps = [":z3lib"],
 )
 
 cc_binary(
@@ -283,9 +329,9 @@ cc_binary(
         ],
     ),
     copts = common_copts,
-    linkopts = common_linkopts,
     features = ["-use_header_modules"],  # Incompatible with -fexceptions.
     includes = ["src/shell"],
+    linkopts = common_linkopts,
     visibility = ["//visibility:public"],
     deps = [
         ":z3lib",
@@ -306,9 +352,9 @@ cc_binary(
         ],
     ),
     copts = common_copts,
-    linkopts = common_linkopts,
     features = ["-use_header_modules"],  # Incompatible with -fexceptions.
     includes = ["src/test"],
+    linkopts = common_linkopts,
     visibility = ["//visibility:public"],
     deps = [
         ":z3lib",
@@ -329,9 +375,9 @@ cc_binary(
         "-Wno-sometimes-uninitialized",
         "-Wno-unused-variable",
     ],
-    linkopts = common_linkopts,
     features = ["-use_header_modules"],  # Incompatible with -fexceptions.
     includes = ["examples/c++"],
+    linkopts = common_linkopts,
     deps = [":api"],
 )
 
@@ -349,9 +395,9 @@ cc_binary(
         "-Wno-sometimes-uninitialized",
         "-Wno-unused-variable",
     ],
-    linkopts = common_linkopts,
     features = ["-use_header_modules"],  # Incompatible with -fexceptions.
     includes = ["examples/c"],
+    linkopts = common_linkopts,
     deps = [":api"],
 )
 
@@ -369,9 +415,9 @@ cc_binary(
         "-Wno-sometimes-uninitialized",
         "-Wno-unused-variable",
     ],
-    linkopts = common_linkopts,
     features = ["-use_header_modules"],  # Incompatible with -fexceptions.
     includes = ["examples/maxsat"],
+    linkopts = common_linkopts,
     deps = [":api"],
 )
 
@@ -390,6 +436,7 @@ cc_library(
     ),
     copts = ["-Dmain=z3_main"] + common_copts,
     features = ["-use_header_modules"],  # Incompatible with -fexceptions.
+    include_prefix = "z3",
     deps = [
         ":z3lib",
     ],

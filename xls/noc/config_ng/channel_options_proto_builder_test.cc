@@ -14,16 +14,18 @@
 
 #include "xls/noc/config_ng/channel_options_proto_builder.h"
 
-#include "gmock/gmock.h"
+#include <string_view>
+
 #include "gtest/gtest.h"
+#include "xls/noc/config_ng/topology_options_network_config_builder.pb.h"
 
 namespace xls::noc {
 namespace {
 
 // Test field values of the builder when constructed using a proto ptr.
 TEST(ChannelOptionsProtoBuilderTest, FieldValuesForPtr) {
-  constexpr absl::string_view kSource = "Source";
-  constexpr absl::string_view kSink = "Sink";
+  constexpr std::string_view kSource = "Source";
+  constexpr std::string_view kSink = "Sink";
   ChannelOptionsProto proto;
   ChannelOptionsProtoBuilder builder(&proto);
   builder.SetSourceNodeName(kSource);
@@ -35,8 +37,8 @@ TEST(ChannelOptionsProtoBuilderTest, FieldValuesForPtr) {
 // Test field values of the builder when constructed using a proto ptr and a
 // default proto.
 TEST(ChannelOptionsProtoBuilderTest, FieldValuesForPtrWithDefault) {
-  constexpr absl::string_view kSource = "Source";
-  constexpr absl::string_view kSink = "Sink";
+  constexpr std::string_view kSource = "Source";
+  constexpr std::string_view kSink = "Sink";
   ChannelOptionsProto default_proto;
   ChannelOptionsProtoBuilder builder_default(&default_proto);
   builder_default.SetSourceNodeName(kSource);
@@ -49,8 +51,8 @@ TEST(ChannelOptionsProtoBuilderTest, FieldValuesForPtrWithDefault) {
 
 // Test field values of the builder when copied from another builder.
 TEST(ChannelOptionsProtoBuilderTest, FieldValuesForCopyFrom) {
-  constexpr absl::string_view kSource = "Source";
-  constexpr absl::string_view kSink = "Sink";
+  constexpr std::string_view kSource = "Source";
+  constexpr std::string_view kSink = "Sink";
   ChannelOptionsProto default_proto;
   ChannelOptionsProtoBuilder builder_default(&default_proto);
   builder_default.SetSourceNodeName(kSource);

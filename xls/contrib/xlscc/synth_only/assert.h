@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef __ASSERT_H__
-#define __ASSERT_H__
+#ifndef __XLS_ASSERT_H__
+#define __XLS_ASSERT_H__
 #define assert(...)
-#endif  //__ASSERT_H__
+#endif  // __XLS_ASSERT_H__

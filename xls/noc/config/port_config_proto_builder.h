@@ -15,7 +15,9 @@
 #ifndef XLS_NOC_CONFIG_PORT_CONFIG_PROTO_BUILDER_H_
 #define XLS_NOC_CONFIG_PORT_CONFIG_PROTO_BUILDER_H_
 
-#include "xls/common/logging/logging.h"
+#include <string_view>
+
+#include "absl/log/die_if_null.h"
 #include "xls/noc/config/network_config.pb.h"
 
 namespace xls::noc {
@@ -25,10 +27,10 @@ class PortConfigProtoBuilder {
  public:
   // proto cannot be nullptr.
   explicit PortConfigProtoBuilder(PortConfigProto* proto)
-      : proto_(XLS_DIE_IF_NULL(proto)) {}
+      : proto_(ABSL_DIE_IF_NULL(proto)) {}
 
   // Adds the name of the port.
-  PortConfigProtoBuilder& WithName(absl::string_view name);
+  PortConfigProtoBuilder& WithName(std::string_view name);
 
   // Sets the direction type of the port as input.
   PortConfigProtoBuilder& AsInputDirection();
@@ -38,7 +40,7 @@ class PortConfigProtoBuilder {
 
   // Adds the virtual channel configuration to the port.
   PortConfigProtoBuilder& WithVirtualChannel(
-      absl::string_view virtual_channel_name);
+      std::string_view virtual_channel_name);
 
  private:
   PortConfigProto* proto_;

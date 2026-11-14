@@ -15,8 +15,12 @@
 #ifndef XLS_NOC_SIMULATION_NETWORK_GRAPH_BUILDER_H_
 #define XLS_NOC_SIMULATION_NETWORK_GRAPH_BUILDER_H_
 
+#include <string_view>
+
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "xls/noc/config/network_config.pb.h"
+#include "xls/noc/simulation/common.h"
 #include "xls/noc/simulation/network_graph.h"
 #include "xls/noc/simulation/parameters.h"
 
@@ -44,11 +48,11 @@ absl::Status BuildNetworkGraphFromProto(const NetworkConfigProto& proto,
 
 // Retrieves NetworkComponentId, given name as specified in proto.
 absl::StatusOr<NetworkComponentId> FindNetworkComponentByName(
-    absl::string_view name, NetworkManager& network_mgr,
+    std::string_view name, NetworkManager& network_mgr,
     NocParameters& noc_parameters);
 
 // Retrieves PortId, given name as specified in proto.
-absl::StatusOr<PortId> FindPortByName(absl::string_view name,
+absl::StatusOr<PortId> FindPortByName(std::string_view name,
                                       NetworkManager& network_mgr,
                                       NocParameters& noc_parameters);
 

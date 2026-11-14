@@ -14,17 +14,37 @@
 
 #include "xls/scheduling/extract_stage.h"
 
+#include <cstdint>
+#include <string>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_format.h"
 #include "xls/common/status/matchers.h"
+#include "xls/ir/bits.h"
+#include "xls/ir/channel.h"
+#include "xls/ir/channel_ops.h"
+#include "xls/ir/function.h"
+#include "xls/ir/function_builder.h"
 #include "xls/ir/ir_matcher.h"
 #include "xls/ir/ir_parser.h"
 #include "xls/ir/ir_test_base.h"
+#include "xls/ir/node.h"
+#include "xls/ir/nodes.h"
+#include "xls/ir/op.h"
+#include "xls/ir/proc.h"
+#include "xls/ir/type.h"
+#include "xls/ir/value.h"
+#include "xls/scheduling/pipeline_schedule.h"
+#include "xls/scheduling/run_pipeline_schedule.h"
+#include "xls/scheduling/scheduling_options.h"
 
 namespace xls {
 namespace {
 
 namespace m = xls::op_matchers;
+using ::testing::AllOf;
 
 class ExtractStageTest : public IrTestBase {};
 
@@ -51,7 +71,11 @@ fn main(i0: bits[3], i1: bits[3]) -> bits[3] {
   cycle_map[FindNode("or.3", function)] = 2;
   cycle_map[FindNode("and.4", function)] = 3;
 
-  PipelineSchedule schedule(function, cycle_map, cycle_map.size());
+  XLS_ASSERT_OK_AND_ASSIGN(
+      PipelineSchedule schedule,
+      PipelineSchedule::Create(
+          function, cycle_map,
+          {.length = static_cast<int64_t>(cycle_map.size())}));
   for (int i = 0; i < 4; i++) {
     XLS_ASSERT_OK_AND_ASSIGN(Function * stage_fn,
                              ExtractStage(function, schedule, i));
@@ -66,12 +90,10 @@ fn main(i0: bits[3], i1: bits[3]) -> bits[3] {
             m::Tuple(m::Param("i1"), m::Add(m::Param("i0"), m::Param("i1"))));
         break;
       case 1:
-        EXPECT_THAT(stage_fn->return_value(),
-                    m::Tuple(m::Sub(m::Param(), m::Param())));
+        EXPECT_THAT(stage_fn->return_value(), m::Sub(m::Param(), m::Param()));
         break;
       case 2:
-        EXPECT_THAT(stage_fn->return_value(),
-                    m::Tuple(m::Or(m::Param(), m::Param())));
+        EXPECT_THAT(stage_fn->return_value(), m::Or(m::Param(), m::Param()));
         break;
       case 3:
         EXPECT_THAT(stage_fn->return_value(), m::And(m::Param(), m::Param()));
@@ -119,7 +141,11 @@ fn main(i0: bits[3], i1: bits[1], i2: bits[8], i3: bits[23]) -> (bits[1], bits[8
     cycle_map[node] = stage;
   }
 
-  PipelineSchedule schedule(function, cycle_map, cycle_map.size());
+  XLS_ASSERT_OK_AND_ASSIGN(
+      PipelineSchedule schedule,
+      PipelineSchedule::Create(
+          function, cycle_map,
+          {.length = static_cast<int64_t>(cycle_map.size())}));
   for (int stage = 0; stage < 2; stage++) {
     XLS_ASSERT_OK_AND_ASSIGN(Function * stage_fn,
                              ExtractStage(function, schedule, stage));
@@ -136,6 +162,65 @@ fn main(i0: bits[3], i1: bits[1], i2: bits[8], i3: bits[23]) -> (bits[1], bits[8
     EXPECT_THAT(stage_fn->return_value(),
                 AllOf(m::Tuple(), m::Type("(bits[1], bits[8], bits[23])")));
   }
+}
+
+TEST_F(ExtractStageTest, ProcSchedule) {
+  Package p("p");
+  Type* u16 = p.GetBitsType(16);
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Channel * in_ch,
+      p.CreateStreamingChannel("in", ChannelOps::kReceiveOnly, u16));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Channel * out_ch,
+      p.CreateStreamingChannel("out", ChannelOps::kSendOnly, u16));
+  TokenlessProcBuilder pb("the_proc", "tkn", &p);
+  BValue st = pb.ReadStateElement("st", Value(UBits(42, 16)));
+  BValue rcv = pb.Receive(in_ch);
+  BValue out = pb.Negate(pb.Not(pb.Negate(rcv)));
+  pb.Send(out_ch, out);
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build({st}));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      PipelineSchedule schedule,
+      RunPipelineSchedule(proc, TestDelayEstimator(),
+                          SchedulingOptions().pipeline_stages(3)));
+  for (int stage = 0; stage < schedule.length(); stage++) {
+    XLS_ASSERT_OK_AND_ASSIGN(Function * stage_fn,
+                             ExtractStage(proc, schedule, stage));
+    EXPECT_EQ(stage_fn->name(),
+              absl::StrFormat("%s_stage_%d", proc->name(), stage));
+    std::string expected;
+    bool found = false;
+    switch (stage) {
+      case 0:
+        found = false;
+        for (const Node* node : stage_fn->nodes()) {
+          if (absl::StartsWith(node->GetName(), "receive")) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          FAIL() << "Receive not found";
+        }
+        break;
+      case 1:
+        break;
+      case 2:
+        found = false;
+        for (const Node* node : stage_fn->nodes()) {
+          if (absl::StartsWith(node->GetName(), "send")) {
+            found = true;
+          }
+        }
+        if (!found) {
+          FAIL() << "Send not found";
+        }
+        break;
+      default:
+        FAIL() << "Should never get here!";
+    }
+  }
+  EXPECT_EQ(schedule.length(), 3);
 }
 
 }  // namespace

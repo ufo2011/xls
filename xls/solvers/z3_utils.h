@@ -16,20 +16,97 @@
 #ifndef XLS_SOLVERS_Z3_UTILS_H_
 #define XLS_SOLVERS_Z3_UTILS_H_
 
+#include <cstdint>
+#include <optional>
 #include <string>
+#include <vector>
 
-#include "absl/strings/string_view.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/time/time.h"
+#include "xls/common/source_location.h"
+#include "xls/ir/bits.h"
+#include "xls/ir/interval_set.h"
+#include "xls/ir/ternary.h"
 #include "xls/ir/type.h"
-#include "../z3/src/api/z3.h"
+#include "xls/ir/value.h"
+#include "z3/src/api/z3.h"  // IWYU pragma: keep
+#include "z3/src/api/z3_api.h"
 
 namespace xls {
 namespace solvers {
 namespace z3 {
 
+// Converts a Bits value to a Z3_ast literal.
+Z3_ast BitsToZ3(Z3_context ctx, const Bits& value);
+
+// Converts a TernaryVector of known/unknown bits into a Z3 boolean constraint
+// asserting that the target Z3_ast matches the known bits.
+absl::StatusOr<Z3_ast> TernaryToZ3Constraint(Z3_context ctx,
+                                             Z3_ast target_value,
+                                             TernarySpan ternary);
+
+// Converts an IntervalSet of valid bounded ranges into a Z3 boolean constraint
+// asserting that the target Z3_ast falls within at least one interval.
+absl::StatusOr<Z3_ast> IntervalSetToZ3Constraint(Z3_context ctx,
+                                                 Z3_ast target_value,
+                                                 const IntervalSet& intervals);
+
+// Helper class for establishing an error callback / turning it into a status
+// via RAII.
+class ScopedErrorHandler {
+ public:
+  explicit ScopedErrorHandler(
+      Z3_context ctx,
+      xabsl::SourceLocation source_location = xabsl::SourceLocation::current());
+
+  ~ScopedErrorHandler();
+
+  absl::Status status() const { return status_; }
+
+  template <typename Res>
+  absl::StatusOr<Res> StatusOr(Res res) const {
+    if (status_.ok()) {
+      return res;
+    }
+    return status_;
+  }
+
+ private:
+  static void Handler(Z3_context c, Z3_error_code e);
+
+  Z3_context ctx_;
+  const xabsl::SourceLocation source_location_;
+  ScopedErrorHandler* prev_handler_;
+  absl::Status status_;
+};
+
 // Creates a Z3 solver that will use the specified number of threads.
 // This is a refcounted object and will need to be unref'ed once no longer
 // needed.
 Z3_solver CreateSolver(Z3_context ctx, int num_threads);
+
+// Manages timeout & rlimit settings for a Z3 solver using RAII.
+class ScopedSolverParams {
+ public:
+  ScopedSolverParams(Z3_context ctx, Z3_solver solver,
+                     std::optional<absl::Duration> timeout,
+                     std::optional<int64_t> rlimit);
+  ~ScopedSolverParams();
+
+  inline static ScopedSolverParams WithTimeout(
+      Z3_context ctx, Z3_solver solver, std::optional<absl::Duration> timeout) {
+    return ScopedSolverParams(ctx, solver, timeout, /*rlimit=*/std::nullopt);
+  }
+  inline static ScopedSolverParams WithRlimit(Z3_context ctx, Z3_solver solver,
+                                              std::optional<int64_t> rlimit) {
+    return ScopedSolverParams(ctx, solver, /*timeout=*/std::nullopt, rlimit);
+  }
+
+ private:
+  Z3_context ctx_;
+  Z3_params params_;
+};
 
 // Printing / output functions ------------------------------------------------
 // Prints the solver's result, and, if satisfiable, prints a model demonstrating
@@ -46,6 +123,11 @@ std::string SolverResultToString(Z3_context ctx, Z3_solver solver,
 std::string QueryNode(Z3_context ctx, Z3_model model, Z3_ast node,
                       bool hexify = true);
 
+// Returns the Value corresponding to the given node interpreted under the given
+// model as the given type (assuming the type is compatible).
+absl::StatusOr<Value> NodeValue(Z3_context ctx, Z3_model model, Z3_ast node,
+                                Type* type);
+
 // Converts Z3 boolean (#b[01]+) output values to hex. Any range matching the
 // pattern "#b[01]+" will be converted to "#x[0-9a-f]+", where the values are
 // converted accordingly.
@@ -59,6 +141,13 @@ std::string BitVectorToString(Z3_context ctx,
 
 // Converts a XLS IR Type to the corresponding Z3 sort.
 Z3_sort TypeToSort(Z3_context ctx, const Type& type);
+
+// Common Z3 unsigned multiplication (between DSLX and IR level).
+Z3_ast DoUnsignedMul(Z3_context ctx, Z3_ast lhs, Z3_ast rhs, int result_size);
+
+Z3_ast BitVectorToBoolean(Z3_context c, Z3_ast bit_vector);
+
+Z3_ast BooleanToBitVector(Z3_context c, Z3_ast boolean);
 
 }  // namespace z3
 }  // namespace solvers

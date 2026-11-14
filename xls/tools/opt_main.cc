@@ -15,76 +15,284 @@
 // Takes in an IR file and produces an IR file that has been run through the
 // standard optimization pipeline.
 
+#include <cstdint>
+#include <filesystem>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include "absl/cleanup/cleanup.h"
+#include "absl/flags/flag.h"
+#include "absl/log/check.h"
+#include "absl/log/globals.h"
+#include "absl/log/log.h"
+#include "absl/log/log_entry.h"
+#include "absl/log/log_sink.h"
+#include "absl/log/log_sink_registry.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_format.h"
+#include "absl/types/optional_ref.h"
+#include "google/protobuf/text_format.h"
+#include "xls/common/exit_status.h"
 #include "xls/common/file/filesystem.h"
 #include "xls/common/init_xls.h"
-#include "xls/common/logging/logging.h"
+#include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
-#include "xls/ir/ir_parser.h"
+#include "xls/dev_tools/dev_passes/pass_overrides.h"
+#include "xls/dev_tools/tool_timeout.h"
 #include "xls/ir/package.h"
-#include "xls/passes/passes.h"
-#include "xls/passes/standard_pipeline.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/optimization_pass_pipeline.h"
+#include "xls/passes/optimization_pass_registry.h"
+#include "xls/passes/pass_base.h"
+#include "xls/passes/pass_metrics.pb.h"
+#include "xls/tools/opt.h"
+#include "xls/tools/opt_flags.h"
+#include "xls/tools/opt_flags.pb.h"
 
-ABSL_FLAG(std::string, entry, "", "Entry function name to optimize.");
-ABSL_FLAG(std::string, ir_dump_path, "",
-          "Dump all intermediate IR files to the given directory");
-ABSL_FLAG(std::vector<std::string>, run_only_passes, {},
-          "If specified, only passes in this comma-separated list of (short) "
-          "pass names are be run.");
-ABSL_FLAG(std::vector<std::string>, skip_passes, {},
-          "If specified, passes in this comma-separated list of (short) "
-          "pass names are skipped. If both --run_only_passes and --skip_passes "
-          "are specified only passes which are present in --run_only_passes "
-          "and not present in --skip_passes will be run.");
-ABSL_FLAG(int64_t, opt_level, xls::kMaxOptLevel,
-          absl::StrFormat("Optimization level. Ranges from 1 to %d.",
-                          xls::kMaxOptLevel));
+static constexpr std::string_view kUsage = R"(
+Takes in an IR file and produces an IR file that has been run through the
+standard optimization pipeline.
 
-namespace xls {
+Successfully optimized IR is printed to stdout.
+
+Expected invocation:
+  opt_main <IR file>
+where:
+  - <IR file> is the path to the input IR file. '-' denotes stdin as input.
+
+Example invocation:
+  opt_main path/to/file.ir
+)";
+
+ABSL_FLAG(std::string, output_path, "-",
+          "Output path for the optimized IR file; '-' denotes stdout.");
+ABSL_FLAG(std::optional<std::string>, alsologto, std::nullopt,
+          "Path to write logs to, in addition to stderr.");
+
+ABSL_FLAG(bool, list_passes, false,
+          "If passed list the names of all passes and exit.");
+
+// Flags for injecting additional passes into the pipeline for
+// bisect/investigation.
+ABSL_FLAG(std::optional<std::string>, bisect_inject_passes, std::nullopt,
+          "If passed, inject these passes into the pipeline immediately before "
+          "the --bisect_inject_passes_count pass runs. This flag takes options "
+          "in the same format as the --passes flag. It can use compound passes "
+          "defined in the --pipeline_proto flag.");
+ABSL_FLAG(std::optional<int64_t>, bisect_inject_passes_count, std::nullopt,
+          "If passed, inject passes from --bisect_inject_passes after this "
+          "many passes have run.");
+
+namespace xls::tools {
 namespace {
 
-absl::Status RealMain(absl::string_view input_path) {
+class FileStderrLogSink final : public absl::LogSink {
+ public:
+  explicit FileStderrLogSink(std::filesystem::path path)
+      : path_(std::move(path)) {
+    CHECK_OK(SetFileContents(path_, ""));
+  }
+
+  ~FileStderrLogSink() override = default;
+
+  void Send(const absl::LogEntry& entry) override {
+    if (entry.log_severity() < absl::StderrThreshold()) {
+      return;
+    }
+
+    if (!entry.stacktrace().empty()) {
+      CHECK_OK(AppendStringToFile(path_, entry.stacktrace()));
+    } else {
+      CHECK_OK(AppendStringToFile(
+          path_, entry.text_message_with_prefix_and_newline()));
+    }
+  }
+
+ private:
+  const std::filesystem::path path_;
+};
+
+template <typename T>
+  requires(std::is_integral_v<T>)
+std::optional<T> NegativeIsNullopt(std::optional<T> v) {
+  if (v && *v < 0) {
+    return std::nullopt;
+  }
+  return v;
+}
+
+class BisectInjectPasses : public OptimizationPassOverrides {
+ public:
+  explicit BisectInjectPasses(std::string_view passes, int64_t after)
+      : passes_(passes), after_(after) {}
+
+  class InjectPass : public OptimizationWrapperPass {
+   public:
+    explicit InjectPass(std::unique_ptr<OptimizationPass>&& base,
+                        BisectInjectPasses* overrides,
+                        const OptimizationPassRegistry& base_registry)
+        : OptimizationWrapperPass(std::move(base)),
+          overrides_(overrides),
+          base_registry_(base_registry) {}
+
+   protected:
+    absl::StatusOr<bool> RunInternal(
+        Package* ir, const OptimizationPassOptions& options,
+        PassResults* results, OptimizationContext& context) const override {
+      XLS_ASSIGN_OR_RETURN(
+          bool force, overrides_->MaybeRunOverride(base_registry_, ir, options,
+                                                   results, context));
+      XLS_ASSIGN_OR_RETURN(bool normal, OptimizationWrapperPass::RunInternal(
+                                            ir, options, results, context));
+      return force || normal;
+    }
+
+   private:
+    BisectInjectPasses* overrides_;
+    const OptimizationPassRegistry& base_registry_;
+  };
+
+  absl::StatusOr<std::unique_ptr<OptimizationPass>> OverridePass(
+      const OptimizationPassGenerator& generator,
+      const OptimizationPassRegistry& base_registry) override {
+    XLS_ASSIGN_OR_RETURN(std::unique_ptr<OptimizationPass> real,
+                         generator.Generate());
+    return std::make_unique<InjectPass>(std::move(real), this, base_registry);
+  }
+
+  absl::StatusOr<bool> MaybeRunOverride(
+      const OptimizationPassRegistry& base_registry, Package* ir,
+      const OptimizationPassOptions& options, PassResults* results,
+      OptimizationContext& context) {
+    // NB We might miss the exact goal if we are in a fixedpoint and the bisect
+    // point is at the end of the loop.
+    if (done_ || results->current_invocation().pass_number() < after_) {
+      return false;
+    }
+    // Only run once.
+    done_ = true;
+    XLS_ASSIGN_OR_RETURN(
+        std::unique_ptr<OptimizationPass> injected,
+        OptimizationPassPipelineGenerator(/*short_name=*/"bisect_inject_passes",
+                                          /*long_name=*/"bisect_inject_passes",
+                                          base_registry)
+            .GeneratePipeline(passes_),
+        _ << "Unable to generate injected pipeline of passes: " << passes_);
+    XLS_ASSIGN_OR_RETURN(bool changed,
+                         injected->Run(ir, options, results, context));
+    return changed;
+  }
+
+ private:
+  std::string passes_;
+  int64_t after_;
+  mutable bool done_ = false;
+};
+
+absl::Status RealMain(std::string_view input_path) {
+  auto timeout = StartTimeoutTimer();
   if (input_path == "-") {
     input_path = "/dev/stdin";
   }
-  XLS_ASSIGN_OR_RETURN(std::string contents, GetFileContents(input_path));
-  std::unique_ptr<Package> package;
-  if (absl::GetFlag(FLAGS_entry).empty()) {
-    XLS_ASSIGN_OR_RETURN(package, Parser::ParsePackage(contents, input_path));
+
+  std::string output_path = absl::GetFlag(FLAGS_output_path);
+
+  std::optional<std::string> alsologto = absl::GetFlag(FLAGS_alsologto);
+  std::unique_ptr<absl::LogSink> log_file_sink;
+  if (alsologto.has_value()) {
+    log_file_sink = std::make_unique<FileStderrLogSink>(*alsologto);
+    absl::AddLogSink(log_file_sink.get());
+  }
+  absl::Cleanup log_file_sink_cleanup = [&log_file_sink] {
+    if (log_file_sink) {
+      absl::RemoveLogSink(log_file_sink.get());
+    }
+  };
+
+  XLS_ASSIGN_OR_RETURN(OptFlagsProto opt_flags, GetOptFlags(input_path));
+
+  XLS_ASSIGN_OR_RETURN(std::string ir, GetFileContents(input_path));
+
+  BisectInjectPasses bisect_inject_passes(
+      absl::GetFlag(FLAGS_bisect_inject_passes).value_or(""),
+      absl::GetFlag(FLAGS_bisect_inject_passes_count).value_or(-1));
+  OptModifiers modifiers{
+      .registry_decorator =
+          absl::GetFlag(FLAGS_bisect_inject_passes).has_value()
+              ? absl::optional_ref<PassRegistryDecorator>(
+                    bisect_inject_passes.decorator())
+              : std::nullopt,
+  };
+
+  OptMetadata metadata;
+  XLS_ASSIGN_OR_RETURN(std::string optimized_ir,
+                       OptimizeIrForTop(ir, opt_flags, &metadata, modifiers));
+  VLOG(2) << "Ran " << metadata.metrics.total_passes() << " passes";
+  if (opt_flags.has_pass_metrics_path()) {
+    std::string tf;
+    XLS_RET_CHECK(google::protobuf::TextFormat::PrintToString(metadata.metrics, &tf));
+    XLS_RETURN_IF_ERROR(SetFileContents(opt_flags.pass_metrics_path(), tf));
+  }
+
+  if (output_path == "-") {
+    std::cout << optimized_ir;
   } else {
-    XLS_ASSIGN_OR_RETURN(package,
-                         Parser::ParsePackageWithEntry(
-                             contents, absl::GetFlag(FLAGS_entry), input_path));
+    XLS_RETURN_IF_ERROR(SetFileContents(output_path, optimized_ir));
   }
-  std::unique_ptr<CompoundPass> pipeline =
-      CreateStandardPassPipeline(absl::GetFlag(FLAGS_opt_level));
-  PassOptions options;
-  options.ir_dump_path = absl::GetFlag(FLAGS_ir_dump_path);
-  if (!absl::GetFlag(FLAGS_run_only_passes).empty()) {
-    options.run_only_passes = absl::GetFlag(FLAGS_run_only_passes);
+  if (opt_flags.passes_bisect_limit_is_error() &&
+      opt_flags.has_passes_bisect_limit() &&
+      metadata.metrics.has_total_passes() &&
+      metadata.metrics.total_passes() >= opt_flags.passes_bisect_limit()) {
+    return absl::InternalError("passes bisect limit was reached.");
   }
-  if (!absl::GetFlag(FLAGS_skip_passes).empty()) {
-    options.skip_passes = absl::GetFlag(FLAGS_skip_passes);
-  }
-  PassResults results;
-  XLS_RETURN_IF_ERROR(pipeline->Run(package.get(), options, &results).status());
-  std::cout << package->DumpIr();
   return absl::OkStatus();
 }
 
+absl::StatusOr<std::string> GetAvailablePassesStr(
+    const OptFlagsProto& opt_flags) {
+  OptimizationPassRegistry reg = GetOptimizationRegistry().OverridableClone();
+  if (opt_flags.has_pipeline()) {
+    XLS_RETURN_IF_ERROR(
+        reg.RegisterPipelineProto(opt_flags.custom_registry(), "<pipeline>"));
+  }
+  return GetOptimizationPipelineGenerator(reg).GetAvailablePassesStr();
+}
 }  // namespace
-}  // namespace xls
+}  // namespace xls::tools
 
-int main(int argc, char **argv) {
-  std::vector<absl::string_view> positional_arguments =
-      xls::InitXls(argv[0], argc, argv);
+int main(int argc, char** argv) {
+  std::vector<std::string_view> positional_arguments =
+      xls::InitXls(kUsage, argc, argv);
 
+  if (absl::GetFlag(FLAGS_list_passes)) {
+    absl::StatusOr<xls::OptFlagsProto> opt_flags =
+        xls::GetOptFlags(std::nullopt);
+    if (!opt_flags.ok()) {
+      return xls::ExitStatus(opt_flags.status());
+    }
+    absl::StatusOr<std::string> available_passes =
+        xls::tools::GetAvailablePassesStr(*opt_flags);
+    if (!available_passes.ok()) {
+      return xls::ExitStatus(available_passes.status());
+    }
+    std::cout << *available_passes;
+    return 0;
+  }
+  if (absl::GetFlag(FLAGS_bisect_inject_passes).has_value() !=
+      absl::GetFlag(FLAGS_bisect_inject_passes_count).has_value()) {
+    LOG(QFATAL) << "Must set both --bisect_inject_passes and "
+                   "--bisect_inject_passes_count or neither.";
+  }
   if (positional_arguments.empty()) {
-    XLS_LOG(QFATAL) << absl::StreamFormat("Expected invocation: %s <path>",
-                                          argv[0]);
+    LOG(QFATAL) << absl::StreamFormat("Expected invocation: %s <path>",
+                                      argv[0]);
   }
 
-  XLS_QCHECK_OK(xls::RealMain(positional_arguments[0]));
-  return EXIT_SUCCESS;
+  return xls::ExitStatus(xls::tools::RealMain(positional_arguments[0]));
 }

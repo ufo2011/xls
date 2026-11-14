@@ -14,13 +14,20 @@
 
 #include "xls/netlist/function_extractor.h"
 
-#include "absl/container/flat_hash_set.h"
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <variant>
+#include <vector>
+
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/str_split.h"
 #include "absl/types/variant.h"
-#include "xls/common/logging/logging.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
 #include "xls/netlist/lib_parser.h"
@@ -49,9 +56,11 @@ absl::StatusOr<StateTableSignalProto> LibertyToTableSignal(
   }
   if (input == "L/H") {
     return STATE_TABLE_SIGNAL_LOW_OR_HIGH;
-  } else if (input == "~R") {
+  }
+  if (input == "~R") {
     return STATE_TABLE_SIGNAL_NOT_RISING;
-  } else if (input == "~F") {
+  }
+  if (input == "~F") {
     return STATE_TABLE_SIGNAL_NOT_FALLING;
   }
   XLS_RET_CHECK(input.size() == 1) << input;
@@ -76,16 +85,16 @@ absl::StatusOr<StateTableSignalProto> LibertyToTableSignal(
     case 'X':
       return STATE_TABLE_SIGNAL_X;
     default:
-      XLS_LOG(FATAL) << "Invalid input signal: " << signal;
+      LOG(FATAL) << "Invalid input signal: " << signal;
   }
 }
 
-absl::string_view SanitizeRow(const absl::string_view& row) {
+std::string_view SanitizeRow(const std::string_view& row) {
   // Remove newlines, whitespace, and occasional extraneous slash characters
   // from a row in the state table: there are rows that appear as, for example:
   //  X X X : Y : Z  ,\
   // It makes life a lot easier if we can just deal with the range from X to Z.
-  absl::string_view result = absl::StripAsciiWhitespace(row);
+  std::string_view result = absl::StripAsciiWhitespace(row);
   if (result[0] == '\\') {
     result.remove_prefix(1);
   }
@@ -100,21 +109,21 @@ absl::string_view SanitizeRow(const absl::string_view& row) {
 absl::Status ProcessStateTable(const cell_lib::Block& table_def,
                                CellLibraryEntryProto* proto) {
   StateTableProto* table = proto->mutable_state_table();
-  for (absl::string_view name :
+  for (std::string_view name :
        absl::StrSplit(table_def.args[0], ' ', absl::SkipWhitespace())) {
     table->add_input_names(std::string(name));
   }
 
-  for (absl::string_view name :
+  for (std::string_view name :
        absl::StrSplit(table_def.args[1], ' ', absl::SkipWhitespace())) {
     table->add_internal_names(std::string(name));
   }
 
   XLS_RET_CHECK(table_def.entries.size() == 1);
   XLS_RET_CHECK(
-      absl::holds_alternative<cell_lib::KVEntry>(table_def.entries[0]));
+      std::holds_alternative<cell_lib::KVEntry>(table_def.entries[0]));
   const cell_lib::KVEntry& table_entry =
-      absl::get<cell_lib::KVEntry>(table_def.entries[0]);
+      std::get<cell_lib::KVEntry>(table_def.entries[0]);
 
   // Table entries are, sadly, strings, such as:
   // " L H L : - : H,
@@ -125,7 +134,7 @@ absl::Status ProcessStateTable(const cell_lib::Block& table_def,
   std::vector<std::string> rows =
       absl::StrSplit(table_entry.value, ',', absl::SkipWhitespace());
   for (const std::string& raw_row : rows) {
-    absl::string_view source_row = SanitizeRow(raw_row);
+    std::string_view source_row = SanitizeRow(raw_row);
     std::vector<std::string> fields =
         absl::StrSplit(source_row, ':', absl::SkipWhitespace());
     XLS_RET_CHECK(fields.size() == 3)
@@ -168,7 +177,7 @@ absl::Status ExtractFromPin(const cell_lib::Block& pin,
   // I've yet to see an example where this isn't the case.
   std::string name = pin.args[0];
 
-  absl::optional<bool> is_output;
+  std::optional<bool> is_output;
   std::string function;
   for (const cell_lib::BlockEntry& entry : pin.entries) {
     const auto* kv_entry = absl::get_if<cell_lib::KVEntry>(&entry);
@@ -194,7 +203,7 @@ absl::Status ExtractFromPin(const cell_lib::Block& pin,
     }
   }
 
-  if (is_output == absl::nullopt) {
+  if (is_output == std::nullopt) {
     return absl::InvalidArgumentError(
         absl::StrFormat("Pin %s has no direction entry!", name));
   }
@@ -220,7 +229,7 @@ absl::Status ExtractFromPin(const cell_lib::Block& pin,
 // function calculating the output value of the cell after the next clock.
 // Since all our current (logic-checking) purposes are clockless, this is
 // equivalent to being the "function" of an output pin. All known FF cells have
-// a single output pin, so we sanity check for that.
+// a single output pin, so we check for that.
 // If so, then we replace that function with the one from the next_state field.
 absl::Status ExtractFromFf(const cell_lib::Block& ff,
                            CellLibraryEntryProto* entry_proto) {
@@ -247,8 +256,8 @@ absl::Status ExtractFromCell(const cell_lib::Block& cell,
   entry_proto->set_kind(netlist::CellKindProto::OTHER);
 
   for (const cell_lib::BlockEntry& entry : cell.entries) {
-    if (absl::holds_alternative<std::unique_ptr<cell_lib::Block>>(entry)) {
-      auto& block_entry = absl::get<std::unique_ptr<cell_lib::Block>>(entry);
+    if (std::holds_alternative<std::unique_ptr<cell_lib::Block>>(entry)) {
+      auto& block_entry = std::get<std::unique_ptr<cell_lib::Block>>(entry);
       if (block_entry->kind == kPinKind) {
         XLS_RETURN_IF_ERROR(ExtractFromPin(*block_entry.get(), entry_proto));
       } else if (block_entry->kind == kFfKind) {
@@ -269,17 +278,14 @@ absl::Status ExtractFromCell(const cell_lib::Block& cell,
 absl::StatusOr<CellLibraryProto> ExtractFunctions(
     cell_lib::CharStream* stream) {
   cell_lib::Scanner scanner(stream);
-  absl::flat_hash_set<std::string> kind_allowlist(
-      {"library", "cell", "pin", "direction", "function", "ff", "next_state",
-       "statetable"});
   cell_lib::Parser parser(&scanner);
 
   XLS_ASSIGN_OR_RETURN(std::unique_ptr<cell_lib::Block> block,
                        parser.ParseLibrary());
   CellLibraryProto proto;
   for (const cell_lib::BlockEntry& entry : block->entries) {
-    if (absl::holds_alternative<std::unique_ptr<cell_lib::Block>>(entry)) {
-      auto& block_entry = absl::get<std::unique_ptr<cell_lib::Block>>(entry);
+    if (std::holds_alternative<std::unique_ptr<cell_lib::Block>>(entry)) {
+      auto& block_entry = std::get<std::unique_ptr<cell_lib::Block>>(entry);
       if (block_entry->kind == "cell") {
         CellLibraryEntryProto* entry_proto = proto.add_entries();
         XLS_RETURN_IF_ERROR(ExtractFromCell(*block_entry.get(), entry_proto));

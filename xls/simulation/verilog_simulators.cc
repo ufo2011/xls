@@ -14,20 +14,18 @@
 
 #include "xls/simulation/verilog_simulators.h"
 
-#include "absl/flags/flag.h"
+#include <memory>
+#include <string_view>
+
 #include "absl/status/statusor.h"
+#include "xls/simulation/verilog_simulator.h"
 
 namespace xls {
 namespace verilog {
 
-absl::StatusOr<VerilogSimulator*> GetVerilogSimulator(absl::string_view name) {
+absl::StatusOr<std::unique_ptr<VerilogSimulator>> GetVerilogSimulator(
+    std::string_view name) {
   return GetVerilogSimulatorManagerSingleton().GetVerilogSimulator(name);
-}
-
-// TODO(meheff): Remove this function.
-const VerilogSimulator& GetDefaultVerilogSimulator() {
-  const char kDefaultSimulator[] = "iverilog";
-  return *GetVerilogSimulator(kDefaultSimulator).value();
 }
 
 }  // namespace verilog

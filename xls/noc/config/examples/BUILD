@@ -12,8 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
 package(
-    default_visibility = ["//xls:xls_internal"],
+    default_applicable_licenses = ["//:license"],
+    features = [
+        "layering_check",
+        "parse_headers",
+    ],
     licenses = ["notice"],  # Apache 2.0
 )
 
@@ -22,12 +28,14 @@ cc_test(
     srcs = ["custom_network_config_builder_options_textproto_test.cc"],
     data = glob(["*.textproto"]),
     deps = [
-        "@com_google_absl//absl/strings",
         "//xls/common:xls_gunit_main",
         "//xls/common/file:filesystem",
         "//xls/common/file:get_runfile_path",
         "//xls/common/status:matchers",
         "//xls/noc/config:network_config_builder_options_cc_proto",
-        "@com_google_googletest//:gtest",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
     ],
 )

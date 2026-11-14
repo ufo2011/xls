@@ -15,86 +15,247 @@
 #define XLS_JIT_JIT_CHANNEL_QUEUE_H_
 
 #include <cstdint>
-#include <deque>
+#include <cstring>
+#include <memory>
+#include <optional>
+#include <string_view>
+#include <utility>
+#include <vector>
 
-#include "absl/container/flat_hash_map.h"
-#include "absl/status/status.h"
+#include "absl/base/thread_annotations.h"
+#include "absl/container/inlined_vector.h"
 #include "absl/status/statusor.h"
-#include "xls/common/status/ret_check.h"
+#include "absl/synchronization/mutex.h"
+#include "xls/interpreter/channel_queue.h"
+#include "xls/ir/channel.h"
 #include "xls/ir/package.h"
+#include "xls/ir/proc_elaboration.h"
+#include "xls/ir/value.h"
+#include "xls/jit/jit_runtime.h"
 
 namespace xls {
 
-// Interface defining the operations necessary for a queue used to back Proc
-// communication.
-// Very similiar to interpreter/channel_queue.h, as they perform similar
-// functions, but for performance, we can't depend on passing XLS Values
-// (there's a high cost in marshaling LLVM data into a XLS Value).
-// If the need arises for custom queue implementations, this can be made
-// abstract.
-// TODO(rspringer): Add data pools to avoid extra memcpy and heap alloc.
-class JitChannelQueue {
+// A queue from which raw bytes may be written or read.
+class ByteQueue {
  public:
-  JitChannelQueue(int64_t channel_id) : channel_id_(channel_id) {}
+  // `channel_element_size` is the granularity of the queue access. Each read or
+  // write to the queue handles this many bytes at a time. `is_single_value`
+  // indicates whether this queue follows single-value channel semantics where
+  // the queue only holds a single value; writes overwrite the value in the
+  // queue and reads are non-destructive. If `is_single_value` is false then the
+  // queue has FIFO semantics.
+  ByteQueue(int64_t channel_element_size, bool is_single_value);
 
-  // Called to push data onto this queue/FIFO.
-  void Send(uint8_t* data, int64_t num_bytes) {
+  int64_t element_size() const { return channel_element_size_; }
+
+  // Doubles the size of the queue.
+  void Resize();
+
+  void Write(const uint8_t* data) {
 #ifdef ABSL_HAVE_MEMORY_SANITIZER
-    __msan_unpoison(data, num_bytes);
-#endif
-    std::unique_ptr<uint8_t[]> buffer;
-    if (buffer_pool_.empty()) {
-      buffer = std::make_unique<uint8_t[]>(num_bytes);
-    } else {
-      buffer = std::move(buffer_pool_.back());
-      buffer_pool_.pop_back();
+    if (channel_element_size_ > 0) {
+      __msan_unpoison(data, channel_element_size_);
     }
-    memcpy(buffer.get(), data, num_bytes);
-    absl::MutexLock lock(&mutex_);
-    the_queue_.push_back(std::move(buffer));
+#endif
+    if (bytes_used_ == max_byte_count_ && !is_single_value_) {
+      Resize();
+    }
+    if (channel_element_size_ > 0) {
+      memcpy(circular_buffer_.data() + write_index_, data,
+             channel_element_size_);
+    }
+    if (is_single_value_) {
+      bytes_used_ = allocated_element_size_;
+    } else {
+      bytes_used_ += allocated_element_size_;
+      write_index_ = write_index_ + allocated_element_size_;
+      if (write_index_ == max_byte_count_) {
+        write_index_ = 0;
+      }
+    }
   }
 
-  // Called to pull data off of this queue/FIFO.
-  void Recv(uint8_t* buffer, int64_t num_bytes) {
-    absl::MutexLock lock(&mutex_);
-    memcpy(buffer, the_queue_.front().get(), num_bytes);
-    buffer_pool_.push_back(std::move(the_queue_.front()));
-    the_queue_.pop_front();
+  bool Read(uint8_t* buffer) {
+    if (bytes_used_ == 0) {
+      return false;
+    }
+    if (channel_element_size_ > 0) {
+      memcpy(buffer, circular_buffer_.data() + read_index_,
+             channel_element_size_);
+    }
+    if (!is_single_value_) {
+      // Reads are destructive for non single-value channels.
+      bytes_used_ -= allocated_element_size_;
+      read_index_ = read_index_ + allocated_element_size_;
+      if (read_index_ == max_byte_count_) {
+        read_index_ = 0;
+      }
+    }
+    return true;
   }
 
-  bool Empty() {
-    absl::MutexLock lock(&mutex_);
-    return the_queue_.empty();
-  }
+  int64_t size() const { return bytes_used_ / allocated_element_size_; }
 
-  int64_t channel_id() { return channel_id_; }
-
- protected:
-  int64_t channel_id_;
-  absl::Mutex mutex_;
-  std::deque<std::unique_ptr<uint8_t[]>> the_queue_ ABSL_GUARDED_BY(mutex_);
-  std::vector<std::unique_ptr<uint8_t[]>> buffer_pool_;
-};
-
-// JitChannelQueue respository. Holds the set of queues known by a given proc.
-class JitChannelQueueManager {
- public:
-  // Returns a JitChannelQueueManager holding a JitChannelQueue for every proc
-  // in the provided package.
-  static absl::StatusOr<std::unique_ptr<JitChannelQueueManager>> Create(
-      Package* package);
-
-  absl::StatusOr<JitChannelQueue*> GetQueueById(int64_t channel_id) {
-    XLS_RET_CHECK(queues_.contains(channel_id));
-    return queues_.at(channel_id).get();
-  }
+  static constexpr int64_t kInitBufferSize = 128;
 
  private:
-  explicit JitChannelQueueManager(Package* package);
-  absl::Status Init();
+  // Size of an element in the channel in units of bytes.
+  int64_t channel_element_size_ = 0;
+  // Allocated size of an element in the circular buffer in units of bytes. The
+  // elements are aligned to the largest scalar type.
+  int64_t allocated_element_size_ = 0;
+  // TODO(vmirian): 8-09-2022 Place the following guarded members on a single
+  // cache line for optimal performance.
+  // The maximum number of bytes that can hold elements in the circular buffer.
+  int64_t max_byte_count_ = 0;
+  // The number of bytes used in the circular buffer.
+  int64_t bytes_used_ = 0;
+  // Index in the circular buffer to write values to.
+  int64_t read_index_ = 0;
+  // Index in the circular buffer to read values from.
+  int64_t write_index_ = 0;
+  // A circular buffer to store the elements. It is preallocated with storage.
+  absl::InlinedVector<uint8_t, kInitBufferSize> circular_buffer_;
+  // Whether this queue follows single-value channel semantics.
+  bool is_single_value_;
+};
 
-  Package* package_;
-  absl::flat_hash_map<int64_t, std::unique_ptr<JitChannelQueue>> queues_;
+// Abstract base class for channel queues which may be used by the JIT. These
+// queues support reading and writing raw bytes to the queue rather the just
+// xls::Values.
+class JitChannelQueue : public ChannelQueue {
+ public:
+  JitChannelQueue(ChannelInstance* channel, JitRuntime* jit_runtime)
+      : ChannelQueue(channel), jit_runtime_(jit_runtime) {}
+  ~JitChannelQueue() override = default;
+
+  virtual void WriteRaw(const uint8_t* data) = 0;
+  virtual bool ReadRaw(uint8_t* buffer) = 0;
+
+ protected:
+  JitRuntime* jit_runtime_;
+};
+
+// A thread-safe version of the JIT channel queue. All accesses are guarded by a
+// mutex.
+class ThreadSafeJitChannelQueue : public JitChannelQueue {
+ public:
+  ThreadSafeJitChannelQueue(ChannelInstance* channel_instance,
+                            JitRuntime* jit_runtime)
+      : JitChannelQueue(channel_instance, jit_runtime),
+        byte_queue_(
+            jit_runtime->GetTypeByteSize(channel_instance->channel->type()),
+            channel_instance->channel->kind() == ChannelKind::kSingleValue) {}
+  ~ThreadSafeJitChannelQueue() override = default;
+
+  // Write raw bytes representing a value in LLVM's native format.
+  void WriteRaw(const uint8_t* data) override {
+    absl::MutexLock lock(&mutex_);
+    byte_queue_.Write(data);
+    if (!callbacks_.empty()) {
+      CallWriteCallbacks(jit_runtime_->UnpackBuffer(data, channel()->type()));
+    }
+  }
+
+  // Reads raw bytes representing a value in LLVM's native format. Returns
+  // true if queue was not empty and data was read.
+  bool ReadRaw(uint8_t* buffer) override {
+    absl::MutexLock lock(&mutex_);
+    if (generator_.has_value()) {
+      std::optional<Value> generated_value = (*generator_)();
+      if (generated_value.has_value()) {
+        WriteInternal(generated_value.value());
+      }
+    }
+    bool value_read = byte_queue_.Read(buffer);
+    if (value_read && !callbacks_.empty()) {
+      CallReadCallbacks(jit_runtime_->UnpackBuffer(buffer, channel()->type()));
+    }
+    return value_read;
+  }
+
+ protected:
+  int64_t GetSizeInternal() const ABSL_SHARED_LOCKS_REQUIRED(mutex_) override;
+  void WriteInternal(const Value& value)
+      ABSL_SHARED_LOCKS_REQUIRED(mutex_) override;
+  std::optional<Value> ReadInternal()
+      ABSL_SHARED_LOCKS_REQUIRED(mutex_) override;
+
+  ByteQueue byte_queue_ ABSL_GUARDED_BY(mutex_);
+};
+
+// A thread-unsafe version of the JIT channel queue.
+class ThreadUnsafeJitChannelQueue : public JitChannelQueue {
+ public:
+  ThreadUnsafeJitChannelQueue(ChannelInstance* channel_instance,
+                              JitRuntime* jit_runtime)
+      : JitChannelQueue(channel_instance, jit_runtime),
+        byte_queue_(
+            jit_runtime->GetTypeByteSize(channel_instance->channel->type()),
+            channel_instance->channel->kind() == ChannelKind::kSingleValue) {}
+  ~ThreadUnsafeJitChannelQueue() override = default;
+
+  void WriteRaw(const uint8_t* data) override {
+    byte_queue_.Write(data);
+    if (!callbacks_.empty()) {
+      CallWriteCallbacks(jit_runtime_->UnpackBuffer(data, channel()->type()));
+    }
+  }
+  bool ReadRaw(uint8_t* buffer) override {
+    if (generator_.has_value()) {
+      std::optional<Value> generated_value = (*generator_)();
+      if (generated_value.has_value()) {
+        WriteInternal(generated_value.value());
+      }
+    }
+    bool value_read = byte_queue_.Read(buffer);
+    if (value_read && !callbacks_.empty()) {
+      CallReadCallbacks(jit_runtime_->UnpackBuffer(buffer, channel()->type()));
+    }
+    return value_read;
+  }
+
+ protected:
+  int64_t GetSizeInternal() const ABSL_SHARED_LOCKS_REQUIRED(mutex_) override;
+  void WriteInternal(const Value& value) override;
+  std::optional<Value> ReadInternal() override;
+
+  ByteQueue byte_queue_;
+};
+
+// A Channel manager which holds exclusively JitChannelQueues.
+class JitChannelQueueManager : public ChannelQueueManager {
+ public:
+  ~JitChannelQueueManager() override = default;
+
+  // Factories which create a queue manager with exclusively ThreadSafe/Unsafe
+  // queues.
+  static absl::StatusOr<std::unique_ptr<JitChannelQueueManager>>
+  CreateThreadSafe(Package* package, std::unique_ptr<JitRuntime> runtime);
+  static absl::StatusOr<std::unique_ptr<JitChannelQueueManager>>
+  CreateThreadSafe(ProcElaboration&& elaboration,
+                   std::unique_ptr<JitRuntime> runtime);
+  static absl::StatusOr<std::unique_ptr<JitChannelQueueManager>>
+  CreateThreadUnsafe(Package* package, std::unique_ptr<JitRuntime> runtime);
+  static absl::StatusOr<std::unique_ptr<JitChannelQueueManager>>
+  CreateThreadUnsafe(ProcElaboration&& elaboration,
+                     std::unique_ptr<JitRuntime> runtime);
+
+  JitChannelQueue& GetJitQueueByName(std::string_view channel_name,
+                                     std::string_view proc_name);
+  JitChannelQueue& GetJitQueue(Channel* channel);
+  JitChannelQueue& GetJitQueue(ChannelInstance* channel_instance);
+
+  JitRuntime& runtime() { return *runtime_; }
+
+ protected:
+  JitChannelQueueManager(ProcElaboration elaboration,
+                         std::vector<std::unique_ptr<ChannelQueue>>&& queues,
+                         std::unique_ptr<JitRuntime> runtime)
+      : ChannelQueueManager(std::move(elaboration), std::move(queues)),
+        runtime_(std::move(runtime)) {}
+
+  std::unique_ptr<JitRuntime> runtime_;
 };
 
 }  // namespace xls

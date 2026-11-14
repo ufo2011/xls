@@ -12,20 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cstdint>
+#include <string>
+#include <vector>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/str_cat.h"
+#include "xls/codegen/codegen_options.h"
+#include "xls/codegen/codegen_result.h"
 #include "xls/codegen/combinational_generator.h"
 #include "xls/codegen/module_signature.h"
+#include "xls/codegen/module_signature.pb.h"
 #include "xls/codegen/pipeline_generator.h"
-#include "xls/codegen/proc_generator.h"
+#include "xls/codegen/signature_generator.h"
+#include "xls/codegen/verilog_conversion.h"
 #include "xls/common/status/matchers.h"
-#include "xls/common/status/status_macros.h"
-#include "xls/delay_model/delay_estimator.h"
+#include "xls/estimators/delay_model/delay_estimator.h"
+#include "xls/estimators/delay_model/delay_estimators.h"
+#include "xls/ir/bits.h"
+#include "xls/ir/channel.h"
+#include "xls/ir/channel_ops.h"
 #include "xls/ir/function_builder.h"
 #include "xls/ir/package.h"
+#include "xls/ir/value.h"
 #include "xls/scheduling/pipeline_schedule.h"
+#include "xls/scheduling/run_pipeline_schedule.h"
+#include "xls/scheduling/scheduling_options.h"
 #include "xls/simulation/module_simulator.h"
 #include "xls/simulation/verilog_test_base.h"
 
@@ -33,27 +49,15 @@ namespace xls {
 namespace verilog {
 namespace {
 
-using status_testing::IsOkAndHolds;
-using status_testing::StatusIs;
+using ::absl_testing::IsOkAndHolds;
+using ::absl_testing::StatusIs;
 using ::testing::HasSubstr;
 
-class TestDelayEstimator : public DelayEstimator {
- public:
-  absl::StatusOr<int64_t> GetOperationDelayInPs(Node* node) const override {
-    switch (node->op()) {
-      case Op::kParam:
-      case Op::kLiteral:
-      case Op::kBitSlice:
-      case Op::kConcat:
-        return 0;
-      default:
-        return 1;
-    }
-  }
-};
-
 // A test for ModuleSimulator which uses generated Verilog.
-class ModuleSimulatorCodegenTest : public VerilogTestBase {};
+class ModuleSimulatorCodegenTest : public VerilogTestBase {
+ protected:
+  const DelayEstimator* delay_estimator_ = GetDelayEstimator("unit").value();
+};
 
 TEST_P(ModuleSimulatorCodegenTest, PassThroughPipeline) {
   Package package(TestName());
@@ -64,21 +68,21 @@ TEST_P(ModuleSimulatorCodegenTest, PassThroughPipeline) {
 
   XLS_ASSERT_OK_AND_ASSIGN(
       PipelineSchedule schedule,
-      PipelineSchedule::Run(func, TestDelayEstimator(),
-                            SchedulingOptions().clock_period_ps(1)));
+      RunPipelineSchedule(func, *delay_estimator_,
+                          SchedulingOptions().clock_period_ps(1)));
   XLS_ASSERT_OK_AND_ASSIGN(
-      ModuleGeneratorResult result,
+      verilog::CodegenResult result,
       ToPipelineModuleText(
           schedule, func,
-          PipelineOptions().use_system_verilog(UseSystemVerilog())));
+          BuildPipelineOptions().use_system_verilog(UseSystemVerilog())));
   ASSERT_EQ(result.signature.proto().pipeline().latency(), 2);
 
-  ModuleSimulator simulator(result.signature, result.verilog_text,
-                            GetSimulator());
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
   absl::flat_hash_map<std::string, Bits> inputs;
   inputs["x"] = UBits(42, 8);
   absl::flat_hash_map<std::string, Bits> outputs;
-  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.Run(inputs));
+  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.RunFunction(inputs));
 
   EXPECT_EQ(outputs.size(), 1);
   ASSERT_TRUE(outputs.contains("out"));
@@ -94,17 +98,17 @@ TEST_P(ModuleSimulatorCodegenTest, PassThroughPipelineBatched) {
 
   XLS_ASSERT_OK_AND_ASSIGN(
       PipelineSchedule schedule,
-      PipelineSchedule::Run(func, TestDelayEstimator(),
-                            SchedulingOptions().clock_period_ps(1)));
+      RunPipelineSchedule(func, *delay_estimator_,
+                          SchedulingOptions().clock_period_ps(1)));
   XLS_ASSERT_OK_AND_ASSIGN(
-      ModuleGeneratorResult result,
+      verilog::CodegenResult result,
       ToPipelineModuleText(
           schedule, func,
-          PipelineOptions().use_system_verilog(UseSystemVerilog())));
+          BuildPipelineOptions().use_system_verilog(UseSystemVerilog())));
   ASSERT_EQ(result.signature.proto().pipeline().latency(), 2);
 
-  ModuleSimulator simulator(result.signature, result.verilog_text,
-                            GetSimulator());
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
 
   // Run various size batches through the module.
   for (int64_t batch_size = 0; batch_size < 4; ++batch_size) {
@@ -135,21 +139,21 @@ TEST_P(ModuleSimulatorCodegenTest, SingleNegatePipeline) {
 
   XLS_ASSERT_OK_AND_ASSIGN(
       PipelineSchedule schedule,
-      PipelineSchedule::Run(func, TestDelayEstimator(),
-                            SchedulingOptions().clock_period_ps(1)));
+      RunPipelineSchedule(func, *delay_estimator_,
+                          SchedulingOptions().clock_period_ps(1)));
   XLS_ASSERT_OK_AND_ASSIGN(
-      ModuleGeneratorResult result,
+      verilog::CodegenResult result,
       ToPipelineModuleText(
           schedule, func,
-          PipelineOptions().use_system_verilog(UseSystemVerilog())));
+          BuildPipelineOptions().use_system_verilog(UseSystemVerilog())));
   ASSERT_EQ(result.signature.proto().pipeline().latency(), 2);
 
-  ModuleSimulator simulator(result.signature, result.verilog_text,
-                            GetSimulator());
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
   absl::flat_hash_map<std::string, Bits> inputs;
   inputs["x"] = UBits(42, 8);
   absl::flat_hash_map<std::string, Bits> outputs;
-  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.Run(inputs));
+  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.RunFunction(inputs));
 
   EXPECT_EQ(outputs.size(), 1);
   ASSERT_TRUE(outputs.contains("out"));
@@ -166,17 +170,17 @@ TEST_P(ModuleSimulatorCodegenTest, TripleNegatePipelineBatched) {
 
   XLS_ASSERT_OK_AND_ASSIGN(
       PipelineSchedule schedule,
-      PipelineSchedule::Run(func, TestDelayEstimator(),
-                            SchedulingOptions().clock_period_ps(1)));
+      RunPipelineSchedule(func, *delay_estimator_,
+                          SchedulingOptions().clock_period_ps(1)));
   XLS_ASSERT_OK_AND_ASSIGN(
-      ModuleGeneratorResult result,
+      verilog::CodegenResult result,
       ToPipelineModuleText(
           schedule, func,
-          PipelineOptions().use_system_verilog(UseSystemVerilog())));
+          BuildPipelineOptions().use_system_verilog(UseSystemVerilog())));
   ASSERT_EQ(result.signature.proto().pipeline().latency(), 4);
 
-  ModuleSimulator simulator(result.signature, result.verilog_text,
-                            GetSimulator());
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
 
   // Run various size batches through the module up to and beyond the length of
   // the pipeline.
@@ -212,23 +216,23 @@ TEST_P(ModuleSimulatorCodegenTest, AddsWithSharedResource) {
 
   XLS_ASSERT_OK_AND_ASSIGN(
       PipelineSchedule schedule,
-      PipelineSchedule::Run(func, TestDelayEstimator(),
-                            SchedulingOptions().clock_period_ps(40)));
+      RunPipelineSchedule(func, *delay_estimator_,
+                          SchedulingOptions().clock_period_ps(40)));
   XLS_ASSERT_OK_AND_ASSIGN(
-      ModuleGeneratorResult result,
+      verilog::CodegenResult result,
       ToPipelineModuleText(
           schedule, func,
-          PipelineOptions().use_system_verilog(UseSystemVerilog())));
+          BuildPipelineOptions().use_system_verilog(UseSystemVerilog())));
 
-  ModuleSimulator simulator(result.signature, result.verilog_text,
-                            GetSimulator());
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
 
   absl::flat_hash_map<std::string, Bits> inputs;
   inputs["x"] = UBits(42, 32);
   inputs["y"] = UBits(123, 32);
   inputs["z"] = UBits(3, 32);
   absl::flat_hash_map<std::string, Bits> outputs;
-  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.Run(inputs));
+  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.RunFunction(inputs));
 
   EXPECT_EQ(outputs.size(), 1);
   ASSERT_TRUE(outputs.contains("out"));
@@ -248,24 +252,24 @@ TEST_P(ModuleSimulatorCodegenTest, PipelinedAdds) {
 
   XLS_ASSERT_OK_AND_ASSIGN(
       PipelineSchedule schedule,
-      PipelineSchedule::Run(func, TestDelayEstimator(),
-                            SchedulingOptions().clock_period_ps(40)));
+      RunPipelineSchedule(func, *delay_estimator_,
+                          SchedulingOptions().clock_period_ps(40)));
 
   XLS_ASSERT_OK_AND_ASSIGN(
-      ModuleGeneratorResult result,
+      verilog::CodegenResult result,
       ToPipelineModuleText(
           schedule, func,
-          PipelineOptions().use_system_verilog(UseSystemVerilog())));
+          BuildPipelineOptions().use_system_verilog(UseSystemVerilog())));
 
-  ModuleSimulator simulator(result.signature, result.verilog_text,
-                            GetSimulator());
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
 
   absl::flat_hash_map<std::string, Bits> inputs;
   inputs["x"] = UBits(42, 32);
   inputs["y"] = UBits(123, 32);
   inputs["z"] = UBits(3, 32);
   absl::flat_hash_map<std::string, Bits> outputs;
-  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.Run(inputs));
+  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.RunFunction(inputs));
 
   EXPECT_EQ(outputs.size(), 1);
   ASSERT_TRUE(outputs.contains("out"));
@@ -285,63 +289,33 @@ TEST_P(ModuleSimulatorCodegenTest, PipelinedAddWithValid) {
 
   XLS_ASSERT_OK_AND_ASSIGN(
       PipelineSchedule schedule,
-      PipelineSchedule::Run(func, TestDelayEstimator(),
-                            SchedulingOptions().pipeline_stages(5)));
+      RunPipelineSchedule(func, *delay_estimator_,
+                          SchedulingOptions().pipeline_stages(5)));
 
+  ResetProto reset;
+  reset.set_name("rst");
+  reset.set_asynchronous(false);
+  reset.set_active_low(false);
+  reset.set_reset_data_path(false);
   XLS_ASSERT_OK_AND_ASSIGN(
-      ModuleGeneratorResult result,
-      ToPipelineModuleText(schedule, func,
-                           PipelineOptions()
-                               .valid_control("valid_in", "valid_out")
-                               .use_system_verilog(UseSystemVerilog())));
+      verilog::CodegenResult result,
+      ToPipelineModuleText(
+          schedule, func,
+          BuildPipelineOptions()
+              .valid_control("valid_in", "valid_out")
+              .use_system_verilog(UseSystemVerilog())
+              .reset(reset.name(), reset.asynchronous(), reset.active_low(),
+                     reset.reset_data_path())));
 
-  ModuleSimulator simulator(result.signature, result.verilog_text,
-                            GetSimulator());
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
 
   absl::flat_hash_map<std::string, Bits> inputs;
   inputs["x"] = UBits(42, 32);
   inputs["y"] = UBits(123, 32);
   inputs["z"] = UBits(3, 32);
   absl::flat_hash_map<std::string, Bits> outputs;
-  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.Run(inputs));
-
-  EXPECT_EQ(outputs.size(), 1);
-  ASSERT_TRUE(outputs.contains("out"));
-  EXPECT_EQ(outputs.at("out"), UBits(210, 32));
-}
-
-TEST_P(ModuleSimulatorCodegenTest, PipelinedAddWithManualPipelineControl) {
-  Package package(TestName());
-  FunctionBuilder fb("x_plus_y_plus_z_plus_x", &package);
-  Type* u32 = package.GetBitsType(32);
-  auto x = fb.Param("x", u32);
-  auto y = fb.Param("y", u32);
-  auto z = fb.Param("z", u32);
-  auto out = x + y + z + x;
-
-  XLS_ASSERT_OK_AND_ASSIGN(Function * func, fb.BuildWithReturnValue(out));
-
-  XLS_ASSERT_OK_AND_ASSIGN(
-      PipelineSchedule schedule,
-      PipelineSchedule::Run(func, TestDelayEstimator(),
-                            SchedulingOptions().pipeline_stages(5)));
-
-  XLS_ASSERT_OK_AND_ASSIGN(
-      ModuleGeneratorResult result,
-      ToPipelineModuleText(schedule, func,
-                           PipelineOptions()
-                               .manual_control("pipeline_le")
-                               .use_system_verilog(UseSystemVerilog())));
-
-  ModuleSimulator simulator(result.signature, result.verilog_text,
-                            GetSimulator());
-
-  absl::flat_hash_map<std::string, Bits> inputs;
-  inputs["x"] = UBits(42, 32);
-  inputs["y"] = UBits(123, 32);
-  inputs["z"] = UBits(3, 32);
-  absl::flat_hash_map<std::string, Bits> outputs;
-  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.Run(inputs));
+  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.RunFunction(inputs));
 
   EXPECT_EQ(outputs.size(), 1);
   ASSERT_TRUE(outputs.contains("out"));
@@ -359,17 +333,17 @@ TEST_P(ModuleSimulatorCodegenTest, AddTwoTupleElements) {
 
   XLS_ASSERT_OK_AND_ASSIGN(
       PipelineSchedule schedule,
-      PipelineSchedule::Run(func, TestDelayEstimator(),
-                            SchedulingOptions().clock_period_ps(40)));
+      RunPipelineSchedule(func, *delay_estimator_,
+                          SchedulingOptions().clock_period_ps(40)));
 
   XLS_ASSERT_OK_AND_ASSIGN(
-      ModuleGeneratorResult result,
+      verilog::CodegenResult result,
       ToPipelineModuleText(
           schedule, func,
-          PipelineOptions().use_system_verilog(UseSystemVerilog())));
+          BuildPipelineOptions().use_system_verilog(UseSystemVerilog())));
 
-  ModuleSimulator simulator(result.signature, result.verilog_text,
-                            GetSimulator());
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
 
   // Run with flat inputs.
   EXPECT_THAT(simulator.RunAndReturnSingleOutput({{"in", UBits(0x1234, 16)}}),
@@ -383,21 +357,22 @@ TEST_P(ModuleSimulatorCodegenTest, AddTwoTupleElements) {
           HasSubstr("Expected input 'in' to have width 16, has width 17")));
 
   // Run with Value inputs.
-  EXPECT_THAT(simulator.Run({{"in", Value::Tuple({Value(UBits(0x11, 8)),
+  EXPECT_THAT(
+      simulator.RunFunction({{"in", Value::Tuple({Value(UBits(0x11, 8)),
                                                   Value(UBits(0x78, 8))})}}),
-              IsOkAndHolds(Value(UBits(0x89, 8))));
+      IsOkAndHolds(Value(UBits(0x89, 8))));
 
   // Run with wrong-type Value inputs (tuple element wrong width).
   EXPECT_THAT(
-      simulator.Run({{"in", Value::Tuple({Value(UBits(0x11, 8)),
-                                          Value(UBits(0x78, 9))})}}),
+      simulator.RunFunction({{"in", Value::Tuple({Value(UBits(0x11, 8)),
+                                                  Value(UBits(0x78, 9))})}}),
       StatusIs(absl::StatusCode::kInvalidArgument,
                HasSubstr("Input value 'in' is wrong type. Expected '(bits[8], "
                          "bits[8])', got '(bits[8], bits[9])'")));
 
   // Run with wrong-type Value inputs where the input is the right flattened
   // width.
-  EXPECT_THAT(simulator.Run({{"in", Value(UBits(0x1234, 16))}}),
+  EXPECT_THAT(simulator.RunFunction({{"in", Value(UBits(0x1234, 16))}}),
               StatusIs(absl::StatusCode::kInvalidArgument,
                        HasSubstr("Input value 'in' is wrong type. Expected "
                                  "'(bits[8], bits[8])', got 'bits[16]'")));
@@ -411,17 +386,16 @@ TEST_P(ModuleSimulatorCodegenTest, CombinationalModule) {
 
   XLS_ASSERT_OK_AND_ASSIGN(Function * func, fb.Build());
   XLS_ASSERT_OK_AND_ASSIGN(
-      ModuleGeneratorResult result,
-      GenerateCombinationalModule(func,
-                                  /*use_system_verilog=*/UseSystemVerilog()));
+      verilog::CodegenResult result,
+      GenerateCombinationalModule(func, codegen_options()));
 
-  ModuleSimulator simulator(result.signature, result.verilog_text,
-                            GetSimulator());
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
   absl::flat_hash_map<std::string, Bits> inputs;
   inputs["x"] = UBits(42, 8);
   inputs["y"] = UBits(100, 8);
   absl::flat_hash_map<std::string, Bits> outputs;
-  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.Run(inputs));
+  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.RunFunction(inputs));
 
   EXPECT_EQ(outputs.size(), 1);
   ASSERT_TRUE(outputs.contains("out"));
@@ -435,15 +409,14 @@ TEST_P(ModuleSimulatorCodegenTest, ReturnLiteral) {
 
   XLS_ASSERT_OK_AND_ASSIGN(Function * func, fb.Build());
   XLS_ASSERT_OK_AND_ASSIGN(
-      ModuleGeneratorResult result,
-      GenerateCombinationalModule(func,
-                                  /*use_system_verilog=*/UseSystemVerilog()));
+      verilog::CodegenResult result,
+      GenerateCombinationalModule(func, codegen_options()));
 
-  ModuleSimulator simulator(result.signature, result.verilog_text,
-                            GetSimulator());
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
   absl::flat_hash_map<std::string, Bits> outputs;
   XLS_ASSERT_OK_AND_ASSIGN(
-      outputs, simulator.Run(absl::flat_hash_map<std::string, Bits>()));
+      outputs, simulator.RunFunction(absl::flat_hash_map<std::string, Bits>()));
 
   EXPECT_EQ(outputs.size(), 1);
   ASSERT_TRUE(outputs.contains("out"));
@@ -457,16 +430,15 @@ TEST_P(ModuleSimulatorCodegenTest, ReturnParameter) {
 
   XLS_ASSERT_OK_AND_ASSIGN(Function * func, fb.Build());
   XLS_ASSERT_OK_AND_ASSIGN(
-      ModuleGeneratorResult result,
-      GenerateCombinationalModule(func,
-                                  /*use_system_verilog=*/UseSystemVerilog()));
+      verilog::CodegenResult result,
+      GenerateCombinationalModule(func, codegen_options()));
 
-  ModuleSimulator simulator(result.signature, result.verilog_text,
-                            GetSimulator());
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
   absl::flat_hash_map<std::string, Bits> inputs;
   inputs["x"] = UBits(42, 8);
   absl::flat_hash_map<std::string, Bits> outputs;
-  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.Run(inputs));
+  XLS_ASSERT_OK_AND_ASSIGN(outputs, simulator.RunFunction(inputs));
 
   EXPECT_EQ(outputs.size(), 1);
   ASSERT_TRUE(outputs.contains("out"));
@@ -475,42 +447,30 @@ TEST_P(ModuleSimulatorCodegenTest, ReturnParameter) {
 
 TEST_P(ModuleSimulatorCodegenTest, Assert) {
   Package p(TestName());
-  XLS_ASSERT_OK_AND_ASSIGN(
-      Channel * input_ch,
-      p.CreatePortChannel("in", ChannelOps::kReceiveOnly, p.GetBitsType(8)));
-  XLS_ASSERT_OK_AND_ASSIGN(
-      Channel * output_ch,
-      p.CreatePortChannel("out", ChannelOps::kSendOnly, p.GetBitsType(8)));
-  TokenlessProcBuilder b("assert_test", /*initial_value*/ Value::Tuple({}),
-                         "tkn", "st", &p);
-  BValue in = b.Receive(input_ch);
+  BlockBuilder b("assert_test", &p);
+  BValue in = b.InputPort("in", p.GetBitsType(8));
   BValue in_lt_42 = b.ULt(in, b.Literal(UBits(42, 8)));
-  b.Assert(in_lt_42, "input is not less than 42!");
-  b.Send(output_ch, in);
-  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, b.Build(b.GetStateParam()));
-  XLS_ASSERT_OK_AND_ASSIGN(
-      ModuleGeneratorResult result,
-      GenerateModule(
-          proc, GeneratorOptions().use_system_verilog(UseSystemVerilog())));
+  b.Assert(b.AfterAll({}), in_lt_42, "input is not less than 42!");
+  b.OutputPort("out", in);
+  XLS_ASSERT_OK(b.block()->AddClockPort("clk"));
+  XLS_ASSERT_OK_AND_ASSIGN(Block * block, b.Build());
+  CodegenOptions options;
+  options.use_system_verilog(UseSystemVerilog());
+  options.clock_name("clk");
+  XLS_ASSERT_OK_AND_ASSIGN(std::string verilog,
+                           GenerateVerilog(block, options));
+  XLS_ASSERT_OK_AND_ASSIGN(ModuleSignature sig,
+                           GenerateSignature(options, block));
 
-  // Manually construct the signature because the proc generator produces a
-  // signature with the "unknown" interface type which the module builder
-  // doesn't known what to do with.
-  // TODO(meheff): Fix this when we have a unified code generator which properly
-  // lowers combinational and pipeline procs.
-  ModuleSignatureBuilder sig_b("assert_test");
-  sig_b.WithCombinationalInterface();
-  sig_b.AddDataInput("in", 8);
-  sig_b.AddDataOutput("out", 8);
-  XLS_ASSERT_OK_AND_ASSIGN(ModuleSignature sig, sig_b.Build());
-  ModuleSimulator simulator(sig, result.verilog_text, GetSimulator());
+  ModuleSimulator simulator = NewModuleSimulator(verilog, sig);
 
   absl::flat_hash_map<std::string, Bits> outputs;
   XLS_ASSERT_OK(
-      simulator.Run(ModuleSimulator::BitsMap({{"in", UBits(10, 8)}})));
+      simulator.RunFunction(ModuleSimulator::BitsMap({{"in", UBits(10, 8)}})));
 
   auto run_status =
-      simulator.Run(ModuleSimulator::BitsMap({{"in", UBits(100, 8)}})).status();
+      simulator.RunFunction(ModuleSimulator::BitsMap({{"in", UBits(100, 8)}}))
+          .status();
   if (GetParam().use_system_verilog) {
     // Asserts are only emitted in SystemVerilog.
     EXPECT_THAT(run_status, StatusIs(absl::StatusCode::kAborted,
@@ -520,6 +480,108 @@ TEST_P(ModuleSimulatorCodegenTest, Assert) {
   } else {
     XLS_ASSERT_OK(run_status);
   }
+}
+
+TEST_P(ModuleSimulatorCodegenTest, PassThroughArrayCombinationalModule) {
+  Package package(TestName());
+  FunctionBuilder fb(TestName(), &package);
+  BValue x = fb.Param("x", package.GetArrayType(3, package.GetBitsType(8)));
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func, fb.BuildWithReturnValue(x));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      verilog::CodegenResult result,
+      GenerateCombinationalModule(func, codegen_options()));
+
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
+  XLS_ASSERT_OK_AND_ASSIGN(Value input, Value::UBitsArray({1, 2, 3}, 8));
+  XLS_ASSERT_OK_AND_ASSIGN(Value output, simulator.RunFunction({input}));
+
+  EXPECT_EQ(output, input);
+}
+
+TEST_P(ModuleSimulatorCodegenTest, ConstructArrayCombinationalModule) {
+  Package package(TestName());
+  FunctionBuilder fb(TestName(), &package);
+  Type* u8 = package.GetBitsType(8);
+  fb.Array({fb.Param("x", u8), fb.Param("y", u8), fb.Param("z", u8)}, u8);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func, fb.Build());
+  XLS_ASSERT_OK_AND_ASSIGN(
+      verilog::CodegenResult result,
+      GenerateCombinationalModule(func, codegen_options()));
+
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Value output,
+      simulator.RunFunction(
+          {Value(UBits(1, 8)), Value(UBits(2, 8)), Value(UBits(3, 8))}));
+
+  EXPECT_EQ(output, Value::UBitsArray({1, 2, 3}, 8).value());
+}
+
+TEST_P(ModuleSimulatorCodegenTest, FunctionEmptyTuple) {
+  Package package(TestName());
+  FunctionBuilder fb(TestName(), &package);
+  BValue x = fb.Param("x", package.GetTupleType({}));
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func, fb.BuildWithReturnValue(x));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      verilog::CodegenResult result,
+      GenerateCombinationalModule(func, codegen_options()));
+
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
+  Value input = Value::Tuple({});
+  XLS_ASSERT_OK_AND_ASSIGN(Value output, simulator.RunFunction({input}));
+  EXPECT_EQ(output, input);
+
+  // Check that error raised if incorrect type is passed in.
+  ASSERT_THAT(
+      simulator.RunFunction({Value::Tuple({Value::Tuple({})})}).status(),
+      StatusIs(
+          absl::StatusCode::kInvalidArgument,
+          HasSubstr(
+              "Input value 'x' is wrong type. Expected '()', got '(())'")));
+}
+
+TEST_P(ModuleSimulatorCodegenTest, ProcEmptyTuple) {
+  Package package(TestName());
+  Type* empty_tuple_type = package.GetTupleType({});
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Channel * in, package.CreateStreamingChannel(
+                        "input", ChannelOps::kReceiveOnly, empty_tuple_type));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Channel * out, package.CreateStreamingChannel(
+                         "output", ChannelOps::kSendOnly, empty_tuple_type));
+  TokenlessProcBuilder pb(TestName(), "tkn", &package);
+  BValue x = pb.Receive(in);
+  pb.Send(out, x);
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build({}));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      verilog::CodegenResult result,
+      GenerateCombinationalModule(proc, codegen_options()));
+
+  ModuleSimulator simulator =
+      NewModuleSimulator(result.verilog_text, result.signature);
+
+  absl::flat_hash_map<std::string, std::vector<Value>> input_values;
+  input_values["input"] = {Value::Tuple({}), Value::Tuple({})};
+  absl::flat_hash_map<std::string, std::vector<Value>> result_values;
+  result_values["output"] = {Value::Tuple({}), Value::Tuple({})};
+  absl::flat_hash_map<std::string, int64_t> output_channel_counts = {
+      {"output", 2}};
+  EXPECT_THAT(simulator.RunInputSeriesProc(input_values, output_channel_counts),
+              IsOkAndHolds(result_values));
+
+  // Check that error raised if incorrect type is passed in.
+  input_values["input"] = {Value::Tuple({Value::Tuple({})}),
+                           Value::Tuple({Value::Tuple({})})};
+  ASSERT_THAT(
+      simulator.RunInputSeriesProc(input_values, output_channel_counts)
+          .status(),
+      StatusIs(
+          absl::StatusCode::kInvalidArgument,
+          HasSubstr(
+              "Input value 'input' is wrong type. Expected '()', got '(())'")));
 }
 
 INSTANTIATE_TEST_SUITE_P(ModuleSimulatorCodegenTestInstantiation,

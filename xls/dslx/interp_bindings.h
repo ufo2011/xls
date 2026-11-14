@@ -15,14 +15,21 @@
 #ifndef XLS_DSLX_INTERP_BINDINGS_H_
 #define XLS_DSLX_INTERP_BINDINGS_H_
 
+#include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
-#include "absl/types/variant.h"
-#include "xls/dslx/ast.h"
+#include "absl/log/check.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_format.h"
+#include "xls/dslx/frontend/ast.h"
+#include "xls/dslx/frontend/pos.h"
 #include "xls/dslx/interp_value.h"
-#include "xls/dslx/type_info.h"
+#include "xls/dslx/type_system/parametric_env.h"
 
 namespace xls::dslx {
 
@@ -30,12 +37,12 @@ namespace xls::dslx {
 struct FnCtx {
   std::string module_name;
   std::string fn_name;
-  SymbolicBindings sym_bindings;
+  ParametricEnv parametric_env;
 
   std::string ToString() const {
     return absl::StrFormat(
-        "FnCtx{module_name=\"%s\", fn_name=\"%s\", sym_bindings=%s}",
-        module_name, fn_name, sym_bindings.ToString());
+        "FnCtx{module_name=\"%s\", fn_name=\"%s\", parametric_env=%s}",
+        module_name, fn_name, parametric_env.ToString());
   }
 };
 
@@ -48,90 +55,38 @@ struct FnCtx {
 class InterpBindings {
  public:
   using Entry =
-      absl::variant<InterpValue, TypeDef*, EnumDef*, StructDef*, Module*>;
+      std::variant<InterpValue, TypeAlias*, EnumDef*, StructDef*, Module*>;
 
-  // Creates a new bindings object parented to "parent" and with the additional
-  // binding given by name_def_tree/value.
-  static InterpBindings CloneWith(InterpBindings* parent,
-                                  NameDefTree* name_def_tree,
-                                  InterpValue value);
-
-  static absl::string_view VariantAsString(const Entry& e);
+  static std::string_view VariantAsString(const Entry& e);
 
   explicit InterpBindings(const InterpBindings* parent = nullptr);
 
   // Various forms of binding additions (identifier to value / AST node).
 
-  // Adds a (tuple) tree of values to the current bindings via name_def_tree.
-  //
-  // If the frontend types are checked properly, you can zip together the
-  // structure of name_def_tree and value. This also handles the case where the
-  // name_def_tree is simply a leaf without any tupling (a simple NameDef).
-  //
-  // Args:
-  //   name_def_tree: Tree of identifiers to bind.
-  //   value: Value that should have identical structure to name_def_tree (e.g.
-  //     if the name_def_tree is (a, b, c) this should be a three-value tuple.
-  void AddValueTree(NameDefTree* name_def_tree, InterpValue value);
-
   void AddValue(std::string identifier, InterpValue value) {
-    map_.insert_or_assign(std::move(identifier), Entry(std::move(value)));
-  }
-  void AddFn(std::string identifier, InterpValue value) {
-    XLS_CHECK(value.IsFunction());
     map_.insert_or_assign(std::move(identifier), Entry(std::move(value)));
   }
   void AddModule(std::string identifier, Module* value) {
     map_.insert_or_assign(std::move(identifier), Entry(value));
   }
-  void AddTypeDef(std::string identifier, TypeDef* value) {
-    map_.insert_or_assign(std::move(identifier), Entry(value));
-  }
-  void AddEnumDef(std::string identifier, EnumDef* value) {
-    map_.insert_or_assign(std::move(identifier), Entry(value));
-  }
-  void AddStructDef(std::string identifier, StructDef* value) {
-    map_.insert_or_assign(std::move(identifier), Entry(value));
-  }
-  void AddEntry(std::string identifier, Entry entry) {
-    map_.insert_or_assign(std::move(identifier), entry);
-  }
 
   // Resolution functions from identifiers to values / AST nodes.
 
   absl::StatusOr<InterpValue> ResolveValueFromIdentifier(
-      absl::string_view identifier, const Span* ref_span = nullptr) const;
+      std::string_view identifier, const Span* ref_span,
+      const FileTable& file_table) const;
 
-  // Resolves a name reference to an interpreter value.
-  absl::StatusOr<InterpValue> ResolveValue(NameRef* name_ref) const {
-    return ResolveValueFromIdentifier(name_ref->identifier(),
-                                      &name_ref->span());
-  }
-
-  absl::StatusOr<Module*> ResolveModule(absl::string_view identifier) const;
-
-  // Resolve identifier to a type binding, or returns a status error if it is
-  // not found / not a type binding.
-  absl::StatusOr<TypeAnnotation*> ResolveTypeAnnotation(
-      absl::string_view identifier) const;
-
-  absl::StatusOr<absl::variant<TypeAnnotation*, EnumDef*, StructDef*>>
-  ResolveTypeDefinition(absl::string_view identifier) const;
+  absl::StatusOr<Module*> ResolveModule(std::string_view identifier) const;
 
   // Resolves an entry for "identifier" via local mapping and transitive binding
   // parents. Returns nullopt if it is not found.
-  absl::optional<Entry> ResolveEntry(absl::string_view identifier) const;
+  std::optional<Entry> ResolveEntry(std::string_view identifier) const;
 
   // Returns all the keys in this bindings object and all transitive parents as
   // a set.
   absl::flat_hash_set<std::string> GetKeys() const;
 
-  bool Contains(absl::string_view key) const {
-    return map_.contains(key) || (parent_ != nullptr && parent_->Contains(key));
-  }
-
-  void set_fn_ctx(absl::optional<FnCtx> value) { fn_ctx_ = std::move(value); }
-  const absl::optional<FnCtx>& fn_ctx() const { return fn_ctx_; }
+  const std::optional<FnCtx>& fn_ctx() const { return fn_ctx_; }
 
  private:
   // Bindings from the outer scope, may be nullptr.
@@ -142,7 +97,7 @@ class InterpBindings {
 
   // The current (module name, function name, symbolic bindings) that these
   // Bindings are being used with.
-  absl::optional<FnCtx> fn_ctx_;
+  std::optional<FnCtx> fn_ctx_;
 };
 
 }  // namespace xls::dslx

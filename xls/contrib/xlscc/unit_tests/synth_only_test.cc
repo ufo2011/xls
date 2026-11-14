@@ -1,0 +1,207 @@
+// Copyright 2023 The XLS Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "gmock/gmock.h"
+#include "gtest/gtest.h"
+#include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
+#include "absl/status/statusor.h"
+#include "xls/common/source_location.h"
+#include "xls/common/status/matchers.h"
+#include "xls/contrib/xlscc/unit_tests/unit_test.h"
+
+namespace xlscc {
+namespace {
+
+class SynthOnlyTest : public XlsccTestBase {};
+
+TEST_F(SynthOnlyTest, CstdintStdNamespace) {
+  constexpr std::string_view content = R"(
+    #include <cstdint>
+
+    long long my_package(long long a) {
+      std::int64_t result = a;
+      return result;
+    })";
+  RunAcDatatypeTest({{"a", 3}}, 3, content, xabsl::SourceLocation::current());
+}
+
+TEST_F(SynthOnlyTest, StdintNotInStdNamespace) {
+  constexpr std::string_view content = R"(
+    #include "stdint.h"
+
+    long long my_package(long long a) {
+      int64_t result = a;
+      return result;
+    })";
+  RunAcDatatypeTest({{"a", 3}}, 3, content, xabsl::SourceLocation::current());
+}
+
+TEST_F(SynthOnlyTest, IntTypesIncludesStdint) {
+  constexpr std::string_view content = R"(
+    #include "inttypes.h"
+
+    long long my_package(long long a) {
+      int64_t result = a;
+      return result;
+    })";
+  RunAcDatatypeTest({{"a", 3}}, 3, content, xabsl::SourceLocation::current());
+}
+
+TEST_F(SynthOnlyTest, StdioHTest) {
+  constexpr std::string_view content = R"(
+  #include <stdio.h>
+    int my_package() {
+      int a = 10;
+      return a;
+    })";
+  RunAcDatatypeTest({}, 10, content);
+}
+
+TEST_F(SynthOnlyTest, StdintHTest) {
+  constexpr std::string_view content = R"(
+  #include <stdint.h>
+    int my_package() {
+      return INT32_MAX;
+    })";
+  RunAcDatatypeTest({}, 2147483647, content);
+}
+
+TEST_F(SynthOnlyTest, IomanipTest) {
+  constexpr std::string_view content = R"(
+  #include <iomanip>
+  #include <iostream>
+    int my_package() {
+      std::cerr << std::setprecision(10) << std::endl;
+      return 1;
+    })";
+  XLS_ASSERT_OK_AND_ASSIGN(std::vector<std::string> clang_args,
+                           GetClangArgForIntTest());
+  std::vector<std::string_view> clang_argv(clang_args.begin(),
+                                           clang_args.end());
+  absl::StatusOr<std::string> ret = SourceToIr(content, nullptr, clang_argv);
+  ASSERT_THAT(ret.status(), absl_testing::StatusIs(
+                                absl::StatusCode::kUnimplemented,
+                                testing::HasSubstr("Unimplemented marker")));
+}
+
+TEST_F(SynthOnlyTest, StdintHUint64Max) {
+  constexpr std::string_view content = R"(
+  #include <stdint.h>
+    int my_package() {
+      return UINT64_MAX == 18446744073709551615UL;
+    })";
+  RunAcDatatypeTest({}, 1, content);
+}
+
+TEST_F(SynthOnlyTest, StdPairExists) {
+  const std::string content = R"(
+    #include <utility>
+
+    long long my_package(long long a) {
+      auto result = std::pair<long long, bool>(a, true);
+      return result.first;
+    })";
+  RunAcDatatypeTest({{"a", 100}}, 100, content);
+}
+
+TEST_F(SynthOnlyTest, StdMakePairExists) {
+  const std::string content = R"(
+    #include <utility>
+
+    long long my_package(long long a) {
+      auto result = std::make_pair<long long, bool>(a, true);
+      return result.first;
+    })";
+  RunAcDatatypeTest({{"a", 100}}, 100, content);
+}
+
+TEST_F(SynthOnlyTest, StdArraySupport) {
+  const std::string content = R"(
+    #include <array>
+
+    int my_package(int a) {
+      std::array<int, 3> arr = {1, 2, 3};
+      arr[0] = a;
+      arr[1] = arr[1] + 10;
+      return arr[0] + arr[1] + arr[2] + arr.size();
+    })";
+  RunAcDatatypeTest({{"a", 5}}, 23, content);
+}
+
+TEST_F(SynthOnlyTest, ConstStdArrayAnd2DStdArraySupport) {
+  const std::string content = R"(
+    #include <array>
+
+    int sum_1d(const std::array<int, 3>& arr) {
+      const auto& first = arr[0];
+      return first + arr.at(1) + arr.back();
+    }
+
+    int sum_2d(const std::array<std::array<int, 3>, 2>& mat) {
+      return mat[0][0] + mat[0][2] + mat[1][1] + mat.front().back();
+    }
+
+    int my_package(int a) {
+      std::array<int, 3> arr = {a, 2, 3};
+      std::array<std::array<int, 3>, 2> mat = {{{a, 10, 20}, {30, 40, 50}}};
+      return sum_1d(arr) + sum_2d(mat);
+    })";
+  RunAcDatatypeTest({{"a", 5}}, (5 + 2 + 3) + (5 + 20 + 40 + 20), content);
+}
+
+TEST_F(SynthOnlyTest, XlsIntAndReduce) {
+  const std::string content = R"(
+    #include "xls_int.h"
+
+    int my_package(int a) {
+      XlsInt<4, false> all_ones = 0b1111;
+      XlsInt<4, false> not_all_ones = 0b1101;
+      XlsInt<12, false> dynamic_val = a;
+      return (all_ones.and_reduce() ? 10 : 0) +
+             (not_all_ones.and_reduce() ? 20 : 0) +
+             (dynamic_val.and_reduce() ? 100 : 0);
+    })";
+  RunAcDatatypeTest({{"a", 0xFFF}}, 110, content);
+  RunAcDatatypeTest({{"a", 0xFFE}}, 10, content);
+}
+
+// Mirrors image-processing code that reads samples of a mutable tile packet
+// in arithmetic and conditional expressions.
+TEST_F(SynthOnlyTest, MutableStdArrayElementReadsInExpressions) {
+  const std::string content = R"(
+    #include <array>
+    #include "xls_int.h"
+
+    struct TilePacket {
+      std::array<XlsInt<10, false>, 4> samples;
+    };
+
+    long long my_package(long long a, long long b) {
+      TilePacket data = {{{a, 7, 3, 3}}};
+      const XlsInt<10, false> chroma_bias = b;
+      const XlsInt<11, true> pix = data.samples[0] - chroma_bias;
+      const XlsInt<10, false> alpha = a > b ? data.samples[1] : chroma_bias;
+      return pix + alpha + (data.samples[2] == data.samples[3]);
+    })";
+  RunAcDatatypeTest({{"a", 9}, {"b", 4}}, (9 - 4) + 7 + 1, content);
+}
+
+}  // namespace
+
+}  // namespace xlscc

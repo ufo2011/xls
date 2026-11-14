@@ -14,78 +14,108 @@
 
 #include "xls/codegen/module_signature.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <optional>
+#include <ostream>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/algorithm/container.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
-#include "xls/common/logging/logging.h"
+#include "absl/types/span.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/ir/bits.h"
+#include "xls/ir/channel.h"
+#include "xls/ir/channel.pb.h"
 #include "xls/ir/package.h"
+#include "xls/ir/type.h"
+#include "xls/ir/value.h"
+#include "xls/ir/xls_type.pb.h"
 
 namespace xls {
 namespace verilog {
+namespace {
+
+std::optional<std::string> GetDataPortName(
+    const ChannelInterfaceProto& interface) {
+  if (interface.has_streaming() && interface.streaming().has_data_port_name()) {
+    return interface.streaming().data_port_name();
+  } else if (interface.has_single_value() &&
+             interface.single_value().has_data_port_name()) {
+    return interface.single_value().data_port_name();
+  }
+  return std::nullopt;
+}
+
+ChannelFlowControlProto ConvertFlowControl(FlowControl flow_control) {
+  switch (flow_control) {
+    case FlowControl::kReadyValid:
+      return CHANNEL_FLOW_CONTROL_READY_VALID;
+    case FlowControl::kValidData:
+      return CHANNEL_FLOW_CONTROL_VALID_DATA;
+    default:
+      return CHANNEL_FLOW_CONTROL_NONE;
+  }
+}
+
+}  // namespace
 
 ModuleSignatureBuilder& ModuleSignatureBuilder::WithClock(
-    absl::string_view name) {
-  XLS_CHECK(!proto_.has_clock_name());
-  proto_.set_clock_name(ToProtoString(name));
+    std::string_view name) {
+  CHECK(!proto_.has_clock_name());
+  proto_.set_clock_name(name);
   return *this;
 }
 
-ModuleSignatureBuilder& ModuleSignatureBuilder::WithReset(
-    absl::string_view name, bool asynchronous, bool active_low) {
-  XLS_CHECK(!proto_.has_reset());
+ModuleSignatureBuilder& ModuleSignatureBuilder::WithReset(std::string_view name,
+                                                          bool asynchronous,
+                                                          bool active_low) {
+  CHECK(!proto_.has_reset());
   ResetProto* reset = proto_.mutable_reset();
-  reset->set_name(ToProtoString(name));
+  reset->set_name(name);
   reset->set_asynchronous(asynchronous);
   reset->set_active_low(active_low);
   return *this;
 }
 
-ModuleSignatureBuilder& ModuleSignatureBuilder::WithReadyValidInterface(
-    absl::string_view input_ready, absl::string_view input_valid,
-    absl::string_view output_ready, absl::string_view output_valid) {
-  XLS_CHECK_EQ(proto_.interface_oneof_case(),
-               ModuleSignatureProto::INTERFACE_ONEOF_NOT_SET);
-  ReadyValidInterface* interface = proto_.mutable_ready_valid();
-  interface->set_input_ready(ToProtoString(input_ready));
-  interface->set_input_valid(ToProtoString(input_valid));
-  interface->set_output_ready(ToProtoString(output_ready));
-  interface->set_output_valid(ToProtoString(output_valid));
-  return *this;
-}
-
 ModuleSignatureBuilder& ModuleSignatureBuilder::WithFixedLatencyInterface(
     int64_t latency) {
-  XLS_CHECK_EQ(proto_.interface_oneof_case(),
-               ModuleSignatureProto::INTERFACE_ONEOF_NOT_SET);
+  CHECK_EQ(proto_.interface_oneof_case(),
+           ModuleSignatureProto::INTERFACE_ONEOF_NOT_SET);
   FixedLatencyInterface* interface = proto_.mutable_fixed_latency();
   interface->set_latency(latency);
   return *this;
 }
 
 ModuleSignatureBuilder& ModuleSignatureBuilder::WithCombinationalInterface() {
-  XLS_CHECK_EQ(proto_.interface_oneof_case(),
-               ModuleSignatureProto::INTERFACE_ONEOF_NOT_SET);
+  CHECK_EQ(proto_.interface_oneof_case(),
+           ModuleSignatureProto::INTERFACE_ONEOF_NOT_SET);
   proto_.mutable_combinational();
   return *this;
 }
 
 ModuleSignatureBuilder& ModuleSignatureBuilder::WithUnknownInterface() {
-  XLS_CHECK_EQ(proto_.interface_oneof_case(),
-               ModuleSignatureProto::INTERFACE_ONEOF_NOT_SET);
+  CHECK_EQ(proto_.interface_oneof_case(),
+           ModuleSignatureProto::INTERFACE_ONEOF_NOT_SET);
   proto_.mutable_unknown();
   return *this;
 }
 
 ModuleSignatureBuilder& ModuleSignatureBuilder::WithPipelineInterface(
     int64_t latency, int64_t initiation_interval,
-    absl::optional<PipelineControl> pipeline_control) {
-  XLS_CHECK_EQ(proto_.interface_oneof_case(),
-               ModuleSignatureProto::INTERFACE_ONEOF_NOT_SET);
+    std::optional<PipelineControl> pipeline_control) {
+  CHECK_EQ(proto_.interface_oneof_case(),
+           ModuleSignatureProto::INTERFACE_ONEOF_NOT_SET);
   PipelineInterface* interface = proto_.mutable_pipeline();
   interface->set_latency(latency);
   interface->set_initiation_interval(initiation_interval);
@@ -95,55 +125,492 @@ ModuleSignatureBuilder& ModuleSignatureBuilder::WithPipelineInterface(
   return *this;
 }
 
-ModuleSignatureBuilder& ModuleSignatureBuilder::WithFunctionType(
-    FunctionType* function_type) {
-  XLS_CHECK(!proto_.has_function_type());
-  *proto_.mutable_function_type() = function_type->ToProto();
-  return *this;
-}
-
 ModuleSignatureBuilder& ModuleSignatureBuilder::AddDataInput(
-    absl::string_view name, int64_t width) {
+    std::string_view name, Type* type) {
   PortProto* port = proto_.add_data_ports();
-  port->set_direction(DIRECTION_INPUT);
-  port->set_name(ToProtoString(name));
-  port->set_width(width);
+  port->set_direction(PORT_DIRECTION_INPUT);
+  port->set_name(name);
+  port->set_width(type->GetFlatBitCount());
+  *port->mutable_type() = type->ToProto();
   return *this;
 }
 
 ModuleSignatureBuilder& ModuleSignatureBuilder::AddDataOutput(
-    absl::string_view name, int64_t width) {
+    std::string_view name, Type* type) {
   PortProto* port = proto_.add_data_ports();
-  port->set_direction(DIRECTION_OUTPUT);
-  port->set_name(ToProtoString(name));
-  port->set_width(width);
+  port->set_direction(PORT_DIRECTION_OUTPUT);
+  port->set_name(name);
+  port->set_width(type->GetFlatBitCount());
+  *port->mutable_type() = type->ToProto();
   return *this;
 }
 
+ModuleSignatureBuilder& ModuleSignatureBuilder::AddDataInputAsBits(
+    std::string_view name, int64_t width) {
+  BitsType bits_type(width);
+  return AddDataInput(name, &bits_type);
+}
+
+ModuleSignatureBuilder& ModuleSignatureBuilder::AddDataOutputAsBits(
+    std::string_view name, int64_t width) {
+  BitsType bits_type(width);
+  return AddDataOutput(name, &bits_type);
+}
+
+absl::Status ModuleSignatureBuilder::RemoveData(std::string_view name) {
+  auto port_itr = std::find_if(
+      proto_.data_ports().begin(), proto_.data_ports().end(),
+      [name](const PortProto& port) -> bool { return port.name() == name; });
+  if (port_itr == proto_.data_ports().end()) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Port with name %s could not be found in the ModuleSignature.", name));
+  }
+  proto_.mutable_data_ports()->erase(port_itr);
+  return absl::OkStatus();
+}
+
+ModuleSignatureBuilder& ModuleSignatureBuilder::AddSingleValueChannel(
+    std::string_view name, Type* type) {
+  ChannelProto* channel = proto_.add_channels();
+  channel->set_name(name);
+  channel->set_kind(CHANNEL_KIND_SINGLE_VALUE);
+  *channel->mutable_type() = type->ToProto();
+  return *this;
+}
+
+ModuleSignatureBuilder& ModuleSignatureBuilder::AddStreamingChannel(
+    std::string_view name, Type* type, FlowControl flow_control,
+    std::optional<FifoConfig> fifo_config) {
+  ChannelProto* channel = proto_.add_channels();
+  channel->set_name(name);
+  channel->set_kind(CHANNEL_KIND_STREAMING);
+  channel->set_flow_control(ConvertFlowControl(flow_control));
+  *channel->mutable_type() = type->ToProto();
+  if (fifo_config.has_value()) {
+    *channel->mutable_fifo_config() =
+        fifo_config->ToProto(type->GetFlatBitCount());
+  }
+  return *this;
+}
+
+ModuleSignatureBuilder& ModuleSignatureBuilder::AddSingleValueChannelInterface(
+    std::string_view name, ChannelDirectionProto direction, Type* type,
+    std::string_view data_port_name, FlopKindProto flop_kind,
+    std::optional<int64_t> stage) {
+  ChannelInterfaceProto* interface = proto_.add_channel_interfaces();
+  interface->set_channel_name(name);
+  interface->set_direction(direction);
+  *interface->mutable_type() = type->ToProto();
+  interface->set_kind(CHANNEL_KIND_SINGLE_VALUE);
+  interface->mutable_single_value()->set_data_port_name(data_port_name);
+  interface->set_flop_kind(flop_kind);
+  if (stage.has_value()) {
+    interface->set_stage(*stage);
+  }
+  return *this;
+}
+
+ModuleSignatureBuilder& ModuleSignatureBuilder::AddStreamingChannelInterface(
+    std::string_view name, ChannelDirectionProto direction, Type* type,
+    FlowControl flow_control, std::optional<std::string> data_port_name,
+    std::optional<std::string> ready_port_name,
+    std::optional<std::string> valid_port_name, FlopKindProto flop_kind,
+    std::optional<int64_t> stage) {
+  ChannelInterfaceProto* interface = proto_.add_channel_interfaces();
+  interface->set_channel_name(name);
+  interface->set_direction(direction);
+  *interface->mutable_type() = type->ToProto();
+  interface->set_kind(CHANNEL_KIND_STREAMING);
+  interface->mutable_streaming()->set_flow_control(
+      ConvertFlowControl(flow_control));
+  interface->set_flop_kind(flop_kind);
+  if (data_port_name.has_value()) {
+    interface->mutable_streaming()->set_data_port_name(*data_port_name);
+  }
+  if (ready_port_name.has_value()) {
+    interface->mutable_streaming()->set_ready_port_name(*ready_port_name);
+  }
+  if (valid_port_name.has_value()) {
+    interface->mutable_streaming()->set_valid_port_name(*valid_port_name);
+  }
+  if (stage.has_value()) {
+    interface->set_stage(*stage);
+  }
+  return *this;
+}
+
+absl::Status ModuleSignatureBuilder::RemoveChannel(std::string_view name) {
+  auto channel_itr =
+      std::find_if(proto_.channels().begin(), proto_.channels().end(),
+                   [name](const ChannelProto& channel) -> bool {
+                     return channel.name() == name;
+                   });
+  if (channel_itr == proto_.mutable_channels()->end()) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Internal channel with name %s could not be found in the "
+        "ModuleSignature.",
+        name));
+  }
+  proto_.mutable_channels()->erase(channel_itr);
+  return absl::OkStatus();
+}
+
+absl::Status ModuleSignatureBuilder::RemoveChannelInterface(
+    std::string_view name) {
+  auto channel_itr = std::find_if(
+      proto_.channel_interfaces().begin(), proto_.channel_interfaces().end(),
+      [name](const ChannelInterfaceProto& interface) -> bool {
+        return interface.channel_name() == name;
+      });
+  if (channel_itr == proto_.mutable_channel_interfaces()->end()) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat("Interface channel with name %s could not be found in "
+                        "the ModuleSignature.",
+                        name));
+  }
+  proto_.mutable_channel_interfaces()->erase(channel_itr);
+  return absl::OkStatus();
+}
+
+ModuleSignatureBuilder& ModuleSignatureBuilder::AddFifoInstantiation(
+    Package* package, std::string_view instance_name,
+    std::optional<std::string_view> channel_name, const Type* data_type,
+    FifoConfig fifo_config) {
+  InstantiationProto* instantiation = proto_.add_instantiations();
+  FifoInstantiationProto* fifo_instantiation =
+      instantiation->mutable_fifo_instantiation();
+  fifo_instantiation->set_instance_name(instance_name);
+  if (channel_name.has_value()) {
+    fifo_instantiation->set_channel_name(channel_name.value());
+  }
+  *fifo_instantiation->mutable_fifo_config() =
+      fifo_config.ToProto(data_type->GetFlatBitCount());
+  *fifo_instantiation->mutable_type() = data_type->ToProto();
+
+  return *this;
+}
+
+ModuleSignatureBuilder& ModuleSignatureBuilder::AddBlockInstantiation(
+    Package* package, std::string_view block_name,
+    std::string_view instance_name) {
+  InstantiationProto* instantiation = proto_.add_instantiations();
+  BlockInstantiationProto* block_instantiation =
+      instantiation->mutable_block_instantiation();
+  block_instantiation->set_block_name(block_name);
+  block_instantiation->set_instance_name(instance_name);
+  return *this;
+}
+
+ModuleSignatureBuilder& ModuleSignatureBuilder::AddRam1RW(
+    const Ram1RWArgs& args) {
+  RamProto* ram = proto_.add_rams();
+  int64_t data_width = args.data_type->GetFlatBitCount();
+
+  ram->set_name(args.ram_name);
+
+  Ram1RWProto* ram_1rw = ram->mutable_ram_1rw();
+  RamRWPortProto* rw_port = ram_1rw->mutable_rw_port();
+
+  RamRWRequestProto* req = rw_port->mutable_request();
+  RamRWResponseProto* resp = rw_port->mutable_response();
+
+  req->set_name(args.req_name);
+  resp->set_name(args.resp_name);
+
+  auto* address_proto = req->mutable_address();
+  address_proto->set_name(args.address_name);
+  address_proto->set_direction(PORT_DIRECTION_OUTPUT);
+  address_proto->set_width(args.address_width);
+  *address_proto->mutable_type() =
+      args.package->GetBitsType(args.address_width)->ToProto();
+
+  auto* read_enable_proto = req->mutable_read_enable();
+  read_enable_proto->set_name(args.read_enable_name);
+  read_enable_proto->set_direction(PORT_DIRECTION_OUTPUT);
+  read_enable_proto->set_width(1);
+  *read_enable_proto->mutable_type() = args.package->GetBitsType(1)->ToProto();
+
+  auto* write_enable_proto = req->mutable_write_enable();
+  write_enable_proto->set_name(args.write_enable_name);
+  write_enable_proto->set_direction(PORT_DIRECTION_OUTPUT);
+  write_enable_proto->set_width(1);
+  *write_enable_proto->mutable_type() = args.package->GetBitsType(1)->ToProto();
+
+  auto* write_data_proto = req->mutable_write_data();
+  write_data_proto->set_name(args.write_data_name);
+  write_data_proto->set_direction(PORT_DIRECTION_OUTPUT);
+  write_data_proto->set_width(data_width);
+  *write_data_proto->mutable_type() = args.data_type->ToProto();
+
+  auto* read_data_proto = resp->mutable_read_data();
+  read_data_proto->set_name(args.read_data_name);
+  read_data_proto->set_direction(PORT_DIRECTION_INPUT);
+  read_data_proto->set_width(data_width);
+  *read_data_proto->mutable_type() = args.data_type->ToProto();
+
+  if (args.write_mask_width > 0) {
+    auto* write_mask_proto = req->mutable_write_mask();
+    write_mask_proto->set_name(args.write_mask_name);
+    write_mask_proto->set_direction(PORT_DIRECTION_OUTPUT);
+    write_mask_proto->set_width(args.write_mask_width);
+    *write_mask_proto->mutable_type() =
+        args.package->GetBitsType(args.write_mask_width)->ToProto();
+  }
+
+  if (args.read_mask_width > 0) {
+    auto* read_mask_proto = req->mutable_read_mask();
+    read_mask_proto->set_name(args.read_mask_name);
+    read_mask_proto->set_direction(PORT_DIRECTION_OUTPUT);
+    read_mask_proto->set_width(args.read_mask_width);
+    *read_mask_proto->mutable_type() =
+        args.package->GetBitsType(args.read_mask_width)->ToProto();
+  }
+
+  return *this;
+}
+
+ModuleSignatureBuilder& ModuleSignatureBuilder::AddRam1R1W(
+    const Ram1R1WArgs& args) {
+  int64_t data_width = args.data_type->GetFlatBitCount();
+  RamProto* ram = proto_.add_rams();
+  ram->set_name(args.ram_name);
+
+  Ram1R1WProto* ram_1r1w = ram->mutable_ram_1r1w();
+
+  RamRPortProto* r_port = ram_1r1w->mutable_r_port();
+  RamWPortProto* w_port = ram_1r1w->mutable_w_port();
+
+  RamRRequestProto* r_req = r_port->mutable_request();
+  RamRResponseProto* r_resp = r_port->mutable_response();
+  RamWRequestProto* w_req = w_port->mutable_request();
+
+  r_req->set_name(args.rd_req_name);
+  r_resp->set_name(args.rd_resp_name);
+  w_req->set_name(args.wr_req_name);
+
+  auto* rd_address_proto = r_req->mutable_address();
+  rd_address_proto->set_name(args.read_address_name);
+  rd_address_proto->set_direction(PORT_DIRECTION_OUTPUT);
+  rd_address_proto->set_width(args.address_width);
+  *rd_address_proto->mutable_type() =
+      args.package->GetBitsType(args.address_width)->ToProto();
+
+  auto* rd_enable_proto = r_req->mutable_enable();
+  rd_enable_proto->set_name(args.read_enable_name);
+  rd_enable_proto->set_direction(PORT_DIRECTION_OUTPUT);
+  rd_enable_proto->set_width(1);
+  *rd_enable_proto->mutable_type() = args.package->GetBitsType(1)->ToProto();
+
+  auto* rd_data_proto = r_resp->mutable_data();
+  rd_data_proto->set_name(args.read_data_name);
+  rd_data_proto->set_direction(PORT_DIRECTION_INPUT);
+  rd_data_proto->set_width(data_width);
+  *rd_data_proto->mutable_type() = args.data_type->ToProto();
+
+  if (args.read_mask_width > 0) {
+    auto* read_mask_proto = w_req->mutable_mask();
+    read_mask_proto->set_name(args.read_mask_name);
+    read_mask_proto->set_direction(PORT_DIRECTION_OUTPUT);
+    read_mask_proto->set_width(args.read_mask_width);
+    *read_mask_proto->mutable_type() =
+        args.package->GetBitsType(args.read_mask_width)->ToProto();
+  }
+
+  auto* wr_address_proto = w_req->mutable_address();
+  wr_address_proto->set_name(args.write_address_name);
+  wr_address_proto->set_direction(PORT_DIRECTION_OUTPUT);
+  wr_address_proto->set_width(args.address_width);
+  *wr_address_proto->mutable_type() =
+      args.package->GetBitsType(args.address_width)->ToProto();
+
+  auto* wr_data_proto = w_req->mutable_data();
+  wr_data_proto->set_name(args.write_data_name);
+  wr_data_proto->set_direction(PORT_DIRECTION_OUTPUT);
+  wr_data_proto->set_width(data_width);
+  *wr_data_proto->mutable_type() = args.data_type->ToProto();
+
+  if (args.write_mask_width > 0) {
+    auto* write_mask_proto = w_req->mutable_mask();
+    write_mask_proto->set_name(args.write_mask_name);
+    write_mask_proto->set_direction(PORT_DIRECTION_OUTPUT);
+    write_mask_proto->set_width(args.write_mask_width);
+    *write_mask_proto->mutable_type() =
+        args.package->GetBitsType(args.write_mask_width)->ToProto();
+  }
+
+  auto* wr_enable_proto = w_req->mutable_enable();
+  wr_enable_proto->set_name(args.write_enable_name);
+  wr_enable_proto->set_direction(PORT_DIRECTION_OUTPUT);
+  wr_enable_proto->set_width(1);
+  *wr_enable_proto->mutable_type() = args.package->GetBitsType(1)->ToProto();
+
+  return *this;
+}
+
+static absl::Status ValidateProto(const ModuleSignatureProto& proto) {
+  // TODO(meheff): do more validation here.
+  // Validate widths/number of function type.
+  if (proto.has_pipeline() && !proto.has_clock_name()) {
+    return absl::InvalidArgumentError("Missing clock signal");
+  }
+  for (const PortProto& port : proto.data_ports()) {
+    if (!port.has_name() || port.name().empty()) {
+      return absl::InvalidArgumentError("A name is required for all ports.");
+    }
+    if (port.direction() == PORT_DIRECTION_INVALID) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Port '%s' has an invalid port direction.", port.name()));
+    }
+  }
+  absl::flat_hash_map<std::string, PortProto> name_data_ports_map;
+  for (const PortProto& data_port : proto.data_ports()) {
+    auto [_, inserted] =
+        name_data_ports_map.insert({data_port.name(), data_port});
+    if (!inserted) {
+      return absl::FailedPreconditionError(absl::StrFormat(
+          "Port name '%s' found more than once in signature proto.",
+          data_port.name()));
+    }
+  }
+  absl::flat_hash_map<std::string,
+                      std::pair<const FifoConfigProto*, const TypeProto*>>
+      fifo_channels;
+  for (const InstantiationProto& instantiation : proto.instantiations()) {
+    switch (instantiation.instantiation_oneof_case()) {
+      case InstantiationProto::kBlockInstantiationFieldNumber:
+      case InstantiationProto::kExternInstantiationFieldNumber:
+      case InstantiationProto::INSTANTIATION_ONEOF_NOT_SET: {
+        break;
+      }
+      case InstantiationProto::kFifoInstantiationFieldNumber: {
+        auto [_, inserted] = fifo_channels.insert(
+            {instantiation.fifo_instantiation().channel_name(),
+             std::make_pair(&instantiation.fifo_instantiation().fifo_config(),
+                            &instantiation.fifo_instantiation().type())});
+        if (!inserted) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Multiple FIFOs for channel %s",
+              instantiation.fifo_instantiation().channel_name()));
+        }
+      }
+    }
+  }
+
+  auto is_same_direction = [](ChannelDirectionProto a, PortDirectionProto b) {
+    return (a == CHANNEL_DIRECTION_RECEIVE && b == PORT_DIRECTION_INPUT) ||
+           (a == CHANNEL_DIRECTION_SEND && b == PORT_DIRECTION_OUTPUT);
+  };
+  auto is_opposite_direction = [](ChannelDirectionProto a,
+                                  PortDirectionProto b) {
+    return (a == CHANNEL_DIRECTION_RECEIVE && b == PORT_DIRECTION_OUTPUT) ||
+           (a == CHANNEL_DIRECTION_SEND && b == PORT_DIRECTION_INPUT);
+  };
+
+  for (const ChannelInterfaceProto& channel : proto.channel_interfaces()) {
+    if (!channel.has_channel_name() || channel.channel_name().empty()) {
+      return absl::InvalidArgumentError("A name is required for all channels.");
+    }
+
+    if (channel.kind() == ChannelKindProto::CHANNEL_KIND_INVALID) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Channel '%s' has an invalid kind.", channel.channel_name()));
+    }
+
+    // Ensure the specified ports for the channel exist in the port list.
+    std::optional<std::string> data_port = GetDataPortName(channel);
+    if (data_port.has_value()) {
+      if (!name_data_ports_map.contains(*data_port)) {
+        return absl::InvalidArgumentError(absl::StrFormat(
+            "Port '%s' of channel '%s' is not present in the port list.",
+            *data_port, channel.channel_name()));
+      }
+      if (!is_same_direction(channel.direction(),
+                             name_data_ports_map.at(*data_port).direction())) {
+        return absl::InvalidArgumentError(absl::StrFormat(
+            "Data port '%s' of channel '%s' is not the correct direction",
+            *data_port, channel.channel_name()));
+      }
+    }
+    if (channel.has_streaming()) {
+      const StreamingChannelInterfaceProto& streaming = channel.streaming();
+      if (streaming.has_valid_port_name()) {
+        if (!(streaming.flow_control() == CHANNEL_FLOW_CONTROL_READY_VALID ||
+              streaming.flow_control() == CHANNEL_FLOW_CONTROL_VALID_DATA)) {
+          return absl::InvalidArgumentError(
+              absl::StrFormat("Channel '%s' has a valid port specified, but "
+                              "flow control is not ready-valid or valid-data.",
+                              channel.channel_name()));
+        }
+        if (!name_data_ports_map.contains(streaming.valid_port_name())) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Port '%s' of channel '%s' is not present in the port list.",
+              streaming.valid_port_name(), channel.channel_name()));
+        }
+        if (!is_same_direction(
+                channel.direction(),
+                name_data_ports_map.at(streaming.valid_port_name())
+                    .direction())) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Valid port '%s' of channel '%s' is not the correct direction",
+              streaming.valid_port_name(), channel.channel_name()));
+        }
+      }
+      if (streaming.has_ready_port_name()) {
+        if (streaming.flow_control() != CHANNEL_FLOW_CONTROL_READY_VALID) {
+          return absl::InvalidArgumentError(
+              absl::StrFormat("Channel '%s' has a ready port specified, but "
+                              "flow control is not ready-valid.",
+                              channel.channel_name()));
+        }
+        if (!name_data_ports_map.contains(streaming.ready_port_name())) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Port '%s' of channel '%s' is not present in the port list.",
+              streaming.ready_port_name(), channel.channel_name()));
+        }
+        if (!is_opposite_direction(
+                channel.direction(),
+                name_data_ports_map.at(streaming.ready_port_name())
+                    .direction())) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Ready port '%s' of channel '%s' is not the correct direction",
+              streaming.ready_port_name(), channel.channel_name()));
+        }
+      }
+    }
+  }
+
+  return absl::OkStatus();
+}
+
 absl::StatusOr<ModuleSignature> ModuleSignatureBuilder::Build() {
+  XLS_RETURN_IF_ERROR(ValidateProto(proto_));
   return ModuleSignature::FromProto(proto_);
 }
 
-/*static*/ absl::StatusOr<ModuleSignature> ModuleSignature::FromProto(
+/* static */ absl::StatusOr<ModuleSignature> ModuleSignature::FromProto(
     const ModuleSignatureProto& proto) {
-  // TODO(meheff): do more validation here.
-  // Validate widths/number of function type.
-  if ((proto.has_pipeline() || proto.has_ready_valid()) &&
-      !proto.has_clock_name()) {
-    return absl::InvalidArgumentError("Missing clock signal");
-  }
+  XLS_RETURN_IF_ERROR(ValidateProto(proto));
 
   ModuleSignature signature;
   signature.proto_ = proto;
   for (const PortProto& port : proto.data_ports()) {
-    if (port.direction() == DIRECTION_INPUT) {
+    if (port.direction() == PORT_DIRECTION_INPUT) {
       signature.data_inputs_.push_back(port);
-    } else if (port.direction() == DIRECTION_OUTPUT) {
+    } else if (port.direction() == PORT_DIRECTION_OUTPUT) {
       signature.data_outputs_.push_back(port);
     } else {
       return absl::InvalidArgumentError("Invalid port direction.");
     }
   }
+
+  for (const RamProto& ram_ports : proto.rams()) {
+    signature.rams_.push_back(ram_ports);
+  }
+
+  for (const InstantiationProto& instantiation : proto.instantiations()) {
+    signature.instantiations_.push_back(instantiation);
+  }
+
   return signature;
 }
 
@@ -163,9 +630,9 @@ int64_t ModuleSignature::TotalDataOutputBits() const {
   return total;
 }
 
-// Checks that the given inputs match one-to-one to the input ports (matched by
-// name). Returns a vector containing the inputs in the same order as the input
-// ports.
+// Checks that the given inputs match one-to-one to the input ports (matched
+// by name). Returns a vector containing the inputs in the same order as the
+// input ports.
 template <typename T>
 static absl::StatusOr<std::vector<const T*>> CheckAndReturnOrderedInputs(
     absl::Span<const PortProto> input_ports,
@@ -233,20 +700,12 @@ static absl::StatusOr<bool> TypeProtosEqual(const TypeProto& a,
 
 absl::Status ModuleSignature::ValidateInputs(
     const absl::flat_hash_map<std::string, Value>& input_values) const {
-  if (!proto().has_function_type()) {
-    return absl::InvalidArgumentError(
-        "Cannot validate Value inputs because signature has no function_type "
-        "field");
-  }
   XLS_ASSIGN_OR_RETURN(
       std::vector<const Value*> ordered_inputs,
       CheckAndReturnOrderedInputs(data_inputs(), input_values));
-  XLS_RET_CHECK_EQ(data_inputs().size(),
-                   proto().function_type().parameters_size());
   for (int64_t i = 0; i < ordered_inputs.size(); ++i) {
     const Value* input = ordered_inputs[i];
-    const TypeProto& expected_type_proto =
-        proto().function_type().parameters(i);
+    const TypeProto& expected_type_proto = data_inputs()[i].type();
     XLS_ASSIGN_OR_RETURN(TypeProto value_type_proto, input->TypeAsProto());
     XLS_ASSIGN_OR_RETURN(bool types_equal, TypeProtosEqual(expected_type_proto,
                                                            value_type_proto));
@@ -254,6 +713,64 @@ absl::Status ModuleSignature::ValidateInputs(
       return absl::InvalidArgumentError(absl::StrFormat(
           "Input value '%s' is wrong type. Expected '%s', got '%s'",
           data_inputs()[i].name(), TypeProtoToString(expected_type_proto),
+          TypeProtoToString(value_type_proto)));
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status ModuleSignature::ValidateChannelBitsInputs(
+    std::string_view channel_name, absl::Span<const Bits> values) const {
+  auto iter = absl::c_find_if(proto_.channel_interfaces(),
+                              [&](const ChannelInterfaceProto& channel) {
+                                return channel.channel_name() == channel_name;
+                              });
+  if (iter == proto_.channel_interfaces().end() ||
+      iter->direction() != CHANNEL_DIRECTION_RECEIVE) {
+    return absl::FailedPreconditionError(
+        absl::StrFormat("Channel '%s' is not an input channel.", channel_name));
+  }
+  std::optional<std::string> data_port = GetDataPortName(*iter);
+  if (!data_port.has_value()) {
+    return absl::FailedPreconditionError(absl::StrFormat(
+        "Channel '%s' does not have a data port.", channel_name));
+  }
+  XLS_ASSIGN_OR_RETURN(PortProto port, GetInputPortByName(*data_port));
+  for (const Bits& value : values) {
+    if (port.width() != value.bit_count()) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Expected input '%s' to have width %d, has width % d ", port.name(),
+          port.width(), value.bit_count()));
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status ModuleSignature::ValidateChannelValueInputs(
+    std::string_view channel_name, absl::Span<const Value> values) const {
+  auto iter = absl::c_find_if(proto_.channel_interfaces(),
+                              [&](const ChannelInterfaceProto& channel) {
+                                return channel.channel_name() == channel_name;
+                              });
+  if (iter == proto_.channel_interfaces().end() ||
+      iter->direction() != CHANNEL_DIRECTION_RECEIVE) {
+    return absl::FailedPreconditionError(
+        absl::StrFormat("Channel '%s' is not an input channel.", channel_name));
+  }
+  std::optional<std::string> data_port = GetDataPortName(*iter);
+  if (!data_port.has_value()) {
+    return absl::FailedPreconditionError(absl::StrFormat(
+        "Channel '%s' does not have a data port.", channel_name));
+  }
+  const TypeProto& expected_type_proto = iter->type();
+  for (const Value& value : values) {
+    XLS_ASSIGN_OR_RETURN(TypeProto value_type_proto, value.TypeAsProto());
+    XLS_ASSIGN_OR_RETURN(bool types_equal, TypeProtosEqual(expected_type_proto,
+                                                           value_type_proto));
+    if (!types_equal) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Input value '%s' is wrong type. Expected '%s', got '%s'", *data_port,
+          TypeProtoToString(expected_type_proto),
           TypeProtoToString(value_type_proto)));
     }
   }
@@ -271,6 +788,161 @@ ModuleSignature::ToKwargs(absl::Span<const Value> inputs) const {
     kwargs[data_inputs()[i].name()] = inputs[i];
   }
   return kwargs;
+}
+
+absl::StatusOr<PortProto> ModuleSignature::GetInputPortByName(
+    std::string_view name) const {
+  auto iter = absl::c_find_if(
+      data_inputs_, [&](const PortProto& port) { return port.name() == name; });
+  if (iter == data_inputs_.end()) {
+    return absl::NotFoundError(
+        absl::StrFormat("Port '%s' is not an input port.", name));
+  }
+  return *iter;
+}
+
+absl::StatusOr<PortProto> ModuleSignature::GetOutputPortByName(
+    std::string_view name) const {
+  auto iter = absl::c_find_if(data_outputs_, [&](const PortProto& port) {
+    return port.name() == name;
+  });
+  if (iter == data_outputs_.end()) {
+    return absl::NotFoundError(
+        absl::StrFormat("Port '%s' is not an output port.", name));
+  }
+  return *iter;
+}
+
+std::vector<ChannelInterfaceProto> ModuleSignature::GetInputChannelInterfaces()
+    const {
+  std::vector<ChannelInterfaceProto> channels;
+  for (const ChannelInterfaceProto& channel : proto_.channel_interfaces()) {
+    if (channel.direction() == CHANNEL_DIRECTION_RECEIVE) {
+      channels.push_back(channel);
+    }
+  }
+  return channels;
+}
+
+std::vector<ChannelInterfaceProto> ModuleSignature::GetOutputChannelInterfaces()
+    const {
+  std::vector<ChannelInterfaceProto> channels;
+  for (const ChannelInterfaceProto& channel : proto_.channel_interfaces()) {
+    if (channel.direction() == CHANNEL_DIRECTION_SEND) {
+      channels.push_back(channel);
+    }
+  }
+  return channels;
+}
+
+absl::StatusOr<ChannelInterfaceProto>
+ModuleSignature::GetChannelInterfaceByName(
+    std::string_view channel_name) const {
+  auto iter =
+      absl::c_find_if(proto_.channel_interfaces(),
+                      [&](const ChannelInterfaceProto& channel_interface) {
+                        return channel_interface.channel_name() == channel_name;
+                      });
+  if (iter == proto_.channel_interfaces().end()) {
+    return absl::NotFoundError(
+        absl::StrFormat("Interface channel '%s' not found.", channel_name));
+  }
+  return *iter;
+}
+
+absl::StatusOr<std::vector<std::string>>
+ModuleSignature::GetChannelInterfaceNamesForPort(
+    std::string_view port_name) const {
+  std::vector<std::string> channel_interface_names;
+  for (const ChannelInterfaceProto& channel_interface :
+       proto_.channel_interfaces()) {
+    if (channel_interface.has_streaming()) {
+      if (channel_interface.streaming().data_port_name() == port_name ||
+          channel_interface.streaming().ready_port_name() == port_name ||
+          channel_interface.streaming().valid_port_name() == port_name) {
+        channel_interface_names.push_back(channel_interface.channel_name());
+      }
+    } else if (channel_interface.single_value().data_port_name() == port_name) {
+      channel_interface_names.push_back(channel_interface.channel_name());
+    }
+  }
+  return channel_interface_names;
+}
+
+absl::StatusOr<std::string> ModuleSignature::GetChannelInterfaceNameForPort(
+    std::string_view port_name) const {
+  XLS_ASSIGN_OR_RETURN(std::vector<std::string> channel_interface_names,
+                       GetChannelInterfaceNamesForPort(port_name));
+  if (channel_interface_names.empty()) {
+    return absl::NotFoundError(absl::StrFormat(
+        "No port named `%s` or port is not associated with a channel.",
+        port_name));
+  }
+  if (channel_interface_names.size() > 1) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Port '%s' is associated with multiple channel interfaces: %s",
+        port_name, absl::StrJoin(channel_interface_names, ", ")));
+  }
+  return channel_interface_names.front();
+}
+
+std::vector<ChannelProto> ModuleSignature::GetChannels() {
+  std::vector<ChannelProto> channels;
+  for (const ChannelProto& channel : proto_.channels()) {
+    channels.push_back(channel);
+  }
+  return channels;
+}
+
+std::vector<ChannelInterfaceProto> ModuleSignature::GetChannelInterfaces() {
+  std::vector<ChannelInterfaceProto> channels;
+  for (const ChannelInterfaceProto& channel : proto_.channel_interfaces()) {
+    channels.push_back(channel);
+  }
+  return channels;
+}
+
+absl::StatusOr<ChannelProto> ModuleSignature::GetChannel(
+    std::string_view channel_name) const {
+  auto iter =
+      absl::c_find_if(proto_.channels(), [&](const ChannelProto& channel) {
+        return channel.name() == channel_name;
+      });
+  if (iter == proto_.channels().end()) {
+    return absl::NotFoundError(
+        absl::StrFormat("No channel named `%s`.", channel_name));
+  }
+  return *iter;
+}
+
+absl::StatusOr<FifoInstantiationProto> ModuleSignature::GetFifoInstantiation(
+    std::string_view instance_name) {
+  auto iter = absl::c_find_if(
+      proto_.instantiations(), [&](const InstantiationProto& instantiation) {
+        return instantiation.has_fifo_instantiation() &&
+               instantiation.fifo_instantiation().instance_name() ==
+                   instance_name;
+      });
+  if (iter == proto_.instantiations().end()) {
+    return absl::NotFoundError(
+        absl::StrFormat("No fifo instance named `%s`.", instance_name));
+  }
+  return iter->fifo_instantiation();
+}
+
+absl::StatusOr<BlockInstantiationProto> ModuleSignature::GetBlockInstantiation(
+    std::string_view instance_name) {
+  auto iter = absl::c_find_if(
+      proto_.instantiations(), [&](const InstantiationProto& instantiation) {
+        return instantiation.has_block_instantiation() &&
+               instantiation.block_instantiation().instance_name() ==
+                   instance_name;
+      });
+  if (iter == proto_.instantiations().end()) {
+    return absl::NotFoundError(
+        absl::StrFormat("No fifo instance named `%s`.", instance_name));
+  }
+  return iter->block_instantiation();
 }
 
 std::ostream& operator<<(std::ostream& os, const ModuleSignature& signature) {

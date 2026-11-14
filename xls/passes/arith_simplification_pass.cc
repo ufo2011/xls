@@ -14,18 +14,74 @@
 
 #include "xls/passes/arith_simplification_pass.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <iterator>
+#include <limits>
+#include <optional>
+#include <tuple>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "absl/algorithm/container.h"
+#include "absl/container/fixed_array.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "xls/common/logging/logging.h"
+#include "absl/strings/str_format.h"
+#include "absl/types/span.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/common/visitor.h"
+#include "xls/data_structures/inline_bitmap.h"
+#include "xls/data_structures/leaf_type_tree.h"
+#include "xls/ir/big_int.h"
+#include "xls/ir/bits.h"
 #include "xls/ir/bits_ops.h"
-#include "xls/ir/node_iterator.h"
+#include "xls/ir/interval_set.h"
+#include "xls/ir/node.h"
 #include "xls/ir/node_util.h"
 #include "xls/ir/nodes.h"
-#include "xls/ir/value_helpers.h"
+#include "xls/ir/op.h"
+#include "xls/ir/source_location.h"
+#include "xls/ir/ternary.h"
+#include "xls/ir/value.h"
+#include "xls/ir/value_utils.h"
+#include "xls/passes/cached_state_element_query_engine.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/partial_info_query_engine.h"
+#include "xls/passes/pass_base.h"
+#include "xls/passes/query_engine.h"
+#include "xls/passes/stateless_query_engine.h"
+#include "xls/passes/union_query_engine.h"
 
 namespace xls {
 namespace {
+
+// The largest size of lookup table we will use when transforming a division
+// into a pure (uncompressed) lookup table. This is not backed by any particular
+// data, but seems a reasonable size limit for a LUT.
+constexpr int64_t kMaxConstantDividendLUTSize = 64;
+// The largest size of lookup table we will use when transforming a division
+// into a lookup table on constant divisors.
+//
+// TODO(allight): Currently is exactly the same as the max number of arbitrary
+// constant values range analysis can give us which makes this more likely to
+// hit.
+constexpr int64_t kMaxArbitraryDivisorLUTSize = 16;
+
+// The largest constant dividend K for which we will transform a division K/x
+// into a lookup table. The priority-select portion of the lookup table has size
+// up to approximately sqrt(K). This is not backed by any particular data, but
+// lets us handle division by reasonably large dividends without excessively
+// large LUT logic.
+//
+// TODO(epastor): Maybe replace with area & delay estimates for a LUT.
+constexpr int64_t kMaxDividendForCompressedLUT = 64 * 64 - 1;
 
 // For the given comparison Op, returns the op op_inverse for which the
 // following identity holds:
@@ -53,13 +109,20 @@ Op CompareOpInverse(Op op) {
     case Op::kULt:
       return Op::kUGe;
     default:
-      XLS_LOG(FATAL) << "Op is not comparison: " << OpToString(op);
+      LOG(FATAL) << "Op is not comparison: " << OpToString(op);
   }
 }
 
-// Matches the given node to the following expression:
+// Returns true if `node` is a comparison between bits-typed values.
+bool IsBitsCompare(Node* node) {
+  return OpIsCompare(node->op()) && node->operand(0)->GetType()->IsBits();
+}
+
+// Matches the given node to the following expressions:
 //
 //  Select(UGt(x, LIMIT), cases=[x, LIMIT])
+//  Select(UGt(x, LIMIT), cases=[x], default=LIMIT)
+//  PrioritySelect(UGt(x, LIMIT), cases=[LIMIT], default=x)
 //
 // Where LIMIT is a literal. Returns a ClampExpr containing 'x' and 'LIMIT'
 // values.
@@ -67,19 +130,1250 @@ struct ClampExpr {
   Node* node;
   Bits upper_limit;
 };
-std::optional<ClampExpr> MatchClampUpperLimit(Node* n) {
-  if (!n->Is<Select>()) {
-    return absl::nullopt;
+std::optional<ClampExpr> MatchClampUpperLimit(Node* n,
+                                              const QueryEngine& query_engine) {
+  Node* cmp;
+  Node* consequent;
+  Node* alternative;
+  if (n->Is<Select>()) {
+    Select* select = n->As<Select>();
+    size_t total_cases =
+        select->cases().size() + (select->default_value().has_value() ? 1 : 0);
+    if (total_cases != 2) {
+      return std::nullopt;
+    }
+    cmp = select->selector();
+    alternative = select->get_case(0);
+    if (select->default_value().has_value()) {
+      consequent = *select->default_value();
+    } else {
+      consequent = select->get_case(1);
+    }
+  } else if (n->Is<PrioritySelect>()) {
+    PrioritySelect* select = n->As<PrioritySelect>();
+    if (select->cases().size() != 1) {
+      return std::nullopt;
+    }
+    cmp = select->selector();
+    consequent = select->get_case(0);
+    alternative = select->default_value();
+  } else {
+    return std::nullopt;
   }
-  Select* select = n->As<Select>();
-  Node* cmp = select->selector();
-  if (select->selector()->op() == Op::kUGt && cmp->operand(1)->Is<Literal>() &&
-      cmp->operand(1) == select->get_case(1) &&
-      cmp->operand(0) == select->get_case(0)) {
-    return ClampExpr{cmp->operand(0),
-                     select->get_case(1)->As<Literal>()->value().bits()};
+  if (cmp->op() == Op::kUGt && query_engine.IsFullyKnown(consequent) &&
+      cmp->operand(1) == consequent && cmp->operand(0) == alternative) {
+    return ClampExpr{
+        .node = cmp->operand(0),
+        .upper_limit = *query_engine.KnownValueAsBits(consequent),
+    };
   }
-  return absl::nullopt;
+  return std::nullopt;
+}
+
+// The values required to emulate division by a specific divisor.
+struct DivisionConstants {
+  // For unsigned: dividend and divisor must be < 2^N.
+  // For signed: |dividend| and |divisor| must be <= 2^(N-1).
+  int64_t N;
+
+  // multiplies the dividend
+  BigInt m;
+
+  // right shift amount before the multiply (unsigned only; 0 for signed)
+  int64_t pre_shift;
+
+  // right shift amount after the multiply
+  int64_t post_shift;
+
+  // whether the divisor is negative (signed only; false for unsigned)
+  bool divisor_negative = false;
+};
+
+struct DivisionByPowerOfTwo {
+  // The exponent we are dividing by.
+  int64_t exponent;
+
+  // Whether the divisor is negative (signed only; false for unsigned).
+  bool divisor_negative = false;
+};
+
+// Returns (m, post_shift, l). Used in optimizing division by
+// a constant.
+//
+// Args:
+//   N: the smallest value that satisfies: (divisor < 2^N) and (numerator < 2^N)
+//   divisor: the divisor, a compile-time constant.
+//   precision: bits of precision needed. Frequently this is N, and
+//    sometimes an optimization makes this smaller.
+//
+// With respect to the paper: prec = precision, sh_post = post_shift
+std::tuple<BigInt, int64_t, int64_t> ChooseMultiplier(int64_t N, BigInt divisor,
+                                                      int64_t precision) {
+  const int64_t l = BigInt::CeilingLog2(divisor);
+  int64_t post_shift = l;
+
+  // Possible optimization: the expression below can also be computed as:
+  //      ((2^l - divisor) * 2^N)
+  // floor(---------------------) + 2^N
+  //      (        divisor      )
+  BigInt m_low = BigInt::Exp2(N + l) / divisor;
+
+  // Possible optimization: the expression below can also be computed as:
+  //      (2^(N+l-p) + 2^N * (2^l - divisor))
+  // floor(---------------------------------) + 2^N
+  //      (        divisor                  )
+
+  const BigInt two_n_l = BigInt::Exp2(N + l);
+  const BigInt two_n_l_p = BigInt::Exp2(N + l - precision);
+  BigInt m_high = (two_n_l + two_n_l_p) / divisor;
+
+  const BigInt two = BigInt::Exp2(1);
+
+  while ((m_low / two) < (m_high / two) && (post_shift > 0)) {
+    m_low = m_low / two;
+    m_high = m_high / two;
+    post_shift = post_shift - 1;
+  }
+
+  return std::make_tuple(m_high, post_shift, l);
+}
+
+DivisionConstants ComputeDivisionConstants(int64_t num_bits,
+                                           const Bits& divisor_bits,
+                                           bool is_signed) {
+  if (is_signed) {
+    BigInt divisor = BigInt::MakeSigned(divisor_bits);
+    BigInt magnitude_divisor = BigInt::Absolute(divisor);
+    CHECK(!BigInt::IsPowerOfTwo(magnitude_divisor))
+        << "divide by power of two isn't handled by DivisionConstants; other "
+           "code handles that case.";
+    auto [m, post_shift, ignored] =
+        ChooseMultiplier(num_bits, magnitude_divisor, num_bits - 1);
+    return DivisionConstants{
+        .N = num_bits,
+        .m = std::move(m),
+        .pre_shift = 0,
+        .post_shift = post_shift,
+        .divisor_negative = divisor < BigInt::Zero(),
+    };
+  }
+
+  BigInt divisor = BigInt::MakeUnsigned(divisor_bits);
+  CHECK(!BigInt::IsPowerOfTwo(divisor))
+      << "divide by power of two isn't handled by DivisionConstants; other "
+         "code handles that case.";
+
+  auto [m, post_shift, ignored] = ChooseMultiplier(num_bits, divisor, num_bits);
+
+  int64_t pre_shift;
+  if (m >= BigInt::Exp2(num_bits) && BigInt::IsEven(divisor)) {
+    auto [divisor_odd_factor, exponent] = BigInt::FactorizePowerOfTwo(divisor);
+    pre_shift = exponent;
+    std::tie(m, post_shift, ignored) =
+        ChooseMultiplier(num_bits, divisor_odd_factor, num_bits - exponent);
+  } else {
+    pre_shift = 0;
+  }
+
+  return DivisionConstants{
+      .N = num_bits,
+      .m = std::move(m),
+      .pre_shift = pre_shift,
+      .post_shift = post_shift,
+      .divisor_negative = false,
+  };
+}
+
+// Narrows or extends n.
+//
+// Extends when resize_to > n.BitCount. If n_is_signed, sign extension is
+// performed, otherwise zero extension.
+//
+// Narrows (discards most significant bits) when resize_to < n.BitCount.
+//
+// Is identity function when resize_to == n.BitCount.
+//
+// Assumes resize_to >= 0.
+absl::StatusOr<Node*> NarrowOrExtend(Node* n, bool n_is_signed,
+                                     int64_t resize_to) {
+  CHECK_GE(resize_to, 0);
+
+  if (n->BitCountOrDie() < resize_to) {
+    return n->function_base()->MakeNode<ExtendOp>(
+        n->loc(), n,
+        /*new_bit_count=*/resize_to, n_is_signed ? Op::kSignExt : Op::kZeroExt);
+  }
+
+  if (n->BitCountOrDie() > resize_to) {
+    return n->function_base()->MakeNode<BitSlice>(n->loc(), n,
+                                                  /*start=*/0,
+                                                  /*width=*/resize_to);
+  }
+
+  return n;
+}
+
+struct BinaryOpWithConstant {
+  Node* operand;
+  Value constant;
+  bool constant_on_lhs;
+  Op op;
+};
+
+// Matches the given node as binary operation performed with a constant on the
+// lhs or rhs. If match succeeds, returns BinaryOpWithConstant metadata.
+std::optional<BinaryOpWithConstant> MatchBinaryOpWithConstant(
+    Node* node, const QueryEngine& query_engine) {
+  if (node->operand_count() != 2) {
+    return std::nullopt;
+  }
+  if (std::optional<Value> constant = query_engine.KnownValue(node->operand(0));
+      constant.has_value()) {
+    return BinaryOpWithConstant{.operand = node->operand(1),
+                                .constant = *constant,
+                                .constant_on_lhs = true,
+                                .op = node->op()};
+  }
+  if (std::optional<Value> constant = query_engine.KnownValue(node->operand(1));
+      constant.has_value()) {
+    return BinaryOpWithConstant{.operand = node->operand(0),
+                                .constant = *constant,
+                                .constant_on_lhs = false,
+                                .op = node->op()};
+  }
+  return std::nullopt;
+}
+
+// Match a pattern where the result of an injective operation is compared for
+// equality/inequality against a constant. An example might be:
+//
+//   X + C_0 == C_1
+//
+// Where C_0 and C_1 are constants. In this case the operation `X + C_0` is
+// injective, that is, the result of `X + C_0` strictly determines the value of
+// `X`. In this case you can simplify the above to:
+//
+//   X == C_1 - C_0
+//
+// Operations handled are `kAdd` and `kSub`.
+absl::StatusOr<bool> MatchComparisonOfInjectiveOp(
+    Node* node, const QueryEngine& query_engine) {
+  // TODO(allight): Support other comparisons when possible.
+  // NB This is required for the subtraction simplifications to be accurate
+  // because otherwise the direction of the comparison might need to change.
+  if (node->op() != Op::kEq && node->op() != Op::kNe) {
+    return false;
+  }
+  std::optional<BinaryOpWithConstant> compare =
+      MatchBinaryOpWithConstant(node, query_engine);
+  if (!compare.has_value()) {
+    return false;
+  }
+  std::optional<BinaryOpWithConstant> binary_op =
+      MatchBinaryOpWithConstant(compare->operand, query_engine);
+  if (!binary_op.has_value()) {
+    return false;
+  }
+  if (binary_op->op != Op::kAdd && binary_op->op != Op::kSub &&
+      binary_op->op != Op::kUMul) {
+    return false;
+  }
+  if (binary_op->op == Op::kUMul) {
+    // Check if the binary op can overflow.
+    int64_t op_width = compare->operand->BitCountOrDie();
+    std::optional<SharedLeafTypeTree<TernaryVector>> op_ternary =
+        query_engine.GetTernary(binary_op->operand);
+    int64_t op_size =
+        op_ternary.has_value()
+            ? ternary_ops::MinimumUnsignedBitCount(op_ternary->Get({}))
+            : binary_op->operand->BitCountOrDie();
+    int64_t const_size = binary_op->constant.bits().bit_count() -
+                         binary_op->constant.bits().CountLeadingZeros();
+    // If op_width is greater than or equal to the combined sizes of the
+    // operands then overflow is impossible since there would need to be at
+    // least one more add to hit the next bit.
+    if (op_width < op_size + const_size) {
+      // Overflow possible.
+      return false;
+    }
+  }
+  Bits solution;
+  Node* new_op;
+  if (binary_op->op == Op::kAdd) {
+    // (X + C_0) cmp C_1  => x cmp C_1 - C_0
+    new_op = binary_op->operand;
+    solution =
+        bits_ops::Sub(compare->constant.bits(), binary_op->constant.bits());
+  } else if (binary_op->op == Op::kSub) {
+    new_op = binary_op->operand;
+    if (binary_op->constant_on_lhs) {
+      // (C_0 - X) cmp C_1  => x cmp C_0 - C_1
+      solution =
+          bits_ops::Sub(binary_op->constant.bits(), compare->constant.bits());
+    } else {
+      // (X - C_0) cmp C_1  => x cmp C_0 + C_1
+      solution =
+          bits_ops::Add(compare->constant.bits(), binary_op->constant.bits());
+    }
+  } else {
+    XLS_RET_CHECK_EQ(binary_op->op, Op::kUMul);
+    // Need to be careful not to break the case where the comparison is actually
+    // impossible to satisfy or reject (eg 2*x == 3).
+    bool const_is_zero = compare->constant.bits().IsZero();
+    bool mul_is_zero = binary_op->constant.bits().IsZero();
+    bool result_is_possible =
+        bits_ops::UMod(compare->constant.bits(), binary_op->constant.bits())
+            .IsZero();
+    if (const_is_zero && mul_is_zero) {
+      VLOG(2) << "FOUND: Constant umul comparison.";
+      XLS_RETURN_IF_ERROR(
+          node->ReplaceUsesWithNew<Literal>(Value::Bool(compare->op == Op::kEq))
+              .status());
+      return true;
+    }
+    if (const_is_zero) {
+      solution = Bits(binary_op->operand->BitCountOrDie());
+    } else if (mul_is_zero || !result_is_possible) {
+      VLOG(2) << "FOUND: Constant umul comparison.";
+      XLS_RETURN_IF_ERROR(
+          node->ReplaceUsesWithNew<Literal>(Value::Bool(compare->op == Op::kNe))
+              .status());
+      return true;
+    } else {
+      int64_t desired_bits = std::max({binary_op->constant.bits().bit_count(),
+                                       compare->constant.bits().bit_count(),
+                                       binary_op->operand->BitCountOrDie()});
+      auto extend_to_bits = [&](const Bits& b) -> Bits {
+        if (b.bit_count() >= desired_bits) {
+          return b;
+        }
+        return bits_ops::ZeroExtend(b, desired_bits);
+      };
+      // (C_0 * X) cmp C_1 => X cmp C_1 / C_0
+      solution = bits_ops::UDiv(extend_to_bits(compare->constant.bits()),
+                                extend_to_bits(binary_op->constant.bits()));
+    }
+    if (binary_op->operand->BitCountOrDie() == solution.bit_count()) {
+      new_op = binary_op->operand;
+    } else {
+      XLS_ASSIGN_OR_RETURN(
+          new_op, node->function_base()->MakeNodeWithName<ExtendOp>(
+                      binary_op->operand->loc(), binary_op->operand,
+                      solution.bit_count(), Op::kZeroExt,
+                      NodeNameFormat("%s_extended", binary_op->operand)));
+    }
+  }
+  XLS_ASSIGN_OR_RETURN(
+      Literal * new_literal,
+      node->function_base()->MakeNode<Literal>(node->loc(), Value(solution)));
+
+  VLOG(2) << "FOUND: compairson of injective operation.";
+  XLS_RETURN_IF_ERROR(
+      node->ReplaceUsesWithNew<CompareOp>(new_op, new_literal, compare->op)
+          .status());
+  return true;
+}
+
+struct CompressedLUTEntry {
+  Value value;
+  int64_t cutoff;
+};
+struct CompressedLUT {
+  std::vector<Value> uncompressed_values;
+  int64_t uncompressed_cutoff;
+  std::vector<CompressedLUTEntry> compressed_entries;
+  Value past_the_end;
+};
+
+CompressedLUT CompressLUT(std::vector<Value> entries, Value past_the_end) {
+  // Split the lookup table into two parts:
+  // - the uncompressed section; lookup here is done with a simple array_index,
+  //   and we only compress the very last value (using array_index clamping).
+  // - the compressed section; lookup here is done with a priority select.
+  // The LUT logic should decide whether to use the uncompressed or compressed
+  // section by comparing the index to the `uncompressed_cutoff`.
+  CompressedLUT result;
+  result.uncompressed_cutoff = 0;
+  result.uncompressed_values.reserve(entries.size());
+  result.compressed_entries.reserve(entries.size());
+  result.past_the_end = past_the_end;
+
+  for (int64_t i = 0; i < entries.size() && i < kMaxConstantDividendLUTSize;
+       ++i) {
+    result.uncompressed_values.push_back(std::move(entries[i]));
+    result.uncompressed_cutoff = i;
+  }
+  while (
+      result.uncompressed_values.size() >= 2 &&
+      result.uncompressed_values.back() ==
+          result.uncompressed_values[result.uncompressed_values.size() - 2]) {
+    // The last uncompressed value is repeated; remove it, relying on
+    // `array_index`'s clamping behavior to compress this case into the previous
+    // value.
+    result.uncompressed_values.pop_back();
+  }
+  while (result.uncompressed_cutoff + 1 < entries.size() &&
+         entries[result.uncompressed_cutoff + 1] ==
+             result.uncompressed_values.back()) {
+    // Absorb the next entry into the uncompressed section, relying on
+    // `array_index`'s clamping behavior to compress this case.
+    result.uncompressed_cutoff += 1;
+  }
+
+  for (int64_t i = result.uncompressed_cutoff + 1; i < entries.size(); ++i) {
+    if (!result.compressed_entries.empty() &&
+        result.compressed_entries.back().value == entries[i]) {
+      result.compressed_entries.back().cutoff++;
+      continue;
+    }
+    result.compressed_entries.push_back(CompressedLUTEntry{
+        .value = std::move(entries[i]),
+        .cutoff = i,
+    });
+  }
+  while (!result.compressed_entries.empty() &&
+         result.compressed_entries.back().value == past_the_end) {
+    // The last compressed entry is equal to the `past_the_end_value`, so it's
+    // redundant.
+    result.compressed_entries.pop_back();
+  }
+  return result;
+}
+
+absl::StatusOr<Node*> GenerateLUT(CompressedLUT lut, Node* index,
+                                  SourceInfo loc = SourceInfo()) {
+  FunctionBase* fb = index->function_base();
+
+  XLS_ASSIGN_OR_RETURN(Node * past_the_end,
+                       fb->MakeNode<Literal>(loc, lut.past_the_end));
+  if (lut.uncompressed_values.empty() && lut.compressed_entries.empty()) {
+    // The lookup table is empty.
+    return past_the_end;
+  }
+
+  std::vector<Node*> predicates;
+  std::vector<Node*> cases;
+  predicates.reserve(lut.compressed_entries.size() + 1);
+  cases.reserve(lut.compressed_entries.size() + 1);
+
+  if (!lut.uncompressed_values.empty()) {
+    if (lut.compressed_entries.empty() &&
+        lut.uncompressed_cutoff == lut.uncompressed_values.size() - 1 &&
+        lut.past_the_end != lut.uncompressed_values.back()) {
+      // We can fit the past-the-end value into the uncompressed section,
+      // relying on `array_index`'s clamping behavior to handle the past-the-end
+      // case without a comparison & priority select.
+      lut.uncompressed_values.push_back(lut.past_the_end);
+    }
+
+    XLS_ASSIGN_OR_RETURN(
+        Node * uncompressed_table,
+        fb->MakeNode<Literal>(loc, Value::ArrayOrDie(lut.uncompressed_values)));
+    XLS_ASSIGN_OR_RETURN(
+        Node * uncompressed_lookup,
+        fb->MakeNode<ArrayIndex>(loc, uncompressed_table,
+                                 absl::MakeConstSpan({index})));
+
+    if (lut.compressed_entries.empty() &&
+        lut.past_the_end == lut.uncompressed_values.back()) {
+      // No need for a priority select; the uncompressed lookup already covers
+      // all cases.
+      return uncompressed_lookup;
+    }
+
+    cases.push_back(uncompressed_lookup);
+
+    XLS_ASSIGN_OR_RETURN(
+        Node * in_uncompressed,
+        CompareLiteral(index, lut.uncompressed_cutoff, Op::kULe));
+    predicates.push_back(in_uncompressed);
+  }
+
+  for (const auto& [value, cutoff] : lut.compressed_entries) {
+    XLS_ASSIGN_OR_RETURN(Node * predicate,
+                         CompareLiteral(index, cutoff, Op::kULe));
+    XLS_ASSIGN_OR_RETURN(Node * case_node, fb->MakeNode<Literal>(loc, value));
+    predicates.push_back(predicate);
+    cases.push_back(case_node);
+  }
+
+  CHECK(!predicates.empty());
+  // Reverse the order of the predicates to match MSB-first concat semantics.
+  std::reverse(predicates.begin(), predicates.end());
+  XLS_ASSIGN_OR_RETURN(Node * selector,
+                       ConcatIfNeeded(fb, predicates, /*name=*/"", loc));
+  return fb->MakeNode<PrioritySelect>(loc, selector, cases,
+                                      /*default_value=*/past_the_end);
+}
+
+struct Pow2Lut {};
+struct Pow2Shift {
+  Node* shift_amount;
+  int64_t literal_shift;
+};
+
+absl::StatusOr<Node*> MakeDivByZeroResult(Node* original_divide_op) {
+  FunctionBase* fb = original_divide_op->function_base();
+  const SourceInfo& loc = original_divide_op->loc();
+  int64_t bit_width = original_divide_op->BitCountOrDie();
+  if (original_divide_op->op() == Op::kUDiv || bit_width == 0) {
+    return fb->MakeNode<Literal>(loc, Value(Bits::AllOnes(bit_width)));
+  }
+  XLS_RET_CHECK_EQ(original_divide_op->op(), Op::kSDiv);
+  Node* dividend = original_divide_op->operand(0);
+  XLS_ASSIGN_OR_RETURN(
+      Node * min_neg_lit,
+      fb->MakeNode<Literal>(loc, Value(Bits::MinSigned(bit_width))));
+  XLS_ASSIGN_OR_RETURN(
+      Node * max_pos_lit,
+      fb->MakeNode<Literal>(loc, Value(Bits::MaxSigned(bit_width))));
+  XLS_ASSIGN_OR_RETURN(Node * msb,
+                       fb->MakeNode<BitSlice>(loc, dividend, bit_width - 1, 1));
+  return fb->MakeNode<Select>(loc, msb,
+                              absl::Span<Node* const>{max_pos_lit, min_neg_lit},
+                              /*default_value=*/std::nullopt);
+}
+
+// Pull out a node representing the power of 2 the divisor node is if it exists.
+// TODO(allight): This is very fragile and doesn't handle many cases. (eg
+// `bitslice(k << X, 1, 12)` etc). We should try to do better than this.
+//
+// TODO(allight): Should we also generate shifts where 'shift_amount' is a
+// decode node?
+std::optional<Pow2Shift> GetPow2Shift(Node* divisor, const QueryEngine& qe) {
+  if (qe.IsFullyKnown(divisor)) {
+    return std::nullopt;
+  }
+  if (divisor->op() == Op::kDecode) {
+    VLOG(2) << "FOUND: Div by variable power of two (decode(K))";
+    return Pow2Shift{.shift_amount = divisor->operand(0), .literal_shift = 0};
+  }
+  if (divisor->op() == Op::kShll) {
+    std::optional<Bits> shifted_value =
+        qe.KnownValueAsBits(divisor->operand(0));
+    if (!shifted_value.has_value() || !shifted_value->IsPowerOfTwo()) {
+      return std::nullopt;
+    }
+    int64_t literal_shift = shifted_value->CountTrailingZeros();
+    VLOG(2) << absl::StreamFormat(
+        "FOUND: Div by variable power of two (2^%d << K)", literal_shift);
+    return Pow2Shift{.shift_amount = divisor->operand(1),
+                     .literal_shift = literal_shift};
+  }
+  return std::nullopt;
+}
+
+absl::StatusOr<Node*> MakePow2ShiftNode(Node* original_divide_op,
+                                        Node* dividend, Pow2Shift shift) {
+  FunctionBase* fb = dividend->function_base();
+  const SourceInfo& loc = original_divide_op->loc();
+  Node* shift_amount = shift.shift_amount;
+  int64_t literal_shift = shift.literal_shift;
+  int64_t bit_width = original_divide_op->BitCountOrDie();
+  Node* literal_shift_lit = nullptr;
+  if (literal_shift != 0) {
+    XLS_ASSIGN_OR_RETURN(
+        literal_shift_lit,
+        fb->MakeNode<Literal>(
+            dividend->loc(),
+            Value(UBits(literal_shift,
+                        Bits::MinBitCountUnsigned(literal_shift)))));
+  }
+  if (original_divide_op->op() == Op::kUDiv) {
+    if (literal_shift != 0) {
+      XLS_ASSIGN_OR_RETURN(
+          dividend, fb->MakeNodeWithName<BinOp>(
+                        dividend->loc(), dividend, literal_shift_lit, Op::kShrl,
+                        NodeNameFormat("%s_literal_shift", dividend)));
+    }
+    XLS_ASSIGN_OR_RETURN(
+        Node * shift_result,
+        fb->MakeNodeWithName<BinOp>(
+            dividend->loc(), dividend, shift_amount, Op::kShrl,
+            NodeNameFormat("%s_divide_using_shift", original_divide_op)));
+    XLS_ASSIGN_OR_RETURN(Node * div_by_zero_res,
+                         MakeDivByZeroResult(original_divide_op));
+    XLS_ASSIGN_OR_RETURN(
+        Node * is_div_by_zero,
+        CompareLiteral(shift_amount, bit_width - literal_shift, Op::kUGe));
+    return fb->MakeNodeWithName<Select>(
+        loc, is_div_by_zero,
+        absl::Span<Node* const>{shift_result, div_by_zero_res}, std::nullopt,
+        NodeNameFormat("%s_select_div_by_zero", original_divide_op));
+  }
+
+  XLS_RET_CHECK_EQ(original_divide_op->op(), Op::kSDiv);
+  // We're dealing with a signed division; the logic is slightly more complex.
+  // Cases:
+  // - Div by zero (K + L > N - 1): return max_signed or min_signed, depending
+  //                                on the sign of the dividend.
+  // - Div by min_signed (K + L = N - 1): return 0, unless dividend is
+  //                                      min_signed, then 1.
+  // - Otherwise (K + L < N - 1): we can compute the result as
+  //                                  (dividend + bias) >> (K + L),
+  //                              where the bias should be (1 << (K + L)) - 1 if
+  //                              the dividend is negative, or 0 otherwise,
+  //                              making sure we round towards zero rather than
+  //                              -inf.
+  int64_t limit = bit_width - 1 - literal_shift;
+
+  XLS_ASSIGN_OR_RETURN(
+      Node * all_ones_lit,
+      fb->MakeNode<Literal>(loc, Value(Bits::AllOnes(bit_width))));
+  Node* shifted_ones = all_ones_lit;
+  if (literal_shift != 0) {
+    XLS_ASSIGN_OR_RETURN(
+        shifted_ones,
+        fb->MakeNode<BinOp>(loc, shifted_ones, literal_shift_lit, Op::kShll));
+  }
+  XLS_ASSIGN_OR_RETURN(
+      shifted_ones,
+      fb->MakeNode<BinOp>(loc, shifted_ones, shift_amount, Op::kShll));
+  XLS_ASSIGN_OR_RETURN(Node * bias_for_negative_dividend,
+                       fb->MakeNode<UnOp>(loc, shifted_ones, Op::kNot));
+  XLS_ASSIGN_OR_RETURN(Node * negative_dividend,
+                       fb->MakeNode<BitSlice>(loc, dividend, bit_width - 1, 1));
+  XLS_ASSIGN_OR_RETURN(
+      Node * biased_dividend,
+      fb->MakeNode<BinOp>(loc, dividend, bias_for_negative_dividend, Op::kAdd));
+  XLS_ASSIGN_OR_RETURN(
+      Node * adjusted_dividend,
+      fb->MakeNode<Select>(loc, negative_dividend,
+                           absl::Span<Node* const>{dividend, biased_dividend},
+                           /*default_value=*/std::nullopt));
+
+  // Since L is constant, shifting right by K+L is most efficient if we do it as
+  // (X >> L) >> K.
+  Node* div_by_shift_result = adjusted_dividend;
+  if (literal_shift != 0) {
+    XLS_ASSIGN_OR_RETURN(
+        div_by_shift_result,
+        fb->MakeNodeWithName<BinOp>(
+            loc, div_by_shift_result, literal_shift_lit, Op::kShra,
+            NodeNameFormat("%s_literal_shift", adjusted_dividend)));
+  }
+  XLS_ASSIGN_OR_RETURN(
+      div_by_shift_result,
+      fb->MakeNodeWithName<BinOp>(
+          loc, div_by_shift_result, shift_amount, Op::kShra,
+          NodeNameFormat("%s_divide_using_shift", original_divide_op)));
+
+  XLS_ASSIGN_OR_RETURN(Node * divisor_is_zero,
+                       CompareLiteral(shift_amount, limit, Op::kUGt));
+  XLS_ASSIGN_OR_RETURN(Node * divisor_is_min_signed,
+                       CompareLiteral(shift_amount, limit, Op::kEq));
+
+  // Case 0: Divide by zero (K + L > N - 1)
+  XLS_ASSIGN_OR_RETURN(Node * div_by_zero_result,
+                       MakeDivByZeroResult(original_divide_op));
+
+  // Case 1: Divide by min_signed (K + L = N - 1)
+  XLS_ASSIGN_OR_RETURN(
+      Node * min_neg_lit,
+      fb->MakeNode<Literal>(loc, Value(Bits::MinSigned(bit_width))));
+  XLS_ASSIGN_OR_RETURN(
+      Node * x_is_min_neg,
+      fb->MakeNode<CompareOp>(loc, dividend, min_neg_lit, Op::kEq));
+  XLS_ASSIGN_OR_RETURN(Node * zero_lit,
+                       fb->MakeNode<Literal>(loc, Value(UBits(0, bit_width))));
+  XLS_ASSIGN_OR_RETURN(Node * one_lit,
+                       fb->MakeNode<Literal>(loc, Value(UBits(1, bit_width))));
+  XLS_ASSIGN_OR_RETURN(
+      Node * div_by_min_signed_result,
+      fb->MakeNode<Select>(loc, x_is_min_neg,
+                           absl::Span<Node* const>{zero_lit, one_lit},
+                           /*default_value=*/std::nullopt));
+
+  return PrioritySelectOfConcatIfNeeded(
+      fb, {divisor_is_zero, divisor_is_min_signed},
+      {div_by_zero_result, div_by_min_signed_result}, div_by_shift_result,
+      NodeNameFormat("%s_select_div_by_zero_or_min_signed", original_divide_op),
+      loc);
+}
+
+absl::StatusOr<Node*> MakeDivByConstantValues(
+    Node* original_div_op, const DivisionConstants& division_constants) {
+  FunctionBase* fb = original_div_op->function_base();
+  Node* dividend = original_div_op->operand(0);
+  int64_t bit_count = dividend->BitCountOrDie();
+  const SourceInfo loc = original_div_op->loc();
+  bool is_signed = original_div_op->op() == Op::kSDiv;
+
+  // In the paper, there is a case for m >= 2^N.
+  // Comparing the "large m" case to the m < 2^N case (AKA "small m case"),
+  // the "large m" case has:
+  //  * 2 more subs
+  //  * 1 more add
+  //  * a narrower multiply (one operand is 1 bit narrower - details below)
+  //
+  // I believe the large m case only exists because the paper assumes that
+  // the computer's widest multiplier is N bits. Obviously we can synthesize
+  // a wider multiplier. I'm not sure what's more optimal (in terms of
+  // latency, area, power):
+  // * have a separate large m case
+  // * fold the large m case into the small m case
+  //
+  // Careful reading reveals that in the large m case, m is just 1 bit wider
+  // than in the small m case. That means that the penalty for reusing the
+  // small m algorithm for the large m case is small: one multiplier operand
+  // is 1 bit wider. I also verified this empirically for all divisors in
+  // [1, 2^24].
+  //
+  // It's less work to reuse the small m case, so that's what we do.
+  //
+  // If you want to add the large m case, the condition is:
+  // if (division_constants.m >= Exp2<uint64_t>(division_constants.N))
+  // the expression to implement is:
+  // t1 = mulhi(m-Exp2<uint64_t>(N), numerator)
+  // return SRL(t1 + SRL(numerator-t1,1), post_shift-1)
+
+  // The operations below implement the small m case.
+  // For unsigned: SRL(mulhi(m, SRL(numerator, pre_shift)), post_shift)
+  // For signed:   SRA(MULSH(m, n), post_shift) - XSIGN(n), negated if d < 0.
+
+  // The dividend after pre_shift (unsigned only; pre_shift is 0 for signed).
+  Node* shift_dividend;
+  if (division_constants.pre_shift > 0) {
+    // SRL(dividend, pre_shift)
+    //
+    // We use BitSlice instead of SRL, because BitSlice produces a
+    // narrower result (and the extra bits returned by SRL are zeros).
+    XLS_ASSIGN_OR_RETURN(
+        shift_dividend,
+        fb->MakeNode<BitSlice>(
+            loc, dividend,
+            /*start=*/division_constants.pre_shift,
+            /*width=*/
+            dividend->BitCountOrDie() - division_constants.pre_shift));
+  } else {
+    shift_dividend = dividend;
+  }
+
+  // Mul(m, ...)
+  XLS_ASSIGN_OR_RETURN(
+      Node * multiplicand_literal,
+      fb->MakeNode<Literal>(
+          loc, Value(is_signed ? division_constants.m.ToSignedBits()
+                               : division_constants.m.ToUnsignedBits())));
+  XLS_ASSIGN_OR_RETURN(
+      Node * multiply,
+      fb->MakeNode<ArithOp>(loc, multiplicand_literal, shift_dividend,
+                            multiplicand_literal->BitCountOrDie() +
+                                shift_dividend->BitCountOrDie(),
+                            is_signed ? Op::kSMul : Op::kUMul));
+
+  // Notes on how this works:
+  // m / 2^post_shift ~= 1/divisor
+  // m is effectively a fixed point value with N fractional bits (and
+  // frequently 0 but sometimes more than 0 integer bits).
+  // We're only interested in the integer part of dividend/divisor, thus
+  // we're only interested in the integer part of (dividend * m). So we
+  // discard the fractional bits of (m * dividend), via BitSlice.
+  XLS_ASSIGN_OR_RETURN(
+      Node * integer_part_of_product,
+      fb->MakeNode<BitSlice>(loc, multiply,
+                             /*start=*/division_constants.N,
+                             /*width=*/
+                             multiply->BitCountOrDie() - division_constants.N));
+
+  // SRL/SRA(..., post_shift)
+  Node* post_shift_node = integer_part_of_product;
+  if (division_constants.post_shift > 0) {
+    XLS_ASSIGN_OR_RETURN(
+        Node * shift_amount_literal,
+        fb->MakeNode<Literal>(
+            loc, Value(UBits(division_constants.post_shift,
+                             Bits::MinBitCountUnsigned(
+                                 division_constants.post_shift)))));
+    XLS_ASSIGN_OR_RETURN(
+        post_shift_node,
+        fb->MakeNode<BinOp>(loc, integer_part_of_product, shift_amount_literal,
+                            is_signed ? Op::kShra : Op::kShrl));
+  }
+
+  XLS_ASSIGN_OR_RETURN(Node * resize_post_shift,
+                       NarrowOrExtend(post_shift_node, is_signed, bit_count));
+  if (!is_signed) {
+    return resize_post_shift;
+  }
+
+  // XSIGN(n) = SignExt(MSB(dividend), bit_count)
+  XLS_ASSIGN_OR_RETURN(Node * div_sign_bit,
+                       fb->MakeNode<BitSlice>(loc, dividend, bit_count - 1, 1));
+  XLS_ASSIGN_OR_RETURN(
+      Node * xsign,
+      fb->MakeNodeWithName<ExtendOp>(loc, div_sign_bit, bit_count, Op::kSignExt,
+                                     NodeNameFormat("%s_xsign", dividend)));
+
+  // SRA(..., post_shift) - XSIGN(n)
+  XLS_ASSIGN_OR_RETURN(
+      Node * result,
+      fb->MakeNode<BinOp>(loc, resize_post_shift, xsign, Op::kSub));
+
+  if (division_constants.divisor_negative) {
+    XLS_ASSIGN_OR_RETURN(result, fb->MakeNode<UnOp>(loc, result, Op::kNeg));
+  }
+  return result;
+}
+
+absl::StatusOr<Node*> MakeDivByPowerOfTwo(
+    Node* original_divide_op, const DivisionByPowerOfTwo& pow_2_op) {
+  Node* dividend = original_divide_op->operand(0);
+  FunctionBase* fb = original_divide_op->function_base();
+  const SourceInfo& loc = original_divide_op->loc();
+  int64_t shift = pow_2_op.exponent;
+  if (original_divide_op->op() == Op::kUDiv) {
+    XLS_RET_CHECK(!pow_2_op.divisor_negative);
+    if (shift == 0) {
+      return dividend;
+    }
+    XLS_ASSIGN_OR_RETURN(
+        Node * shift_lit,
+        fb->MakeNode<Literal>(
+            original_divide_op->operand(1)->loc(),
+            Value(UBits(shift, Bits::MinBitCountUnsigned(shift)))));
+    return fb->MakeNodeWithName<BinOp>(
+        loc, dividend, shift_lit, Op::kShrl,
+        NodeNameFormat("%s_as_shift_by_%d", original_divide_op, shift));
+  }
+
+  XLS_RET_CHECK_EQ(original_divide_op->op(), Op::kSDiv);
+  auto maybe_negate = [&](Node* quotient) -> absl::StatusOr<Node*> {
+    if (pow_2_op.divisor_negative) {
+      return fb->MakeNode<UnOp>(loc, quotient, Op::kNeg);
+    }
+    return quotient;
+  };
+  if (shift == 0) {
+    return maybe_negate(dividend);
+  }
+
+  // case: |d| = 2^l (with l = shift > 0)
+  // q = SRA(n + SRL(SRA(n, l - 1), N - l), l)
+  const int64_t n = dividend->BitCountOrDie();
+  const int64_t first_sra_amount = shift - 1;
+  Node* first_sra = dividend;
+  if (first_sra_amount > 0) {
+    XLS_ASSIGN_OR_RETURN(
+        Node * first_sra_literal,
+        fb->MakeNode<Literal>(
+            loc, Value(UBits(first_sra_amount,
+                             Bits::MinBitCountUnsigned(first_sra_amount)))));
+    XLS_ASSIGN_OR_RETURN(
+        first_sra,
+        fb->MakeNode<BinOp>(loc, dividend, first_sra_literal, Op::kShra));
+  }
+
+  const int64_t shift_right_logical_amount = n - shift;
+  Node* srl = first_sra;
+  if (shift_right_logical_amount > 0) {
+    XLS_ASSIGN_OR_RETURN(
+        Node * srl_literal,
+        fb->MakeNode<Literal>(
+            loc, Value(UBits(
+                     shift_right_logical_amount,
+                     Bits::MinBitCountUnsigned(shift_right_logical_amount)))));
+    XLS_ASSIGN_OR_RETURN(
+        srl, fb->MakeNode<BinOp>(loc, first_sra, srl_literal, Op::kShrl));
+  }
+
+  XLS_ASSIGN_OR_RETURN(Node * add,
+                       fb->MakeNode<BinOp>(loc, dividend, srl, Op::kAdd));
+
+  XLS_ASSIGN_OR_RETURN(
+      Node * second_sra_literal,
+      fb->MakeNode<Literal>(
+          loc, Value(UBits(shift, Bits::MinBitCountUnsigned(shift)))));
+  XLS_ASSIGN_OR_RETURN(
+      Node * second_sra,
+      fb->MakeNode<BinOp>(loc, add, second_sra_literal, Op::kShra));
+
+  return maybe_negate(second_sra);
+}
+
+using Pow2DivStrategy = std::variant<Pow2Lut, Pow2Shift>;
+
+absl::StatusOr<Node*> MakeDivLutNode(
+    Node* original_divide_op,
+    absl::Span<std::pair<Bits, DivisionConstants> const> operations,
+    absl::Span<std::pair<Bits, DivisionByPowerOfTwo> const> pow_2_operations,
+    bool has_div_by_zero) {
+  XLS_RET_CHECK(!operations.empty() || !pow_2_operations.empty() ||
+                has_div_by_zero)
+      << "Some operation must be present.";
+  Node* divisor = original_divide_op->operand(1);
+  FunctionBase* fb = original_divide_op->function_base();
+  Node* default_value;
+  std::vector<Node*> cases;
+  std::vector<Node*> predicates;
+  auto make_predicate_for = [&](const Bits& b) -> absl::Status {
+    XLS_ASSIGN_OR_RETURN(
+        Node * lit_divisor,
+        fb->MakeNode<Literal>(original_divide_op->loc(), Value(b)));
+    XLS_ASSIGN_OR_RETURN(
+        std::back_inserter(predicates),
+        fb->MakeNodeWithName<CompareOp>(
+            original_divide_op->loc(), divisor, lit_divisor, Op::kEq,
+            NodeNameFormat("%s_is_%s", divisor, b.ToDebugString())));
+    return absl::OkStatus();
+  };
+  if (has_div_by_zero) {
+    XLS_ASSIGN_OR_RETURN(default_value,
+                         MakeDivByZeroResult(original_divide_op));
+  } else if (pow_2_operations.empty()) {
+    auto op = operations.back().second;
+    operations = operations.subspan(0, operations.size() - 1);
+    XLS_ASSIGN_OR_RETURN(default_value,
+                         MakeDivByConstantValues(original_divide_op, op));
+  } else {
+    auto op = pow_2_operations.back().second;
+    pow_2_operations = pow_2_operations.subspan(0, pow_2_operations.size() - 1);
+    XLS_ASSIGN_OR_RETURN(default_value,
+                         MakeDivByPowerOfTwo(original_divide_op, op));
+  }
+  for (const auto& [bits, constants] : operations) {
+    XLS_RETURN_IF_ERROR(make_predicate_for(bits));
+    XLS_ASSIGN_OR_RETURN(
+        std::back_inserter(cases),
+        MakeDivByConstantValues(original_divide_op, constants));
+  }
+  for (const auto& [bits, pow_2_op] : pow_2_operations) {
+    XLS_RETURN_IF_ERROR(make_predicate_for(bits));
+    XLS_ASSIGN_OR_RETURN(std::back_inserter(cases),
+                         MakeDivByPowerOfTwo(original_divide_op, pow_2_op));
+  }
+  XLS_ASSIGN_OR_RETURN(Node * res,
+                       PrioritySelectOfConcatIfNeeded(
+                           fb, predicates, cases, default_value,
+                           NodeNameFormat("%s_pow2_lut", original_divide_op),
+                           original_divide_op->loc()));
+  return res;
+}
+
+// We need to decide based on the number of pow_2_operations and operations
+// whether to implement the pow-2 operations as a shift or put it into the
+// same lut as the arbitrary constants.
+// TODO(allight): We need to move this to the APT schema. This is a combination
+// applicability and profitability guard.
+//
+// TODO(allight): It would be good to take into account the size of the LUT we'd
+// need too.
+absl::StatusOr<Pow2DivStrategy> GetPow2DivStrategy(Node* divisor,
+                                                   const QueryEngine& qe) {
+  // Need to see if we can even extract the shift amount at all before anything.
+  // If we can't than we're forced to use a LUT.
+  // Applicability Guard.
+  std::optional<Pow2Shift> pow2_shift = GetPow2Shift(divisor, qe);
+  if (!pow2_shift.has_value()) {
+    // No choice.
+    return Pow2Lut{};
+  }
+  // No other LUT elements so we can just shift (maybe with a 'is zero')
+  // TODO(allight): Probably not always the best actually if we know the actual
+  // divisor is a limited number of values. Admittedly this can be picked up and
+  // fixed up later so NBD.
+  if (qe.AtMostOneBitTrue(divisor)) {
+    return *pow2_shift;
+  }
+  // For now if we need to have a LUT anyway always use it.
+  // TODO(allight): This is probably a suboptimal app-guard. We should try to
+  // improve this.
+  return Pow2Lut{};
+}
+
+absl::StatusOr<bool> MatchWithLimitedDivisorSpace(Node* original_div_op,
+                                                  const QueryEngine& qe) {
+  XLS_RET_CHECK(original_div_op->OpIn({Op::kUDiv, Op::kSDiv}));
+  bool is_signed = original_div_op->op() == Op::kSDiv;
+  Node* dividend = original_div_op->operand(0);
+  Node* divisor = original_div_op->operand(1);
+  IntervalSet divisor_intervals = qe.GetIntervals(divisor).Get({});
+  // NB There is some complex logic to ensure that if we have a power of 2 that
+  // is large enough to cause intervals to pessimize we still recognize it.
+  std::optional<int64_t> divisor_space_size = divisor_intervals.Size();
+  bool divisor_is_pow_2 = qe.AtMostOneBitTrue(divisor);
+  bool has_div_by_zero = qe.Covers(divisor, UBits(0, divisor->BitCountOrDie()));
+  // We want to always handle cases where every divisor is a power of two and
+  // also create a LUT when the divisor has a small number of values.
+  if (!divisor_is_pow_2 &&
+      (!divisor_space_size ||
+       *divisor_space_size > kMaxArbitraryDivisorLUTSize)) {
+    // We've not been able to reduce the divisor to a small number of constants.
+    return false;
+  }
+  if (qe.IsFullyKnown(dividend) && divisor_space_size != 1) {
+    // Instead we can create a LUT directly on the divisor which is preferable
+    // since has less critical path for anything other than a single constant.
+    // TODO(Allight): Probably want an actual profitability guard to evaluate
+    // and balance this
+    return false;
+  }
+
+  // Now we need to decide how to implement the division (if we can).
+  // We need to decide based on the number of pow_2_operations and operations
+  // whether to implement the pow-2 operations as a shift or put it into the
+  // same lut as the arbitrary constants.
+  // TODO(allight): We need to move this to the APT schema.
+  XLS_ASSIGN_OR_RETURN(auto pow_2_strategy, GetPow2DivStrategy(divisor, qe));
+
+  // NB We could in the future have a strategy where we do a LUT but some of the
+  // divisors can share a shift. This would require a significant rework in how
+  // we do stuff unfortunately. Right now we assume that LUT is the only way to
+  // handle cases where there isn't a shift variable we can extract.
+  return std::visit(
+      Visitor{
+          [&](Pow2Lut) -> absl::StatusOr<bool> {
+            if (!divisor_space_size ||
+                *divisor_space_size > kMaxArbitraryDivisorLUTSize) {
+              // Too many values to be able to use a LUT.
+              return false;
+            }
+            std::vector<std::pair<Bits, DivisionConstants>> operations;
+            std::vector<std::pair<Bits, DivisionByPowerOfTwo>> pow_2_operations;
+            operations.reserve(*divisor_space_size);
+            pow_2_operations.reserve(*divisor_space_size);
+            for (const Bits& divisor_bits : divisor_intervals.Values()) {
+              if (divisor_bits.IsZero()) {
+                XLS_RET_CHECK(has_div_by_zero);
+                continue;
+              }
+              Bits magnitude_bits =
+                  is_signed ? bits_ops::Abs(divisor_bits) : divisor_bits;
+              if (magnitude_bits.IsPowerOfTwo()) {
+                pow_2_operations.emplace_back(
+                    divisor_bits,
+                    DivisionByPowerOfTwo{
+                        .exponent = magnitude_bits.CountTrailingZeros(),
+                        .divisor_negative = is_signed && divisor_bits.msb()});
+              } else {
+                operations.emplace_back(
+                    divisor_bits,
+                    ComputeDivisionConstants(dividend->BitCountOrDie(),
+                                             divisor_bits, is_signed));
+              }
+            }
+            XLS_ASSIGN_OR_RETURN(
+                Node * n, MakeDivLutNode(original_div_op, operations,
+                                         pow_2_operations, has_div_by_zero));
+            XLS_RETURN_IF_ERROR(original_div_op->ReplaceUsesWith(n));
+            return true;
+          },
+          [&](const Pow2Shift& shift) -> absl::StatusOr<bool> {
+            XLS_ASSIGN_OR_RETURN(
+                Node * n, MakePow2ShiftNode(original_div_op, dividend, shift));
+            XLS_RETURN_IF_ERROR(original_div_op->ReplaceUsesWith(n));
+            return true;
+          }},
+      pow_2_strategy);
+}
+
+// Matches unsigned integer division with one operand constant.
+//
+// If the divisor is constant, replaces with a multiply and shift(s).
+//
+// If the divisor has a small number of values, replace with a multiply, shifts
+// and muxes.
+//
+// If the dividend is constant and reasonably small, replaces with a lookup
+// table.
+//
+// Returns 'true' if the IR was modified (uses of node was replaced with a
+// different expression).
+//
+// In accordance with XLS semantics
+// (https://google.github.io/xls/ir_semantics/), quotient is rounded towards 0.
+//
+// Note: the source for the algorithms used to optimize division by constant is
+// "Division by Invariant Integers using Multiplication"
+// https://gmplib.org/~tege/divcnst-pldi94.pdf
+absl::StatusOr<bool> MatchUnsignedDivide(Node* original_div_op,
+                                         const QueryEngine& query_engine) {
+  if (original_div_op->op() != Op::kUDiv) {
+    return false;
+  }
+  Node* dividend = original_div_op->operand(0);
+  Node* divisor = original_div_op->operand(1);
+  int64_t bit_count = original_div_op->BitCountOrDie();
+
+  XLS_ASSIGN_OR_RETURN(
+      bool divisor_lut_or_shift,
+      MatchWithLimitedDivisorSpace(original_div_op, query_engine));
+  if (divisor_lut_or_shift) {
+    return true;
+  }
+
+  if (!query_engine.IsFullyKnown(dividend)) {
+    return false;
+  }
+  Bits dividend_bits = *query_engine.KnownValueAsBits(dividend);
+  int64_t constant_dividend =
+      bits_ops::UnsignedBitsToSaturatedInt64(dividend_bits);
+  if (constant_dividend > kMaxDividendForCompressedLUT) {
+    return false;
+  }
+
+  VLOG(2) << absl::StreamFormat(
+      "FOUND: UDiv of small constant dividend u%d:%d; replacing with lookup "
+      "table",
+      dividend_bits.bit_count(), constant_dividend);
+
+  // Implement the division with a simple lookup table, rounding quotient
+  // towards 0.
+  std::vector<Value> lut_entries;
+  lut_entries.reserve(constant_dividend + 1);
+  lut_entries.push_back(Value(Bits::AllOnes(bit_count)));
+  for (int64_t i = 1; i <= constant_dividend; ++i) {
+    lut_entries.push_back(Value(UBits(constant_dividend / i, bit_count)));
+  }
+
+  // Compress the lookup table to avoid excessively-large arrays.
+  CompressedLUT lut =
+      CompressLUT(std::move(lut_entries),
+                  /*past_the_end=*/ZeroOfType(original_div_op->GetType()));
+  XLS_ASSIGN_OR_RETURN(
+      Node * lookup_result,
+      GenerateLUT(std::move(lut), divisor, original_div_op->loc()));
+  XLS_RETURN_IF_ERROR(original_div_op->ReplaceUsesWith(lookup_result));
+  return true;
+}
+
+// Matches signed integer division with one operand constant.
+//
+// Vocabulary reminder: division operation is: dividend/divisor.
+//
+// If the divisor is a constant, replaces with a multiply and shift(s).
+//
+// If the divisor has a small number of values, replace with a multiply, shifts
+// and muxes.
+//
+// If the dividend is constant and reasonably small, replaces with a lookup
+// table.
+//
+// Returns 'true' if the IR was modified (uses of node was replaced with a
+// different expression).
+//
+// In accordance with XLS semantics
+// (https://google.github.io/xls/ir_semantics/), quotient is rounded towards 0.
+//
+// Note: the source for the algorithms used to optimize division by constant is
+// "Division by Invariant Integers using Multiplication"
+// https://gmplib.org/~tege/divcnst-pldi94.pdf
+absl::StatusOr<bool> MatchSignedDivide(Node* original_div_op,
+                                       const QueryEngine& query_engine) {
+  if (original_div_op->op() != Op::kSDiv) {
+    return false;
+  }
+  FunctionBase* fb = original_div_op->function_base();
+  Node* dividend = original_div_op->operand(0);
+  Node* divisor = original_div_op->operand(1);
+  int64_t bit_count = original_div_op->BitCountOrDie();
+
+  XLS_ASSIGN_OR_RETURN(
+      bool divisor_lut_or_shift,
+      MatchWithLimitedDivisorSpace(original_div_op, query_engine));
+  if (divisor_lut_or_shift) {
+    return true;
+  }
+
+  if (!query_engine.IsFullyKnown(dividend)) {
+    return false;
+  }
+  Bits dividend_bits = *query_engine.KnownValueAsBits(dividend);
+  int64_t constant_dividend = dividend_bits.FitsInInt64()
+                                  ? *dividend_bits.ToInt64()
+                                  : std::numeric_limits<int64_t>::max();
+  if (constant_dividend < -kMaxDividendForCompressedLUT ||
+      constant_dividend > kMaxDividendForCompressedLUT) {
+    return false;
+  }
+
+  VLOG(2) << absl::StreamFormat(
+      "FOUND: SDiv of small constant dividend s%d:%d; replacing with lookup "
+      "table",
+      dividend_bits.bit_count(), constant_dividend);
+
+  XLS_ASSIGN_OR_RETURN(Node * divisor_is_negative,
+                       CompareLiteral(divisor, 0, Op::kSLt));
+  XLS_ASSIGN_OR_RETURN(Node * divisor_is_zero,
+                       CompareLiteral(divisor, 0, Op::kEq));
+  XLS_ASSIGN_OR_RETURN(
+      Node * neg_divisor,
+      fb->MakeNode<UnOp>(original_div_op->loc(), divisor, Op::kNeg));
+  XLS_ASSIGN_OR_RETURN(
+      Node * abs_divisor,
+      fb->MakeNode<PrioritySelect>(original_div_op->loc(), divisor_is_negative,
+                                   /*cases=*/absl::MakeConstSpan({neg_divisor}),
+                                   /*default_value=*/divisor));
+
+  // Implement division by the absolute value of the divisor with a simple
+  // lookup table, rounding quotient towards 0. Give it a zero entry at the
+  // start to keep the indices aligned, even though we can't use the lookup
+  // table for the zero-divisor case (since MinSigned != -MaxSigned).
+  std::vector<Value> entries;
+  entries.reserve(std::abs(constant_dividend) + 1);
+  // Add an extra padding entry at the start of the table, to keep the indices
+  // aligned.
+  entries.push_back(ZeroOfType(original_div_op->GetType()));
+  for (int64_t i = 1; i <= std::abs(constant_dividend); ++i) {
+    entries.push_back(Value(SBits(constant_dividend / i, bit_count)));
+  }
+
+  // Compress the lookup table to avoid excessively-large arrays.
+  CompressedLUT lut =
+      CompressLUT(std::move(entries), ZeroOfType(original_div_op->GetType()));
+  XLS_ASSIGN_OR_RETURN(
+      Node * result_if_divide_by_pos,
+      GenerateLUT(std::move(lut), abs_divisor, original_div_op->loc()));
+
+  XLS_ASSIGN_OR_RETURN(Node * result_if_divide_by_neg,
+                       fb->MakeNode<UnOp>(original_div_op->loc(),
+                                          result_if_divide_by_pos, Op::kNeg));
+  XLS_ASSIGN_OR_RETURN(
+      Node * result_if_divide_by_zero,
+      fb->MakeNode<Literal>(
+          original_div_op->loc(),
+          Value(constant_dividend < 0 ? Bits::MinSigned(bit_count)
+                                      : Bits::MaxSigned(bit_count))));
+
+  XLS_ASSIGN_OR_RETURN(
+      Node * final_selector,
+      fb->MakeNode<Concat>(
+          original_div_op->loc(),
+          absl::MakeConstSpan({divisor_is_negative, divisor_is_zero})));
+  XLS_RETURN_IF_ERROR(original_div_op
+                          ->ReplaceUsesWithNew<PrioritySelect>(
+                              final_selector,
+                              /*cases=*/
+                              absl::MakeConstSpan({result_if_divide_by_zero,
+                                                   result_if_divide_by_neg}),
+                              /*default_value=*/result_if_divide_by_pos)
+                          .status());
+
+  return true;
+}
+
+struct LeadingZerosTrailingOnes {
+  int64_t leading_zeros;
+  int64_t trailing_ones;
+};
+
+// If the given `bits` is a constant mask of the form 0...01...1, returns the
+// number of leading zeros and trailing ones. Otherwise, returns std::nullopt.
+std::optional<LeadingZerosTrailingOnes> LsbConstantMask(const Bits& bits) {
+  int64_t trailing_zeros = -1;
+  int64_t leading_zeros = -1;
+  int64_t trailing_ones = -1;
+  bool is_mask = bits.HasSingleRunOfSetBits(&leading_zeros, &trailing_ones,
+                                            &trailing_zeros);
+
+  if (!is_mask || trailing_zeros != 0) {
+    return std::nullopt;
+  }
+
+  return LeadingZerosTrailingOnes{
+      .leading_zeros = leading_zeros,
+      .trailing_ones = trailing_ones,
+  };
 }
 
 // MatchArithPatterns matches simple tree patterns to find opportunities
@@ -87,277 +1381,42 @@ std::optional<ClampExpr> MatchClampUpperLimit(Node* n) {
 //
 // Return 'true' if the IR was modified (uses of node was replaced with a
 // different expression).
-absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n) {
-  // Pattern: Add/Sub/Or/Xor/Shift a value with 0 on the RHS.
-  if ((n->op() == Op::kAdd || n->op() == Op::kSub || n->op() == Op::kShll ||
-       n->op() == Op::kShrl || n->op() == Op::kShra) &&
-      IsLiteralZero(n->operand(1))) {
-    XLS_VLOG(2) << "FOUND: Useless operation of value with zero";
-    XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(n->operand(0)));
-    return true;
-  }
-
-  // Returns true if all operands of 'node' are the same.
-  auto all_operands_same = [](Node* node) {
-    return std::all_of(node->operands().begin(), node->operands().end(),
-                       [node](Node* op) { return op == node->operand(0); });
-  };
-
-  // Duplicate operands of AND and OR (and their inverting forms NAND and OR)
-  // can be removed.
+absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n,
+                                        const QueryEngine& query_engine) {
+  // Pattern: Add(Not(x), 1) => Neg(x)
   //
-  //   Op(x, y, y, x)  =>  Op(x, y)
-  if (n->Is<NaryOp>() && (n->op() == Op::kAnd || n->op() == Op::kOr ||
-                          n->op() == Op::kNand || n->op() == Op::kNor)) {
-    std::vector<Node*> unique_operands;
-    for (Node* operand : n->operands()) {
-      // This is quadratic in the number of operands, but shouldn't cause
-      // problems unless we have at least hundreds of thousands of operands
-      // which seems unlikely.
-      if (std::find(unique_operands.begin(), unique_operands.end(), operand) ==
-          unique_operands.end()) {
-        unique_operands.push_back(operand);
-      }
+  // In two's complement arithmetic: ~x + 1 == -x (mod 2^N).
+  if (n->op() == Op::kAdd) {
+    Node* negated = nullptr;
+    if (n->operand(0)->op() == Op::kNot &&
+        IsLiteralUnsignedOne(n->operand(1))) {
+      negated = n->operand(0)->operand(0);
+    } else if (n->operand(1)->op() == Op::kNot &&
+               IsLiteralUnsignedOne(n->operand(0))) {
+      // Handle the commuted operand ordering as well.
+      negated = n->operand(1)->operand(0);
     }
-    if (unique_operands.size() != n->operand_count()) {
+    if (negated != nullptr) {
+      VLOG(2) << "FOUND: Add(Not(x), 1)";
       XLS_RETURN_IF_ERROR(
-          n->ReplaceUsesWithNew<NaryOp>(unique_operands, n->op()).status());
+          n->ReplaceUsesWithNew<UnOp>(negated, Op::kNeg).status());
       return true;
     }
   }
 
-  // Single operand forms of non-inverting logical ops (AND, OR) can be
-  // replaced with the operand.
-  //
-  //   Op(x)  =>  x
-  if (n->Is<NaryOp>() && (n->op() == Op::kAnd || n->op() == Op::kOr) &&
-      n->operand_count() == 1) {
-    XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(n->operand(0)));
-    return true;
-  }
-
-  // Single operand forms of inverting logical ops (NAND, NOR) can be
-  // replaced with the inverted operand.
-  //
-  //   Op(x)  =>  Not(x)
-  if (n->Is<NaryOp>() && (n->op() == Op::kNor || n->op() == Op::kNand) &&
-      n->operand_count() == 1) {
-    XLS_RETURN_IF_ERROR(
-        n->ReplaceUsesWithNew<UnOp>(n->operand(0), Op::kNot).status());
-    return true;
-  }
-
-  // All operands the same for XOR:
-  //
-  //   XOR(x, x, ...)  =>  x  // Odd number of operands.
-  //   XOR(x, x, ...)  =>  0  // Even number of operands.
-  if (n->op() == Op::kXor && all_operands_same(n)) {
-    if (n->operand_count() % 2 == 0) {
-      // Even number of operands. Replace with zero.
-      XLS_RETURN_IF_ERROR(
-          n->ReplaceUsesWithNew<Literal>(Value(UBits(0, n->BitCountOrDie())))
-              .status());
-    } else {
-      // Odd number of operands. Replace with XOR operand.
-      XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(n->operand(0)));
-    }
-    return true;
-  }
-
-  // Replaces uses of n with a new node by eliminating operands for which the
-  // "predicate" holds. If the predicate holds for all operands, the
-  // NaryOpNullaryResult is used as a replacement.
-  auto eliminate_operands_where =
-      [n](std::function<bool(Node*)> predicate) -> absl::StatusOr<bool> {
-    XLS_RET_CHECK(n->Is<NaryOp>());
-    std::vector<Node*> new_operands;
-    for (Node* operand : n->operands()) {
-      if (!predicate(operand)) {
-        new_operands.push_back(operand);
-      }
-    }
-    if (new_operands.size() == n->operand_count()) {
-      return false;
-    }
-    if (new_operands.empty()) {
-      XLS_RETURN_IF_ERROR(
-          n
-              ->ReplaceUsesWithNew<Literal>(Value(DoLogicalOp(
-                  n->op(), {LogicalOpIdentity(n->op(), n->BitCountOrDie())})))
-              .status());
-    } else {
-      XLS_RETURN_IF_ERROR(
-          n->ReplaceUsesWithNew<NaryOp>(new_operands, n->op()).status());
-    }
-    return true;
-  };
-
-  // Or(x, 0, y) => Or(x, y)
-  // Xor(x, 0, y) => Xor(x, y)
-  // Nor(x, 0, y) => Nor(x, y)
-  if ((n->op() == Op::kOr || n->op() == Op::kXor || n->op() == Op::kNor)) {
-    XLS_ASSIGN_OR_RETURN(bool changed, eliminate_operands_where(IsLiteralZero));
-    if (changed) {
-      return true;
-    }
-  }
-
-  // Or(x, -1, y) => -1
-  if (n->op() == Op::kOr && AnyOperandWhere(n, IsLiteralAllOnes)) {
-    XLS_RETURN_IF_ERROR(
-        n->ReplaceUsesWithNew<Literal>(AllOnesOfType(n->GetType())).status());
-    return true;
-  }
-
-  // Nor(x, -1, y) => 0
-  if (n->op() == Op::kNor && AnyOperandWhere(n, IsLiteralAllOnes)) {
-    XLS_RETURN_IF_ERROR(
-        n->ReplaceUsesWithNew<Literal>(ZeroOfType(n->GetType())).status());
-    return true;
-  }
-
-  // And(x, -1, y) => And(x, y)
-  // Nand(x, -1, y) => Nand(x, y)
-  if (n->op() == Op::kAnd || n->op() == Op::kNand) {
-    XLS_ASSIGN_OR_RETURN(bool changed,
-                         eliminate_operands_where(IsLiteralAllOnes));
-    if (changed) {
-      return true;
-    }
-  }
-
-  // And(x, 0) => 0
-  if (n->op() == Op::kAnd && AnyOperandWhere(n, IsLiteralZero)) {
-    XLS_RETURN_IF_ERROR(
-        n->ReplaceUsesWithNew<Literal>(ZeroOfType(n->GetType())).status());
-    return true;
-  }
-
-  // Nand(x, 0) => 1
-  if (n->op() == Op::kNand && AnyOperandWhere(n, IsLiteralZero)) {
-    XLS_RETURN_IF_ERROR(
-        n->ReplaceUsesWithNew<Literal>(AllOnesOfType(n->GetType())).status());
-    return true;
-  }
-
-  auto has_inverted_operand = [&] {
-    for (Node* operand : n->operands()) {
-      if (operand->op() == Op::kNot &&
-          std::find(n->operands().begin(), n->operands().end(),
-                    operand->operand(0)) != n->operands().end()) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  // And(x, Not(x)) => 0
-  // And(Not(x), x) => 0
-  //
-  // Note that this won't be found through the ternary query engine because
-  // conservatively it determines `not(UNKNOWN) = UNKNOWN`.
-  if (n->op() == Op::kAnd && has_inverted_operand()) {
-    XLS_RETURN_IF_ERROR(
-        n->ReplaceUsesWithNew<Literal>(Value(UBits(0, n->BitCountOrDie())))
-            .status());
-    return true;
-  }
-
-  // Xor(x, -1) => Not(x)
-  if (n->op() == Op::kXor && n->operand_count() == 2 &&
-      IsLiteralAllOnes(n->operand(1))) {
-    XLS_VLOG(2) << "FOUND: Found xor with all ones";
-    XLS_RETURN_IF_ERROR(
-        n->ReplaceUsesWithNew<UnOp>(n->operand(0), Op::kNot).status());
-    return true;
-  }
-
-  auto is_same_opcode = [&](Node* other) { return n->op() == other->op(); };
-
-  // Flatten nested associative nary ops into their root op:
-  //
-  //   Op(Op(x, y), z)  =>  Op(x, y, z)
-  if (OpIsAssociative(n->op()) && n->Is<NaryOp>() &&
-      AnyOperandWhere(n, is_same_opcode)) {
-    std::vector<Node*> new_operands;
-    for (Node* operand : n->operands()) {
-      if (operand->op() == n->op()) {
-        for (Node* suboperand : operand->operands()) {
-          new_operands.push_back(suboperand);
-        }
-      } else {
-        new_operands.push_back(operand);
-      }
-    }
-    XLS_RETURN_IF_ERROR(
-        n->ReplaceUsesWithNew<NaryOp>(new_operands, n->op()).status());
-    return true;
-  }
-
-  // Fold the literal values presented to the nary op.
-  //
-  //   Op(C0, x, C1)  =>  Op(C2, x) where C2 == Op(C0, C1)
-  if (OpIsCommutative(n->op()) && OpIsAssociative(n->op()) && n->Is<NaryOp>() &&
-      AnyTwoOperandsWhere(n, IsLiteral)) {
-    std::vector<Node*> new_operands;
-    Bits bits = LogicalOpIdentity(n->op(), n->BitCountOrDie());
-    for (Node* operand : n->operands()) {
-      if (operand->Is<Literal>()) {
-        bits = DoLogicalOp(n->op(),
-                           {bits, operand->As<Literal>()->value().bits()});
-      } else {
-        new_operands.push_back(operand);
-      }
-    }
-    XLS_ASSIGN_OR_RETURN(Node * literal, n->function_base()->MakeNode<Literal>(
-                                             n->loc(), Value(bits)));
-    new_operands.push_back(literal);
-    XLS_RETURN_IF_ERROR(
-        n->ReplaceUsesWithNew<NaryOp>(new_operands, n->op()).status());
-    return true;
-  }
-
-  // Returns a value which is extended or narrowed to the given bit count.
-  // Possible cases:
-  //
-  //  (1) node width == bit_count: return node
-  //
-  //  (2) node width < bit_count: return node truncated to bit_count
-  //
-  //  (3) node width > bit_count and is_signed: return node sign-extended to
-  //  bit_count
-  //
-  //  (4) node width > bit_count and !is_signed: return node zero-extended to
-  //  bit_count
-  auto maybe_extend_or_trunc = [](Node* node, int64_t bit_count,
-                                  bool is_signed) -> absl::StatusOr<Node*> {
-    if (node->BitCountOrDie() == bit_count) {
-      return node;
-    }
-    if (node->BitCountOrDie() > bit_count) {
-      return node->function_base()->MakeNode<BitSlice>(node->loc(), node,
-                                                       /*start=*/0,
-                                                       /*width=*/bit_count);
-    }
-    return node->function_base()->MakeNode<ExtendOp>(
-        node->loc(), node,
-        /*new_bit_count=*/bit_count, is_signed ? Op::kSignExt : Op::kZeroExt);
-  };
-
-  // Pattern: Div/Mul by a positive power of two.
-  if ((n->op() == Op::kSMul || n->op() == Op::kUMul || n->op() == Op::kSDiv ||
-       n->op() == Op::kUDiv) &&
-      n->operand(1)->Is<Literal>()) {
-    const Bits& rhs = n->operand(1)->As<Literal>()->value().bits();
-    const bool is_signed = n->op() == Op::kSMul || n->op() == Op::kSDiv;
+  // Pattern: UDiv/UMul/SMul by a positive power of two.
+  if ((n->op() == Op::kSMul || n->op() == Op::kUMul || n->op() == Op::kUDiv) &&
+      query_engine.IsFullyKnown(n->operand(1))) {
+    const Bits rhs = *query_engine.KnownValueAsBits(n->operand(1));
+    const bool is_signed = n->op() == Op::kSMul;
     if (rhs.IsPowerOfTwo() &&
         (!is_signed || (is_signed && bits_ops::SGreaterThan(rhs, 0)))) {
-      XLS_VLOG(2) << "FOUND: Div/Mul by positive power of two";
+      VLOG(2) << "FOUND: Div/Mul by positive power of two";
       // Extend/trunc operand 0 (the non-literal operand) to the width of the
       // div/mul then shift by a constant amount.
       XLS_ASSIGN_OR_RETURN(
           Node * adjusted_lhs,
-          maybe_extend_or_trunc(n->operand(0), n->BitCountOrDie(), is_signed));
+          NarrowOrExtend(n->operand(0), is_signed, n->BitCountOrDie()));
       XLS_ASSIGN_OR_RETURN(Node * shift_amount,
                            n->function_base()->MakeNode<Literal>(
                                n->loc(), Value(UBits(rhs.CountTrailingZeros(),
@@ -367,10 +1426,10 @@ absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n) {
         // Multiply operation is replaced with shift left;
         shift_op = Op::kShll;
       } else {
-        // Divide operation is replaced with shift right (arithmetic or logical
-        // depending on signedness).
-        shift_op = is_signed ? Op::kShra : Op::kShrl;
+        // Unsigned divide operation is replaced with shift right logical.
+        shift_op = Op::kShrl;
       }
+      VLOG(2) << "FOUND: div/mul of positive power of two";
       XLS_RETURN_IF_ERROR(
           n->ReplaceUsesWithNew<BinOp>(adjusted_lhs, shift_amount, shift_op)
               .status());
@@ -378,44 +1437,238 @@ absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n) {
     }
   }
 
-  // Pattern: Mul by 0
-  if ((n->op() == Op::kSMul || n->op() == Op::kUMul) &&
-      IsLiteralZero(n->operand(1))) {
-    XLS_VLOG(2) << "FOUND: Mul by 0";
+  // Pattern: UMod/SMod by a literal.
+  if (n->OpIn({Op::kUMod, Op::kSMod}) &&
+      query_engine.IsFullyKnown(n->operand(1))) {
+    const Bits rhs = *query_engine.KnownValueAsBits(n->operand(1));
+    const bool is_signed = n->op() == Op::kSMod;
+
+    if (rhs.IsOne() || rhs.IsZero()) {
+      VLOG(2) << "FOUND: UMod/SMod by one or zero";
+      XLS_RETURN_IF_ERROR(
+          n->ReplaceUsesWithNew<Literal>(ZeroOfType(n->GetType())).status());
+      return true;
+    }
+
+    if (rhs.IsPowerOfTwo() &&
+        (!is_signed || (is_signed && bits_ops::SGreaterThan(rhs, 0)))) {
+      VLOG(2) << "FOUND: UMod/SMod by a positive power of two";
+      // Truncate operand 0 to the relevant low bits, then zero-extend it to the
+      // width of the mod.
+      XLS_ASSIGN_OR_RETURN(Node * truncated_lhs,
+                           NarrowOrExtend(n->operand(0), /*n_is_signed=*/false,
+                                          rhs.CountTrailingZeros()));
+      XLS_ASSIGN_OR_RETURN(Node * nonnegative_result,
+                           NarrowOrExtend(truncated_lhs, /*n_is_signed=*/false,
+                                          n->BitCountOrDie()));
+      if (!is_signed) {
+        XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(nonnegative_result));
+        return true;
+      }
+
+      // By XLS convention, the sign of the modulus matches the sign of the LHS,
+      // so we should subtract the RHS from our result to get the negative
+      // remainder iff the LHS is negative and the result would otherwise be
+      // positive.
+      XLS_ASSIGN_OR_RETURN(
+          Node * truncated_zero,
+          n->function_base()->MakeNode<Literal>(
+              n->loc(), Value(UBits(0, truncated_lhs->BitCountOrDie()))));
+      XLS_ASSIGN_OR_RETURN(
+          Node * result_is_positive,
+          n->function_base()->MakeNode<CompareOp>(n->loc(), truncated_lhs,
+                                                  truncated_zero, Op::kNe));
+      XLS_ASSIGN_OR_RETURN(
+          Node * dividend_is_negative,
+          n->function_base()->MakeNode<BitSlice>(
+              n->loc(), n->operand(0),
+              /*start=*/n->operand(0)->BitCountOrDie() - 1, /*width=*/1));
+      XLS_ASSIGN_OR_RETURN(
+          Node * negative_result,
+          n->function_base()->MakeNode<BinOp>(n->loc(), nonnegative_result,
+                                              n->operand(1), Op::kSub));
+      XLS_ASSIGN_OR_RETURN(
+          Node * use_negative_result,
+          n->function_base()->MakeNode<NaryOp>(
+              n->loc(),
+              std::vector<Node*>({result_is_positive, dividend_is_negative}),
+              Op::kAnd));
+      XLS_RETURN_IF_ERROR(
+          n->ReplaceUsesWithNew<Select>(
+               use_negative_result,
+               std::vector<Node*>({nonnegative_result, negative_result}),
+               /*default_value=*/std::nullopt)
+              .status());
+      return true;
+    }
+
+    // Convert UMod/SMod by any other literal into a divide, multiply, and
+    // subtract; we'll later simplify the divide into a multiply & shift(s).
+    // (See MatchUnsignedDivide for how.)
+    XLS_ASSIGN_OR_RETURN(Node * quotient,
+                         n->function_base()->MakeNode<BinOp>(
+                             n->loc(), n->operand(0), n->operand(1),
+                             is_signed ? Op::kSDiv : Op::kUDiv));
+    XLS_ASSIGN_OR_RETURN(Node * approximant,
+                         n->function_base()->MakeNode<ArithOp>(
+                             n->loc(), quotient, n->operand(1),
+                             /*width=*/n->operand(0)->BitCountOrDie(),
+                             is_signed ? Op::kSMul : Op::kUMul));
     XLS_RETURN_IF_ERROR(
-        n->ReplaceUsesWithNew<Literal>(Value(UBits(0, n->BitCountOrDie())))
+        n->ReplaceUsesWithNew<BinOp>(n->operand(0), approximant, Op::kSub)
             .status());
     return true;
   }
 
-  // Pattern: UMod by a power of two.
-  if ((n->op() == Op::kUMod) && n->operand(1)->Is<Literal>()) {
-    const Bits& rhs = n->operand(1)->As<Literal>()->value().bits();
-    if (rhs.IsPowerOfTwo()) {
-      XLS_VLOG(2) << "FOUND: UMod by a power of two";
-      // Extend/trunc operand 0 (the non-literal operand) to the width of the
-      // mod then mask off the high bits.
-      XLS_ASSIGN_OR_RETURN(
-          Node * adjusted_lhs,
-          maybe_extend_or_trunc(n->operand(0), n->BitCountOrDie(),
-                                /*is_signed=*/false));
-      Bits one = UBits(1, adjusted_lhs->BitCountOrDie());
-      Bits bits_mask = bits_ops::Sub(
-          bits_ops::ShiftLeftLogical(one, rhs.CountTrailingZeros()), one);
-      XLS_ASSIGN_OR_RETURN(Node * mask, n->function_base()->MakeNode<Literal>(
-                                            n->loc(), Value(bits_mask)));
+  // If the only possibly-set divisor bit is at index k, the remainder is
+  // zero when that bit is clear, and the low k bits of the dividend otherwise.
+  if (n->op() == Op::kUMod) {
+    Node* divisor = n->operand(1);
+    if (auto ternary = query_engine.GetTernary(divisor); ternary.has_value()) {
+      const Bits possible_set_bits = ternary_ops::ToKnownBitsValues(
+          ternary->Get({}), /*default_set=*/true);
+      if (possible_set_bits.IsPowerOfTwo()) {
+        const int64_t k = possible_set_bits.CountTrailingZeros();
+        if (k == 0) {
+          XLS_RETURN_IF_ERROR(
+              n->ReplaceUsesWithNew<Literal>(ZeroOfType(n->GetType()))
+                  .status());
+          return true;
+        }
+        XLS_ASSIGN_OR_RETURN(BitSlice * selector,
+                             FindOrMakeBitSlice(divisor, k, /*width=*/1));
+        XLS_ASSIGN_OR_RETURN(
+            Node * truncated_lhs,
+            NarrowOrExtend(n->operand(0), /*n_is_signed=*/false, k));
+        XLS_ASSIGN_OR_RETURN(
+            Node * remainder,
+            NarrowOrExtend(truncated_lhs, /*n_is_signed=*/false,
+                           n->BitCountOrDie()));
+        XLS_ASSIGN_OR_RETURN(Node * zero,
+                             n->function_base()->MakeNode<Literal>(
+                                 n->loc(), ZeroOfType(n->GetType())));
+        XLS_RETURN_IF_ERROR(n->ReplaceUsesWithNew<Select>(
+                                 selector,
+                                 absl::MakeConstSpan({zero, remainder}),
+                                 /*default_value=*/std::nullopt)
+                                .status());
+        return true;
+      }
+    }
+  }
+
+  // Convert UMod/SMod of a small constant (e.g., 13 % x) into a divide,
+  // multiply, and subtract; we'll later simplify the divide into a lookup
+  // table. (See MatchUnsignedDivide for how.)
+  if (n->OpIn({Op::kUMod, Op::kSMod}) &&
+      query_engine.IsFullyKnown(n->operand(0))) {
+    Bits dividend = *query_engine.KnownValueAsBits(n->operand(0));
+    if (dividend.IsZero()) {
+      // 0 % x == 0, for all x.
+      VLOG(2) << "FOUND: UMod/SMod of zero";
       XLS_RETURN_IF_ERROR(
-          n->ReplaceUsesWithNew<NaryOp>(
-               std::vector<Node*>({adjusted_lhs, mask}), Op::kAnd)
-              .status());
+          n->ReplaceUsesWithNew<Literal>(ZeroOfType(n->GetType())).status());
+      return true;
+    } else if (bits_ops::ULessThanOrEqual(
+                   n->op() == Op::kSMod ? bits_ops::Abs(dividend) : dividend,
+                   kMaxDividendForCompressedLUT)) {
+      VLOG(2) << "FOUND: UMod/SMod of small constant " << dividend
+              << "; replacing with remainder computation";
+      const bool is_signed = n->op() == Op::kSMod;
+      XLS_ASSIGN_OR_RETURN(Node * quotient,
+                           n->function_base()->MakeNode<BinOp>(
+                               n->loc(), n->operand(0), n->operand(1),
+                               is_signed ? Op::kSDiv : Op::kUDiv));
+      XLS_ASSIGN_OR_RETURN(Node * approximant,
+                           n->function_base()->MakeNode<ArithOp>(
+                               n->loc(), quotient, n->operand(1),
+                               /*width=*/n->operand(0)->BitCountOrDie(),
+                               is_signed ? Op::kSMul : Op::kUMul));
+      XLS_ASSIGN_OR_RETURN(Node * remainder,
+                           n->function_base()->MakeNode<BinOp>(
+                               n->loc(), n->operand(0), approximant, Op::kSub));
+      XLS_ASSIGN_OR_RETURN(Node * divisor_is_zero,
+                           CompareLiteral(n->operand(1), 0, Op::kEq));
+      XLS_ASSIGN_OR_RETURN(Node * zero,
+                           n->function_base()->MakeNode<Literal>(
+                               n->loc(), Value(UBits(0, n->BitCountOrDie()))));
+      XLS_RETURN_IF_ERROR(n->ReplaceUsesWithNew<PrioritySelect>(
+                               divisor_is_zero,
+                               /*cases=*/absl::MakeConstSpan({zero}),
+                               /*default_value=*/remainder)
+                              .status());
       return true;
     }
   }
 
-  // Pattern: Not(Not(x)) => x
-  if (n->op() == Op::kNot && n->operand(0)->op() == Op::kNot) {
-    XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(n->operand(0)->operand(0)));
+  XLS_ASSIGN_OR_RETURN(bool udiv_matched, MatchUnsignedDivide(n, query_engine));
+  if (udiv_matched) {
     return true;
+  }
+
+  XLS_ASSIGN_OR_RETURN(bool sdiv_matched, MatchSignedDivide(n, query_engine));
+  if (sdiv_matched) {
+    return true;
+  }
+
+  // Pattern: UDiv/SDiv of `X` by `Y << K` -> `(X / Y) / (1 << K)`
+  // This matches division by a shifted value (as long as the shift won't cause
+  // overflow or wraparound), breaking it into a division by `Y` and a division
+  // by `1 << K`. We'll later come back and simplify the division by `1 << K`,
+  // and other optimizations may later simplify the division by `Y` (especially
+  // if `Y` is a constant).
+  //
+  // Note on division by zero semantics:
+  // - For UDiv: UDiv by zero always returns the all-ones value.
+  // - For SDiv: SDiv by zero returns either MaxPos or MinNeg depending on the
+  //             sign of the dividend. Since the intermediate `X / Y` can invert
+  //             the sign of the dividend (if Y is negative) before hitting the
+  //             outer division by zero, we take this into account.
+  if (n->op() == Op::kUDiv || n->op() == Op::kSDiv) {
+    Node* divisor = n->operand(1);
+    if (divisor->op() == Op::kShll) {
+      Node* y = divisor->operand(0);
+      Node* k = divisor->operand(1);
+
+      const int64_t leading_zeros =
+          query_engine.KnownLeadingZeros(y).value_or(0);
+      const int64_t max_shift =
+          query_engine.MaxUnsignedValue(k).FitsInInt64Unsigned()
+              ? query_engine.MaxUnsignedValue(k).UnsignedToInt64().value()
+              : n->BitCountOrDie();
+      const int64_t limit = leading_zeros - ((n->op() == Op::kSDiv) ? 1 : 0);
+      if (max_shift <= limit) {
+        FunctionBase* f = n->function_base();
+        XLS_ASSIGN_OR_RETURN(
+            Node * new_dividend,
+            f->MakeNode<BinOp>(n->loc(), n->operand(0), y, n->op()));
+        XLS_ASSIGN_OR_RETURN(
+            Node * one, f->MakeNode<Literal>(
+                            n->loc(), Value(UBits(1, n->BitCountOrDie()))));
+        XLS_ASSIGN_OR_RETURN(Node * new_divisor,
+                             f->MakeNode<BinOp>(n->loc(), one, k, Op::kShll));
+        XLS_ASSIGN_OR_RETURN(
+            Node * div_by_shift_result,
+            f->MakeNode<BinOp>(n->loc(), new_dividend, new_divisor, n->op()));
+        Node* replacement;
+        if (!query_engine.Covers(divisor, UBits(0, divisor->BitCountOrDie()))) {
+          replacement = div_by_shift_result;
+        } else {
+          XLS_ASSIGN_OR_RETURN(Node * divisor_is_zero,
+                               CompareLiteral(divisor, 0, Op::kEq));
+          XLS_ASSIGN_OR_RETURN(Node * div_by_zero_result,
+                               MakeDivByZeroResult(n));
+          XLS_ASSIGN_OR_RETURN(
+              replacement,
+              f->MakeNode<Select>(
+                  n->loc(), divisor_is_zero,
+                  std::vector<Node*>{div_by_shift_result, div_by_zero_result},
+                  std::nullopt));
+        }
+        XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(replacement));
+        return true;
+      }
+    }
   }
 
   // Logical shift by a constant can be replaced by a slice and concat.
@@ -428,9 +1681,9 @@ absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n) {
   // implies a barrel shifter which is not necessary for a shift by a constant
   // amount.
   if ((n->op() == Op::kShll || n->op() == Op::kShrl) &&
-      n->operand(1)->Is<Literal>()) {
+      query_engine.IsFullyKnown(n->operand(1))) {
     int64_t bit_count = n->BitCountOrDie();
-    const Bits& shift_bits = n->operand(1)->As<Literal>()->value().bits();
+    const Bits shift_bits = *query_engine.KnownValueAsBits(n->operand(1));
     if (shift_bits.IsZero()) {
       // A shift by zero is a nop.
       XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(n->operand(0)));
@@ -454,16 +1707,18 @@ absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n) {
     auto concat_operands = (n->op() == Op::kShll)
                                ? std::vector<Node*>{slice, zero}
                                : std::vector<Node*>{zero, slice};
+    VLOG(2) << "FOUND: logical shift by constant";
     XLS_RETURN_IF_ERROR(
         n->ReplaceUsesWithNew<Concat>(concat_operands).status());
     return true;
   }
 
-  // SignExt(SignExt(x, w_0), w_1) => SignExt(x, w_1)
-  if (n->op() == Op::kSignExt && n->operand(0)->op() == Op::kSignExt) {
+  // Ext(Ext(x, w_0), w_1) => Ext(x, w_1)
+  if (n->Is<ExtendOp>() && n->op() == n->operand(0)->op()) {
+    VLOG(2) << "FOUND: replace extend(extend(x)) with extend(x)";
     XLS_RETURN_IF_ERROR(
         n->ReplaceUsesWithNew<ExtendOp>(n->operand(0)->operand(0),
-                                        n->BitCountOrDie(), Op::kSignExt)
+                                        n->BitCountOrDie(), n->op())
             .status());
     return true;
   }
@@ -476,9 +1731,9 @@ absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n) {
   // This simplification is desirable because in the canonical lower-level IR a
   // shift implies a barrel shifter which is not necessary for a shift by a
   // constant amount.
-  if (n->op() == Op::kShra && n->operand(1)->Is<Literal>()) {
+  if (n->op() == Op::kShra && query_engine.IsFullyKnown(n->operand(1))) {
     const int64_t bit_count = n->BitCountOrDie();
-    const Bits& shift_bits = n->operand(1)->As<Literal>()->value().bits();
+    const Bits shift_bits = *query_engine.KnownValueAsBits(n->operand(1));
     if (shift_bits.IsZero()) {
       // A shift by zero is a nop.
       XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(n->operand(0)));
@@ -495,35 +1750,222 @@ absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n) {
                                            n->loc(), n->operand(0),
                                            /*start=*/bit_count - slice_width,
                                            /*width=*/slice_width));
+    VLOG(2) << "FOUND: replace ashr by constant with signext(slice(x))";
     XLS_RETURN_IF_ERROR(
         n->ReplaceUsesWithNew<ExtendOp>(slice, bit_count, Op::kSignExt)
             .status());
     return true;
   }
 
-  // Pattern: Double negative.
-  //   -(-expr)
-  if (n->op() == Op::kNeg && n->operand(0)->op() == Op::kNeg) {
-    XLS_VLOG(2) << "FOUND: Double negative";
-    XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(n->operand(0)->operand(0)));
+  // Logical shift of a 1-bit value:
+  //   shll(y:bits[1], amt) == y & (amt == 0)
+  //   shrl(y:bits[1], amt) == y & (amt == 0)
+  //
+  // A 1-bit logical shift by a nonzero amount produces zero, and a shift by
+  // zero is a no-op.
+  if ((n->op() == Op::kShll || n->op() == Op::kShrl) &&
+      n->operand(0)->BitCountOrDie() == 1) {
+    VLOG(2) << "FOUND: logical shift of 1-bit value";
+    XLS_ASSIGN_OR_RETURN(Node * amt_is_zero,
+                         CompareLiteral(n->operand(1), 0, Op::kEq));
+    std::vector<Node*> args = {n->operand(0), amt_is_zero};
+    XLS_RETURN_IF_ERROR(n->ReplaceUsesWithNew<NaryOp>(args, Op::kAnd).status());
     return true;
   }
 
-  // Patterns (where x is a bits[1] type):
-  //   eq(x, 1) => x
-  //   eq(x, 0) => not(x)
-  //
-  // Because eq is commutative, we can rely on the literal being on the right
-  // because of canonicalization.
-  if (n->op() == Op::kEq && n->operand(0)->BitCountOrDie() == 1 &&
-      n->operand(1)->Is<Literal>()) {
-    if (IsLiteralZero(n->operand(1))) {
-      XLS_RETURN_IF_ERROR(
-          n->ReplaceUsesWithNew<UnOp>(n->operand(0), Op::kNot).status());
-      return true;
-    }
-    XLS_RET_CHECK(IsLiteralUnsignedOne(n->operand(1)));
+  // An arithmetic shift-right of a 1-bit value is a no-op.
+  if (n->op() == Op::kShra && n->operand(0)->BitCountOrDie() == 1) {
+    VLOG(2) << "FOUND: arithmetic shift-right of 1-bit value";
     XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(n->operand(0)));
+    return true;
+  }
+
+  // Any shift right of a constant 1 can be replaced by a test for equality with
+  // zero (followed by a zero extension), since
+  //
+  //   (1 >> x) = 1 if x == 0,
+  //              0 otherwise.
+  //
+  // ... as long as it's not an arithmetic shift-right of bits[1]:1.
+  auto is_unsigned_one = [&](Node* node) {
+    const std::optional<Value> value = query_engine.KnownValue(node);
+    return value.has_value() && value->IsBits() && value->bits().IsOne();
+  };
+  if ((n->op() == Op::kShra || n->op() == Op::kShrl) &&
+      is_unsigned_one(n->operand(0))) {
+    // Make absolutely sure we're not dealing with an arithmetic shift-right of
+    // bits[1]:1. (For correctness, that case must be handled first.)
+    XLS_RET_CHECK(n->op() != Op::kShra || n->operand(0)->BitCountOrDie() > 1);
+
+    VLOG(2) << "FOUND: shift right of constant 1";
+    Node* x = n->operand(1);
+    XLS_ASSIGN_OR_RETURN(Literal * zero,
+                         n->function_base()->MakeNode<Literal>(
+                             n->loc(), Value(UBits(0, x->BitCountOrDie()))));
+    XLS_ASSIGN_OR_RETURN(Node * test, n->function_base()->MakeNode<CompareOp>(
+                                          n->loc(), x, zero, Op::kEq));
+    if (n->BitCountOrDie() == 1) {
+      XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(test));
+    } else {
+      XLS_RETURN_IF_ERROR(n->ReplaceUsesWithNew<ExtendOp>(
+                               test, n->BitCountOrDie(), Op::kZeroExt)
+                              .status());
+    }
+    return true;
+  }
+
+  // A 1-wide decode can be simplified to a test for equality with zero; any
+  // other index results in zero output.
+  if (n->op() == Op::kDecode && n->BitCountOrDie() == 1) {
+    VLOG(2) << "FOUND: 1-wide decode";
+    XLS_ASSIGN_OR_RETURN(
+        Literal * zero,
+        n->function_base()->MakeNode<Literal>(
+            n->loc(), Value(UBits(0, n->operand(0)->BitCountOrDie()))));
+    XLS_RETURN_IF_ERROR(
+        n->ReplaceUsesWithNew<CompareOp>(n->operand(0), zero, Op::kEq)
+            .status());
+    return true;
+  }
+
+  // A 2-wide decode with a 1-bit operand can be simplified to:
+  //   decode(operand:u1) => concat(operand, not(operand)).
+  // 1-wide decodes should be handled above, and no wider decode is allowed for
+  // a 1-bit operand.
+  if (n->op() == Op::kDecode && n->operand(0)->BitCountOrDie() == 1 &&
+      n->BitCountOrDie() == 2) {
+    VLOG(2) << "FOUND: decode of 1-bit operand";
+    XLS_ASSIGN_OR_RETURN(
+        Node * not_operand,
+        n->function_base()->MakeNode<UnOp>(n->loc(), n->operand(0), Op::kNot));
+    XLS_RETURN_IF_ERROR(n->ReplaceUsesWithNew<Concat>(
+                             std::vector<Node*>({n->operand(0), not_operand}))
+                            .status());
+    return true;
+  }
+
+  // We can eliminate negations that are only used in signed comparisons to
+  // literals or other negations, at minimal cost.
+  //
+  // NOTE: This is expected to reduce delay in other scenarios too, but we
+  //       currently have no way to model the tradeoff between area & delay, so
+  //       we only do this where we can fully eliminate one negation.
+  auto is_removable_negate = [&query_engine](Node* node) {
+    return node->op() == Op::kNeg &&
+           !node->function_base()->HasImplicitUse(node) &&
+           absl::c_all_of(node->users(), [&query_engine](Node* user) {
+             return IsSignedCompare(user) &&
+                    user->operand(0)->op() == Op::kNeg &&
+                    (query_engine.IsFullyKnown(user->operand(1)) ||
+                     user->operand(1)->op() == Op::kNeg);
+           });
+  };
+
+  // Pattern: Signed comparison of negated operands
+  //   eq(-lhs, -rhs)  =>  eq(lhs, rhs)
+  //   ne(-lhs, -rhs)  =>  ne(lhs, rhs)
+  //    (-lhs < -rhs)  =>  (lhs > rhs) XOR (lhs != MIN) XOR (rhs != MIN)
+  //    (-lhs > -rhs)  =>  (lhs < rhs) XOR (lhs != MIN) XOR (rhs != MIN)
+  //   (-lhs <= -rhs)  =>  (lhs >= rhs) XOR (lhs != MIN) XOR (rhs != MIN)
+  //   (-lhs >= -rhs)  =>  (lhs <= rhs) XOR (lhs != MIN) XOR (rhs != MIN)
+  if (IsBitsCompare(n) && IsSignedCompare(n) &&
+      n->operand(0)->op() == Op::kNeg && n->operand(1)->op() == Op::kNeg &&
+      (is_removable_negate(n->operand(0)) ||
+       is_removable_negate(n->operand(1)))) {
+    VLOG(2) << "FOUND: Signed comparison of negated operands with no other use";
+    Node* lhs = n->operand(0)->operand(0);
+    Node* rhs = n->operand(1)->operand(0);
+
+    Node* equivalent;
+    XLS_ASSIGN_OR_RETURN(Op reversed_op, ReverseComparisonOp(n->op()));
+    XLS_ASSIGN_OR_RETURN(Node * reversed_cmp,
+                         n->function_base()->MakeNode<CompareOp>(
+                             n->loc(), lhs, rhs, reversed_op));
+    if (n->op() == Op::kEq || n->op() == Op::kNe) {
+      equivalent = reversed_cmp;
+    } else {
+      XLS_RET_CHECK_EQ(n->operand(0)->BitCountOrDie(),
+                       n->operand(1)->BitCountOrDie());
+      const int64_t bit_count = n->operand(0)->BitCountOrDie();
+      InlineBitmap hi_bit(bit_count);
+      hi_bit.Set(bit_count - 1);
+      XLS_ASSIGN_OR_RETURN(
+          Literal * min_value,
+          n->function_base()->MakeNode<Literal>(
+              n->loc(), Value(Bits::FromBitmap(std::move(hi_bit)))));
+      XLS_ASSIGN_OR_RETURN(Node * lhs_not_min,
+                           n->function_base()->MakeNode<CompareOp>(
+                               n->loc(), lhs, min_value, Op::kNe));
+      XLS_ASSIGN_OR_RETURN(Node * rhs_not_min,
+                           n->function_base()->MakeNode<CompareOp>(
+                               n->loc(), rhs, min_value, Op::kNe));
+      XLS_ASSIGN_OR_RETURN(
+          equivalent,
+          n->function_base()->MakeNode<NaryOp>(
+              n->loc(),
+              std::vector<Node*>{reversed_cmp, lhs_not_min, rhs_not_min},
+              Op::kXor));
+    }
+
+    XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(equivalent));
+    return true;
+  }
+
+  // Pattern: Signed comparison of negation to literal
+  //   eq(-expr, K)  =>  eq(expr, -K)
+  //   ne(-expr, K)  =>  ne(expr, -K)
+  //    (-expr < K)  =>  (expr > -K) XOR (expr != MIN) XOR (K != MIN)
+  //    (-expr > K)  =>  (expr < -K) XOR (expr != MIN) XOR (K != MIN)
+  //   (-expr <= K)  =>  (expr >= -K) XOR (expr != MIN) XOR (K != MIN)
+  //   (-expr >= K)  =>  (expr <= -K) XOR (expr != MIN) XOR (K != MIN)
+  //
+  // Canonicalization puts the literal on the right for comparisons.
+  if (IsBitsCompare(n) && IsSignedCompare(n) &&
+      n->operand(0)->op() == Op::kNeg &&
+      query_engine.IsFullyKnown(n->operand(1)) &&
+      is_removable_negate(n->operand(0))) {
+    VLOG(2) << "FOUND: Signed comparison of negation to literal";
+    Node* expr = n->operand(0)->operand(0);
+    Bits k_bits = *query_engine.KnownValueAsBits(n->operand(1));
+
+    Bits neg_k_bits = bits_ops::Negate(k_bits);
+    XLS_ASSIGN_OR_RETURN(Literal * neg_k,
+                         n->function_base()->MakeNode<Literal>(
+                             n->operand(1)->loc(), Value(neg_k_bits)));
+
+    Node* equivalent;
+    XLS_ASSIGN_OR_RETURN(Op reversed_op, ReverseComparisonOp(n->op()));
+    XLS_ASSIGN_OR_RETURN(Node * reversed_cmp,
+                         n->function_base()->MakeNode<CompareOp>(
+                             n->loc(), expr, neg_k, reversed_op));
+    if (n->op() == Op::kEq || n->op() == Op::kNe) {
+      equivalent = reversed_cmp;
+    } else {
+      XLS_RET_CHECK_EQ(n->operand(0)->BitCountOrDie(), k_bits.bit_count());
+      const int64_t bit_count = n->operand(0)->BitCountOrDie();
+      InlineBitmap hi_bit(bit_count);
+      hi_bit.Set(bit_count - 1);
+      Bits min_value_bits = Bits::FromBitmap(std::move(hi_bit));
+
+      Node* x;  // x := (expr != MIN) XOR (K != MIN)...
+                // but since k is known at compile time, we fold the answer in.
+      XLS_ASSIGN_OR_RETURN(Literal * min_value,
+                           n->function_base()->MakeNode<Literal>(
+                               n->loc(), Value(min_value_bits)));
+      if (k_bits != min_value_bits) {
+        XLS_ASSIGN_OR_RETURN(x, n->function_base()->MakeNode<CompareOp>(
+                                    n->loc(), expr, min_value, Op::kEq));
+      } else {
+        XLS_ASSIGN_OR_RETURN(x, n->function_base()->MakeNode<CompareOp>(
+                                    n->loc(), expr, min_value, Op::kNe));
+      }
+      XLS_ASSIGN_OR_RETURN(
+          equivalent,
+          n->function_base()->MakeNode<NaryOp>(
+              n->loc(), std::vector<Node*>{reversed_cmp, x}, Op::kXor));
+    }
+
+    XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(equivalent));
     return true;
   }
 
@@ -534,7 +1976,7 @@ absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n) {
   if (n->op() == Op::kShll || n->op() == Op::kShrl || n->op() == Op::kShra) {
     if (n->operand(1)->Is<Concat>()) {
       Concat* concat = n->operand(1)->As<Concat>();
-      if (IsLiteralZero(concat->operand(0))) {
+      if (query_engine.IsAllZeros(concat->operand(0))) {
         Node* new_shift_amount;
         if (concat->operand_count() == 1) {
           new_shift_amount = concat->operand(0);
@@ -546,11 +1988,48 @@ absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n) {
               n->function_base()->MakeNode<Concat>(
                   concat->loc(), concat->operands().subspan(1)));
         }
+        VLOG(2) << "FOUND: Removal of zero_ext of shift amount";
         XLS_RETURN_IF_ERROR(n->ReplaceOperandNumber(1, new_shift_amount,
                                                     /*type_must_match=*/false));
         return true;
       }
     }
+  }
+  // This also applies to decode, though we may need to zero-extend the result
+  // if the argument gets too small.
+  //
+  //   decode({0, b}) => zero_ext(decode(b))
+  if (n->op() == Op::kDecode && n->operand(0)->Is<Concat>() &&
+      query_engine.IsAllZeros(n->operand(0)->As<Concat>()->operand(0))) {
+    Concat* concat = n->operand(0)->As<Concat>();
+    Node* new_index;
+    if (concat->operand_count() == 1) {
+      new_index = concat->operand(0);
+    } else if (concat->operand_count() == 2) {
+      new_index = concat->operand(1);
+    } else {
+      XLS_ASSIGN_OR_RETURN(new_index,
+                           n->function_base()->MakeNode<Concat>(
+                               concat->loc(), concat->operands().subspan(1)));
+    }
+    VLOG(2) << "FOUND: Removal of zero_ext of decode index";
+
+    int64_t n_width = n->BitCountOrDie();
+    int64_t operand_width = new_index->BitCountOrDie();
+
+    int64_t decode_width = n_width;
+    if (operand_width < 63) {
+      // We can't decode to something wider than 2**(n_bit_count) bits...
+      // so we decode to exactly 2**(n_bit_count) bits, and resize after.
+      decode_width = std::min(int64_t{1} << operand_width, n_width);
+    }
+    XLS_ASSIGN_OR_RETURN(Node * decoded,
+                         n->function_base()->MakeNode<Decode>(
+                             n->loc(), new_index, decode_width));
+    XLS_ASSIGN_OR_RETURN(
+        decoded, NarrowOrExtend(decoded, /*n_is_signed=*/false, n_width));
+    XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(decoded));
+    return true;
   }
 
   // Guards to prevent overshifting can be removed:
@@ -562,41 +2041,84 @@ absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n) {
   //
   //   shift(x, K) = shift(x, width(x)) for all K >= width(x).
   //
-  // This transformation can be performed for any value of LIMIT greater than or
-  // equal to width(x).
+  // This transformation can be performed for any value of LIMIT greater than
+  // or equal to width(x).
   if (n->op() == Op::kShll || n->op() == Op::kShrl || n->op() == Op::kShra) {
-    std::optional<ClampExpr> clamp_expr = MatchClampUpperLimit(n->operand(1));
+    std::optional<ClampExpr> clamp_expr =
+        MatchClampUpperLimit(n->operand(1), query_engine);
     if (clamp_expr.has_value() &&
         bits_ops::UGreaterThanOrEqual(clamp_expr->upper_limit,
                                       n->BitCountOrDie())) {
+      VLOG(2) << "FOUND: Removal of unnecessary shift guard";
       XLS_RETURN_IF_ERROR(n->ReplaceOperandNumber(1, clamp_expr->node));
+      return true;
+    }
+  }
+  // This also applies to decode(clamp(amt, LIMIT)), since decode(x) == 1 << x.
+  if (n->op() == Op::kDecode) {
+    std::optional<ClampExpr> clamp_expr =
+        MatchClampUpperLimit(n->operand(0), query_engine);
+    if (clamp_expr.has_value() &&
+        bits_ops::UGreaterThanOrEqual(clamp_expr->upper_limit,
+                                      n->BitCountOrDie())) {
+      VLOG(2) << "FOUND: Removal of unnecessary decode guard";
+      XLS_RETURN_IF_ERROR(n->ReplaceOperandNumber(0, clamp_expr->node));
+      return true;
+    }
+  }
+
+  // If a multiply is only used by narrowing slices, fold the narrowing into the
+  // multiplication.
+  if (n->OpIn({Op::kSMul, Op::kUMul}) &&
+      !n->function_base()->HasImplicitUse(n) && !n->users().empty() &&
+      absl::c_all_of(n->users(),
+                     [](Node* user) { return user->Is<BitSlice>(); })) {
+    int64_t width_used = 0;
+    for (Node* user : n->users()) {
+      BitSlice* slice = user->As<BitSlice>();
+      width_used = std::max(width_used, slice->start() + slice->width());
+    }
+    if (width_used < n->BitCountOrDie()) {
+      VLOG(2) << "FOUND: Narrow unnecessarily-wide " << OpToString(n->op());
+      XLS_ASSIGN_OR_RETURN(
+          Node * narrowed_mul,
+          n->function_base()->MakeNode<ArithOp>(
+              n->loc(), n->operand(0), n->operand(1), width_used, n->op()));
+      absl::FixedArray<Node*> starting_users(n->users().begin(),
+                                             n->users().end());
+      for (Node* user : starting_users) {
+        user->ReplaceOperand(n, narrowed_mul);
+      }
       return true;
     }
   }
 
   // If either x or y is zero width:
   //   [US]Mul(x, y) => 0
+  //   [US]Mulp(x, y) => 0
   // This can arise due to narrowing of multiplies.
-  if (n->op() == Op::kUMul || n->op() == Op::kSMul) {
+  if (n->op() == Op::kUMul || n->op() == Op::kSMul || n->op() == Op::kUMulp ||
+      n->op() == Op::kSMulp) {
     for (Node* operand : n->operands()) {
       if (operand->BitCountOrDie() == 0) {
+        VLOG(2) << "FOUND: replace " << OpToString(n->op())
+                << "(bits[0], ...) with 0";
         XLS_RETURN_IF_ERROR(
-            n->ReplaceUsesWithNew<Literal>(Value(UBits(0, n->BitCountOrDie())))
-                .status());
+            n->ReplaceUsesWithNew<Literal>(ZeroOfType(n->GetType())).status());
         return true;
       }
     }
   }
 
-  // Slt(x, 0) -> msb(x)
+  // SLt(x, 0) -> msb(x)
   // SGe(x, 0) -> not(msb(x))
   //
   // Canonicalization puts the literal on the right for comparisons.
   //
-  if (NarrowingEnabled(opt_level) && OpIsCompare(n->op()) &&
-      IsLiteralZero(n->operand(1))) {
+  if (NarrowingEnabled(opt_level) && IsBitsCompare(n) &&
+      query_engine.IsAllZeros(n->operand(1))) {
     if (n->op() == Op::kSLt) {
-      XLS_VLOG(2) << "FOUND: SLt(x, 0)";
+      VLOG(2) << "FOUND: SLt(x, 0)";
       XLS_RETURN_IF_ERROR(n->ReplaceUsesWithNew<BitSlice>(
                                n->operand(0),
                                /*start=*/n->operand(0)->BitCountOrDie() - 1,
@@ -605,7 +2127,7 @@ absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n) {
       return true;
     }
     if (n->op() == Op::kSGe) {
-      XLS_VLOG(2) << "FOUND: SGe(x, 0)";
+      VLOG(2) << "FOUND: SGe(x, 0)";
       XLS_ASSIGN_OR_RETURN(
           Node * sign_bit,
           n->function_base()->MakeNode<BitSlice>(
@@ -618,8 +2140,13 @@ absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n) {
   }
 
   // Not(comparison_op(x, y)) => comparison_op_inverse(x, y)
-  if (n->op() == Op::kNot && OpIsCompare(n->operand(0)->op())) {
-    XLS_VLOG(2) << "FOUND: Not(CompareOp(x, y))";
+  //
+  // Only perform this if the only user of `comparison_op` is the `not` because
+  // otherwise _both_ comparisons will remain in the graph which is a
+  // de-optimization.
+  if (n->op() == Op::kNot && OpIsCompare(n->operand(0)->op()) &&
+      HasSingleUse(n->operand(0))) {
+    VLOG(2) << "FOUND: Not(CompareOp(x, y))";
     XLS_RETURN_IF_ERROR(
         n->ReplaceUsesWithNew<CompareOp>(n->operand(0)->operand(0),
                                          n->operand(0)->operand(1),
@@ -628,31 +2155,414 @@ absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n) {
     return true;
   }
 
-  // A ULt or UGt comparison against a literal mask of LSBs (e.g., 0b0001111)
+  // An unsigned comparison against a constant mask of LSBs (e.g., 0b0001111)
   // can be simplified:
   //
   //   x < 0b0001111  =>  or_reduce(msb_slice(x)) NOR and_reduce(lsb_slice(x))
   //   x > 0b0001111  =>  or_reduce(msb_slice(x))
-  int64_t leading_zeros, trailing_ones;
-  if (NarrowingEnabled(opt_level) && OpIsCompare(n->op()) &&
-      IsLiteralMask(n->operand(1), &leading_zeros, &trailing_ones)) {
-    XLS_VLOG(2) << "Found comparison to literal mask; leading zeros: "
-                << leading_zeros << " trailing ones: " << trailing_ones
-                << " :: " << n;
-    if (n->op() == Op::kULt) {
-      XLS_ASSIGN_OR_RETURN(Node * or_red,
-                           OrReduceLeading(n->operand(0), leading_zeros));
-      XLS_ASSIGN_OR_RETURN(Node * and_trail,
-                           AndReduceTrailing(n->operand(0), trailing_ones));
-      std::vector<Node*> args = {or_red, and_trail};
+  //
+  //   x <= 0b0001111  =>  nor_reduce(msb_slice(x))
+  //   x >= 0b0001111  =>  or_reduce(msb_slice(x)) OR and_reduce(lsb_slice(x))
+  //
+  // Similarly:
+  //   (x > mask - 1)  <=>  (x >= mask)
+  auto get_mask_cmp =
+      [&](Node* node,
+          Op op) -> std::optional<std::tuple<Op, int64_t, int64_t>> {
+    const std::optional<Bits> constant = query_engine.KnownValueAsBits(node);
+    if (!constant.has_value()) {
+      return std::nullopt;
+    }
+    if (auto mask = LsbConstantMask(*constant); mask.has_value()) {
+      return std::make_tuple(op, mask->leading_zeros, mask->trailing_ones);
+    }
+    if (auto mask = LsbConstantMask(bits_ops::Increment(*constant));
+        mask.has_value() && op == Op::kUGt && !constant->IsAllOnes()) {
+      return std::make_tuple(Op::kUGe, mask->leading_zeros,
+                             mask->trailing_ones);
+    }
+    return std::nullopt;
+  };
+
+  if (NarrowingEnabled(opt_level) && IsBitsCompare(n)) {
+    if (auto mask_cmp = get_mask_cmp(n->operand(1), n->op())) {
+      auto [effective_op, leading_zeros, trailing_ones] = *mask_cmp;
+      VLOG(2) << "Found comparison to literal mask; leading zeros: "
+              << leading_zeros << " trailing ones: " << trailing_ones
+              << " :: " << n;
+      switch (effective_op) {
+        case Op::kULt: {
+          XLS_ASSIGN_OR_RETURN(
+              Node * or_red,
+              OrReduceLeading(n->operand(0), leading_zeros, n->loc()));
+          XLS_ASSIGN_OR_RETURN(
+              Node * and_trail,
+              AndReduceTrailing(n->operand(0), trailing_ones, n->loc()));
+          std::vector<Node*> args = {or_red, and_trail};
+          XLS_RETURN_IF_ERROR(
+              n->ReplaceUsesWithNew<NaryOp>(args, Op::kNor).status());
+          return true;
+        }
+        case Op::kUGt: {
+          XLS_ASSIGN_OR_RETURN(
+              Node * or_red,
+              OrReduceLeading(n->operand(0), leading_zeros, n->loc()));
+          XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(or_red));
+          return true;
+        }
+        case Op::kULe: {
+          XLS_ASSIGN_OR_RETURN(
+              Node * nor_red,
+              NorReduceLeading(n->operand(0), leading_zeros, n->loc()));
+          XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(nor_red));
+          return true;
+        }
+        case Op::kUGe: {
+          XLS_ASSIGN_OR_RETURN(
+              Node * or_red,
+              OrReduceLeading(n->operand(0), leading_zeros, n->loc()));
+          XLS_ASSIGN_OR_RETURN(
+              Node * and_trail,
+              AndReduceTrailing(n->operand(0), trailing_ones, n->loc()));
+          std::vector<Node*> args = {or_red, and_trail};
+          XLS_RETURN_IF_ERROR(
+              n->ReplaceUsesWithNew<NaryOp>(args, Op::kOr).status());
+          return true;
+        }
+        default:
+          break;
+      }
+    }
+  }
+
+  // A shift-left of a power of two can be replaced by a decode operation and a
+  // shift-left by a literal, since
+  //   (2**K) << N == (1 << K) << N
+  //               == (1 << N) << K
+  //               == decode(N) << K.
+  //
+  // Another pass will simplify the shift-left by a literal to a concat & slice
+  // (see above).
+  if (n->op() == Op::kShll && query_engine.IsFullyKnown(n->operand(0))) {
+    const Bits lhs = *query_engine.KnownValueAsBits(n->operand(0));
+    if (lhs.IsPowerOfTwo()) {
+      VLOG(2) << "FOUND: shift left of power of two";
+      int64_t k = lhs.CountTrailingZeros();
+      int64_t n_bit_count = n->operand(1)->BitCountOrDie();
+      int64_t decode_width = lhs.bit_count();
+      if (n_bit_count < 63) {
+        // We can't decode to something wider than 2**(n_bit_count) bits...
+        // so we decode to exactly 2**(n_bit_count) bits, and resize after.
+        decode_width = std::min(int64_t{1} << n_bit_count, decode_width);
+      }
+      XLS_ASSIGN_OR_RETURN(Node * decoded,
+                           n->function_base()->MakeNode<Decode>(
+                               n->loc(), n->operand(1), decode_width));
+      XLS_ASSIGN_OR_RETURN(
+          decoded,
+          NarrowOrExtend(decoded, /*n_is_signed=*/false, lhs.bit_count()));
+      if (k > 0) {
+        XLS_ASSIGN_OR_RETURN(Literal * shift,
+                             n->function_base()->MakeNode<Literal>(
+                                 n->loc(), Value(UBits(k, 64))));
+        XLS_ASSIGN_OR_RETURN(decoded, n->function_base()->MakeNode<BinOp>(
+                                          n->loc(), decoded, shift, Op::kShll));
+      }
+      XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(decoded));
+      return true;
+    }
+  }
+
+  // A common pattern for creating a mask with the N least-significant bits set
+  // is:
+  //   decode(N) - 1, or equivalently (1 << N) - 1.
+  // However, this can also be rewritten to:
+  //   !(all_ones << N),
+  // removing the adder. This is always beneficial, assuming the shift has no
+  // other uses.
+  auto get_decremented = [&](const Node* node) -> Node* {
+    if (node->op() == Op::kSub) {
+      if (std::optional<Bits> rhs =
+              query_engine.KnownValueAsBits(node->operand(1));
+          rhs.has_value() && rhs->IsOne()) {
+        return node->operand(0);
+      }
+      return nullptr;
+    }
+    if (node->op() != Op::kAdd) {
+      return nullptr;
+    }
+    if (query_engine.IsAllOnes(node->operand(1))) {
+      return node->operand(0);
+    }
+    if (query_engine.IsAllOnes(node->operand(0))) {
+      return node->operand(1);
+    }
+    return nullptr;
+  };
+  if (Node* decremented = get_decremented(n);
+      decremented != nullptr && decremented->op() == Op::kDecode) {
+    VLOG(2) << "FOUND: (decode(N)) - 1, replacing with !(all_ones << N)";
+    const int64_t mask_width = n->BitCountOrDie();
+    Node* set_width = decremented->operand(0);
+    XLS_ASSIGN_OR_RETURN(Node * all_ones,
+                         n->function_base()->MakeNode<Literal>(
+                             n->loc(), Value(Bits::AllOnes(mask_width))));
+    XLS_ASSIGN_OR_RETURN(Node * inv_mask,
+                         n->function_base()->MakeNode<BinOp>(
+                             n->loc(), all_ones, set_width, Op::kShll));
+    XLS_RETURN_IF_ERROR(
+        n->ReplaceUsesWithNew<UnOp>(inv_mask, Op::kNot).status());
+    return true;
+  }
+
+  // Equality can cancel a shared operand in same-width modular arithmetic:
+  //   (x + y) cmp x, (x - y) cmp x, (x ^ y) cmp x => y cmp 0.
+  // Only addition and xor permit cancelling the right operand. Ordered
+  // comparisons cannot use this rule because addition/subtraction may wrap.
+  // Replace the comparison, leaving any other users of the arithmetic intact.
+  if (IsBitsCompare(n) && n->OpIn({Op::kEq, Op::kNe})) {
+    for (int64_t i = 0; i < 2; ++i) {
+      Node* arithmetic = n->operand(i);
+      Node* common = n->operand(1 - i);
+      // TODO: Extend cancellation to XOR with more than two operands by
+      // comparing the XOR of the remaining operands with zero.
+      if (!arithmetic->OpIn({Op::kAdd, Op::kSub, Op::kXor}) ||
+          arithmetic->operand_count() != 2) {
+        continue;
+      }
+      Node* remaining = nullptr;
+      if (arithmetic->operand(0) == common) {
+        remaining = arithmetic->operand(1);
+      } else if (arithmetic->op() != Op::kSub &&
+                 arithmetic->operand(1) == common) {
+        remaining = arithmetic->operand(0);
+      }
+      if (remaining != nullptr) {
+        XLS_ASSIGN_OR_RETURN(
+            Node * zero,
+            n->function_base()->MakeNode<Literal>(
+                n->loc(), Value(Bits(remaining->BitCountOrDie()))));
+        XLS_RETURN_IF_ERROR(
+            n->ReplaceUsesWithNew<CompareOp>(remaining, zero, n->op())
+                .status());
+        return true;
+      }
+    }
+  }
+
+  XLS_ASSIGN_OR_RETURN(bool injective_matched,
+                       MatchComparisonOfInjectiveOp(n, query_engine));
+  if (injective_matched) {
+    return true;
+  }
+
+  // Pattern: Comparison of binary select between a value and its negation.
+  //
+  // This is a common shape for abs-like logic:
+  //   sel(pred, cases=[x, neg(x)]) == 0  =>  x == 0
+  //   sel(pred, cases=[x, neg(x)]) != 0  =>  x != 0
+  if (IsBitsCompare(n) && (n->op() == Op::kEq || n->op() == Op::kNe)) {
+    Node* selector_node = nullptr;
+    Node* zero_node = nullptr;
+    if (query_engine.IsAllZeros(n->operand(1))) {
+      selector_node = n->operand(0);
+      zero_node = n->operand(1);
+    } else if (query_engine.IsAllZeros(n->operand(0))) {
+      selector_node = n->operand(1);
+      zero_node = n->operand(0);
+    }
+    if (selector_node != nullptr && IsBinarySelectTwoCases(selector_node)) {
+      Select* sel = selector_node->As<Select>();
+      Node* case0 = sel->get_case(0);
+      Node* case1 = sel->get_case(1);
+      Node* x = nullptr;
+      if (case0->op() == Op::kNeg && case0->operand(0) == case1) {
+        x = case1;
+      } else if (case1->op() == Op::kNeg && case1->operand(0) == case0) {
+        x = case0;
+      }
+      if (x != nullptr) {
+        VLOG(2) << "FOUND: compare-to-zero of sel(x, neg(x))";
+        XLS_RETURN_IF_ERROR(
+            n->ReplaceUsesWithNew<CompareOp>(x, zero_node, n->op()).status());
+        return true;
+      }
+    }
+  }
+
+  // Pattern: Comparison of not (ones-complement negation) to literal
+  //   eq(~expr, K) => eq(expr, ~K)
+  //   ne(~expr, K) => ne(expr, ~K)
+  if (IsBitsCompare(n) && (n->op() == Op::kEq || n->op() == Op::kNe)) {
+    Node* not_node = nullptr;
+    Node* literal_node = nullptr;
+    if (n->operand(0)->op() == Op::kNot &&
+        query_engine.IsFullyKnown(n->operand(1))) {
+      not_node = n->operand(0);
+      literal_node = n->operand(1);
+    } else if (n->operand(1)->op() == Op::kNot &&
+               query_engine.IsFullyKnown(n->operand(0))) {
+      not_node = n->operand(1);
+      literal_node = n->operand(0);
+    }
+    if (not_node != nullptr) {
+      std::optional<Bits> k_bits = query_engine.KnownValueAsBits(literal_node);
+      XLS_RET_CHECK(k_bits.has_value());
+      XLS_RET_CHECK_EQ(k_bits->bit_count(), not_node->BitCountOrDie());
+      Bits not_k_bits = bits_ops::Not(*k_bits);
+      XLS_ASSIGN_OR_RETURN(Literal * not_k,
+                           n->function_base()->MakeNode<Literal>(
+                               literal_node->loc(), Value(not_k_bits)));
       XLS_RETURN_IF_ERROR(
-          n->ReplaceUsesWithNew<NaryOp>(args, Op::kNor).status());
+          n->ReplaceUsesWithNew<CompareOp>(not_node->operand(0), not_k, n->op())
+              .status());
       return true;
-    } else if (n->op() == Op::kUGt) {
-      XLS_ASSIGN_OR_RETURN(Node * or_red,
-                           OrReduceLeading(n->operand(0), leading_zeros));
-      XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(or_red));
+    }
+  }
+
+  if ((n->OpIn({Op::kSMul, Op::kUMul})) &&
+      query_engine.IsFullyKnown(n->operand(1))) {
+    const Bits rhs = *query_engine.KnownValueAsBits(n->operand(1));
+    int64_t pop_count = rhs.PopCount();
+
+    if (pop_count == 0) {
+      XLS_RETURN_IF_ERROR(
+          n->ReplaceUsesWithNew<Literal>(ZeroOfType(n->GetType())).status());
       return true;
+    }
+
+    // Position of the last leading zero
+    const int64_t llz = rhs.bit_count() - rhs.CountLeadingZeros();
+    const Bits rhs_complement = bits_ops::Sub(
+        llz < rhs.bit_count() ? Bits::PowerOfTwo(llz, rhs.bit_count())
+                              : Bits(rhs.bit_count()),
+        rhs);
+
+    const int64_t adders = pop_count - 1;
+    const int64_t complement_adders = rhs_complement.PopCount();
+
+    constexpr int64_t kAdderLimit = 1;
+
+    const bool is_signed = n->op() == Op::kSMul;
+    if (adders <= kAdderLimit && adders <= complement_adders &&
+        SplitsEnabled(opt_level) &&
+        (!is_signed || bits_ops::SGreaterThan(rhs, 0))) {
+      VLOG(2) << "FOUND: mul by positive literal with " << rhs.PopCount()
+              << " bits set (" << rhs.ToDebugString() << ")";
+      Node* result = nullptr;
+      XLS_ASSIGN_OR_RETURN(
+          Node * adjusted_lhs,
+          NarrowOrExtend(n->operand(0), is_signed, n->BitCountOrDie()));
+      for (int64_t i = 0; i < rhs.bit_count(); ++i) {
+        if (!rhs.Get(i)) {
+          continue;
+        }
+        Node* shifted_input;
+        if (i > 0) {
+          XLS_ASSIGN_OR_RETURN(Node * shift_amount,
+                               n->function_base()->MakeNode<Literal>(
+                                   n->loc(), Value(UBits(i, rhs.bit_count()))));
+          XLS_ASSIGN_OR_RETURN(
+              shifted_input,
+              n->function_base()->MakeNode<BinOp>(n->loc(), adjusted_lhs,
+                                                  shift_amount, Op::kShll));
+        } else {
+          shifted_input = adjusted_lhs;
+        }
+        if (result == nullptr) {
+          result = shifted_input;
+        } else {
+          XLS_ASSIGN_OR_RETURN(result,
+                               n->function_base()->MakeNode<BinOp>(
+                                   n->loc(), result, shifted_input, Op::kAdd));
+        }
+      }
+      CHECK_NE(result, nullptr);
+      XLS_RETURN_IF_ERROR(n->ReplaceUsesWith(result));
+      return true;
+    }
+
+    if (complement_adders <= kAdderLimit && SplitsEnabled(opt_level) &&
+        (!is_signed || bits_ops::SGreaterThan(rhs, 0))) {
+      VLOG(2) << "FOUND: mul by positive literal with "
+              << rhs_complement.PopCount() << " bit(s) set in its complement ("
+              << rhs_complement.ToDebugString() << ")";
+      // The RHS can be written as (1 << llz) - K, where K has fewer than
+      // kAdderLimit bits set.
+      XLS_ASSIGN_OR_RETURN(
+          Node * adjusted_lhs,
+          NarrowOrExtend(n->operand(0), is_signed, n->BitCountOrDie()));
+      XLS_ASSIGN_OR_RETURN(Node * large_shift_amount,
+                           n->function_base()->MakeNode<Literal>(
+                               n->loc(), Value(UBits(llz, rhs.bit_count()))));
+      XLS_ASSIGN_OR_RETURN(Node * base, n->function_base()->MakeNode<BinOp>(
+                                            n->loc(), adjusted_lhs,
+                                            large_shift_amount, Op::kShll));
+      Node* complement = nullptr;
+      for (int64_t i = 0; i < rhs_complement.bit_count(); ++i) {
+        if (!rhs_complement.Get(i)) {
+          continue;
+        }
+        XLS_ASSIGN_OR_RETURN(Node * shift_amount,
+                             n->function_base()->MakeNode<Literal>(
+                                 n->loc(), Value(UBits(i, rhs.bit_count()))));
+        XLS_ASSIGN_OR_RETURN(
+            Node * shifted_input,
+            n->function_base()->MakeNode<BinOp>(n->loc(), adjusted_lhs,
+                                                shift_amount, Op::kShll));
+        if (complement == nullptr) {
+          complement = shifted_input;
+        } else {
+          XLS_ASSIGN_OR_RETURN(
+              complement, n->function_base()->MakeNode<BinOp>(
+                              n->loc(), complement, shifted_input, Op::kAdd));
+        }
+      }
+      XLS_RETURN_IF_ERROR(
+          n->ReplaceUsesWithNew<BinOp>(base, complement, Op::kSub).status());
+      return true;
+    }
+  }
+
+  // Pattern: add(sign_ext(c: u1), K) => sel(c, [K, K-1])
+  // For a boolean 'c' sign-extended to N bits, sign_ext(c) is either 0 or all
+  // ones (-1). Simplify add(sign_ext(c), K) to select(c, [K, K-1]) for a
+  // bitwise op.
+  if (n->op() == Op::kAdd) {
+    Node* sign_ext = nullptr;
+    Node* const_node = nullptr;
+    if (n->operand(0)->op() == Op::kSignExt &&
+        n->operand(0)->As<ExtendOp>()->operand(0)->BitCountOrDie() == 1 &&
+        query_engine.IsFullyKnown(n->operand(1))) {
+      sign_ext = n->operand(0);
+      const_node = n->operand(1);
+    } else if (n->operand(1)->op() == Op::kSignExt &&
+               n->operand(1)->As<ExtendOp>()->operand(0)->BitCountOrDie() ==
+                   1 &&
+               query_engine.IsFullyKnown(n->operand(0))) {
+      sign_ext = n->operand(1);
+      const_node = n->operand(0);
+    }
+    if (sign_ext != nullptr) {
+      Bits k_bits = *query_engine.KnownValueAsBits(const_node);
+      int64_t width = n->BitCountOrDie();
+      if (k_bits.bit_count() == width) {
+        Bits k_minus_one = bits_ops::Sub(k_bits, UBits(1, width));
+        XLS_ASSIGN_OR_RETURN(
+            Literal * literal_k,
+            n->function_base()->MakeNode<Literal>(n->loc(), Value(k_bits)));
+        XLS_ASSIGN_OR_RETURN(Literal * literal_km1,
+                             n->function_base()->MakeNode<Literal>(
+                                 n->loc(), Value(k_minus_one)));
+        Node* cond = sign_ext->As<ExtendOp>()->operand(0);
+        XLS_RETURN_IF_ERROR(n->ReplaceUsesWithNew<Select>(
+                                 cond,
+                                 std::vector<Node*>({literal_k, literal_km1}),
+                                 /*default_value=*/std::nullopt)
+                                .status());
+        return true;
+      }
     }
   }
 
@@ -661,10 +2571,39 @@ absl::StatusOr<bool> MatchArithPatterns(int64_t opt_level, Node* n) {
 
 }  // namespace
 
+RedundancyGuard ArithSimplificationPass::GetRedundancyGuard(
+    const OptimizationPassOptions& options,
+    OptimizationContext& context) const {
+  return RedundancyGuard::CanSkip(absl::StrFormat("O%d", options.opt_level));
+}
+
 absl::StatusOr<bool> ArithSimplificationPass::RunOnFunctionBaseInternal(
-    FunctionBase* f, const PassOptions& options, PassResults* results) const {
-  return TransformNodesToFixedPoint(
-      f, [this](Node* n) { return MatchArithPatterns(opt_level_, n); });
+    FunctionBase* f, const OptimizationPassOptions& options,
+    PassResults* results, OptimizationContext& context) const {
+  bool changed = false;
+  bool pass_changed = false;
+  auto query_engine = UnionQueryEngine::Of(
+      StatelessQueryEngine(),
+      CachedStateElementQueryEngine::FromContext<PartialInfoQueryEngine>(
+          context, f));
+  do {
+    pass_changed = false;
+    XLS_ASSIGN_OR_RETURN(std::vector<Node*> reverse_topo_sort_nodes,
+                         context.ReverseTopoSort(f));
+    for (Node* n : reverse_topo_sort_nodes) {
+      if (n->IsDead()) {
+        continue;
+      }
+      XLS_ASSIGN_OR_RETURN(
+          bool node_changed,
+          MatchArithPatterns(options.opt_level, n, query_engine));
+      if (node_changed) {
+        pass_changed = true;
+      }
+    }
+    changed |= pass_changed;
+  } while (pass_changed);
+  return changed;
 }
 
 }  // namespace xls

@@ -16,16 +16,15 @@
 #define XLS_FUZZER_SCRUB_CRASHER_H_
 
 #include <string>
-
-#include "absl/strings/string_view.h"
+#include <string_view>
 
 namespace xls {
 
 // Scrubs the given fuzzer crasher of any problematic substrings so it can be
 // checked into the source tree. See Sample::ToCrasher for details about the
 // format of a crasher.
-std::string ScrubCrasher(absl::string_view s);
+std::string ScrubCrasher(std::string_view s);
 
 }  // namespace xls
 
-#endif  // FUZZER_SCRUB_CRASHER_H_
+#endif  // XLS_FUZZER_SCRUB_CRASHER_H_

@@ -1,0 +1,561 @@
+// Copyright 2020 The XLS Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "xls/dslx/frontend/ast.h"
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <variant>
+#include <vector>
+
+#include "gmock/gmock.h"
+#include "gtest/gtest.h"
+#include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
+#include "xls/common/attribute_data.h"
+#include "xls/common/status/matchers.h"
+#include "xls/dslx/frontend/ast_test_utils.h"
+#include "xls/dslx/frontend/module.h"
+#include "xls/dslx/frontend/pos.h"
+
+namespace xls::dslx {
+namespace {
+
+using ::absl_testing::IsOkAndHolds;
+using ::absl_testing::StatusIs;
+using ::testing::ElementsAre;
+using ::testing::HasSubstr;
+
+class AstTest : public testing::Test {
+ public:
+  FileTable file_table;
+  Module m{"test", /*fs_path=*/std::nullopt, file_table};
+  const Span fake_span;
+};
+
+TEST_F(AstTest, ModuleWithConstant) {
+  Number* number = m.Make<Number>(fake_span, std::string("42"),
+                                  NumberKind::kOther, /*type=*/nullptr);
+  NameDef* name_def = m.Make<NameDef>(fake_span, std::string("MOL"), nullptr);
+  ConstantDef* constant_def =
+      m.Make<ConstantDef>(fake_span, name_def, /*type_annotation=*/nullptr,
+                          number, /*is_public=*/false);
+  name_def->set_definer(constant_def);
+  XLS_ASSERT_OK(m.AddTop(constant_def, /*make_collision_error=*/nullptr));
+
+  EXPECT_EQ(m.ToString(), "const MOL = 42;");
+}
+
+TEST_F(AstTest, IndexedModuleMembersPreserveVisibilityAndInsertionOrder) {
+  auto make_constant = [&](std::string name, bool is_public) {
+    auto* name_def = m.Make<NameDef>(fake_span, name, nullptr);
+    auto* value = m.Make<Number>(fake_span, "0", NumberKind::kOther, nullptr);
+    auto* constant =
+        m.Make<ConstantDef>(fake_span, name_def, nullptr, value, is_public);
+    name_def->set_definer(constant);
+    return constant;
+  };
+  ConstantDef* first = make_constant("PRIVATE", false);
+  ConstantDef* last = make_constant("PUBLIC", true);
+  XLS_ASSERT_OK(m.AddTop(last, nullptr));
+  XLS_ASSERT_OK(m.InsertTopBefore(last, first));
+
+  EXPECT_EQ(m.GetMember("PRIVATE"), ModuleMember(first));
+  EXPECT_EQ(m.GetMember("PUBLIC"), ModuleMember(last));
+  EXPECT_EQ(m.GetMember("missing"), std::nullopt);
+  EXPECT_EQ(m.GetMember<ConstantDef>("PRIVATE"), first);
+  EXPECT_FALSE(IsPublic(*m.GetMember("PRIVATE")));
+  EXPECT_TRUE(IsPublic(*m.GetMember("PUBLIC")));
+  EXPECT_THAT(m.top(), ElementsAre(ModuleMember(first), ModuleMember(last)));
+  ASSERT_TRUE(m.FindMemberWithName("PRIVATE").has_value());
+  EXPECT_EQ(*m.FindMemberWithName("PRIVATE"), &m.top()[0]);
+}
+
+TEST_F(AstTest, IndexedUseSubjectsPreserveGroupedPaths) {
+  auto make_leaf = [&](std::string name) {
+    auto* name_def = m.Make<NameDef>(fake_span, name, nullptr);
+    auto* leaf = m.Make<UseTreeEntry>(name_def, fake_span);
+    name_def->set_definer(leaf);
+    return leaf;
+  };
+  UseTreeEntry* first = make_leaf("First");
+  UseTreeEntry* last = make_leaf("Last");
+  UseTreeEntry* other = make_leaf("Other");
+  auto* group = m.Make<UseTreeEntry>(UseInteriorEntry("nested", {first, last}),
+                                     fake_span);
+  auto* root = m.Make<UseTreeEntry>(UseInteriorEntry("library", {group, other}),
+                                    fake_span);
+  auto* use = m.Make<Use>(fake_span, *root);
+  XLS_ASSERT_OK(m.AddTop(use, nullptr));
+
+  ASSERT_NE(m.GetUseSubject(first), nullptr);
+  EXPECT_THAT(m.GetUseSubject(first)->identifiers(),
+              ElementsAre("library", "nested", "First"));
+  ASSERT_NE(m.GetUseSubject(last), nullptr);
+  EXPECT_THAT(m.GetUseSubject(last)->identifiers(),
+              ElementsAre("library", "nested", "Last"));
+  ASSERT_NE(m.GetUseSubject(other), nullptr);
+  EXPECT_THAT(m.GetUseSubject(other)->identifiers(),
+              ElementsAre("library", "Other"));
+  EXPECT_EQ(&m.GetUseSubject(last)->use_tree_entry(), last);
+  EXPECT_EQ(&m.GetUseSubject(last)->name_def(), *last->GetLeafNameDef());
+  EXPECT_EQ(m.GetMember("First"), ModuleMember(use));
+  EXPECT_EQ(m.GetMember("Last"), ModuleMember(use));
+  EXPECT_EQ(m.GetMember("Other"), ModuleMember(use));
+  EXPECT_EQ(m.GetUseSubject(group), nullptr);
+
+  // A rejected declaration must not make its leaf visible in either index.
+  UseTreeEntry* duplicate = make_leaf("Last");
+  auto* rejected = m.Make<Use>(fake_span, *duplicate);
+  EXPECT_THAT(m.AddTop(rejected, nullptr),
+              StatusIs(absl::StatusCode::kInvalidArgument));
+  EXPECT_EQ(m.GetUseSubject(duplicate), nullptr);
+  EXPECT_EQ(m.GetMember("Last"), ModuleMember(use));
+}
+
+TEST_F(AstTest, SumVariantLookupPreservesDeclarationOrder) {
+  auto make_variant = [&](std::string name) {
+    auto* name_def = m.Make<NameDef>(fake_span, name, nullptr);
+    auto* variant = m.Make<SumVariant>(fake_span, name_def, std::monostate{});
+    name_def->set_definer(variant);
+    return variant;
+  };
+  SumVariant* first = make_variant("Zebra");
+  SumVariant* last = make_variant("Ant");
+  auto* sum =
+      m.Make<SumDef>(fake_span, m.Make<NameDef>(fake_span, "E", nullptr),
+                     std::vector<ParametricBinding*>{},
+                     std::vector<SumVariant*>{first, last}, false);
+  const SumDef* const_sum = sum;
+
+  EXPECT_THAT(sum->variants(), ElementsAre(first, last));
+  EXPECT_EQ(sum->GetVariant("Zebra"), first);
+  EXPECT_EQ(sum->GetVariant("Ant"), last);
+  EXPECT_EQ(sum->GetVariant("missing"), std::nullopt);
+  EXPECT_EQ(const_sum->GetVariant("Zebra"), first);
+  EXPECT_EQ(const_sum->GetVariant("Ant"), last);
+  EXPECT_EQ(const_sum->GetVariant("missing"), std::nullopt);
+  EXPECT_TRUE(sum->HasVariant("Zebra"));
+  EXPECT_TRUE(sum->HasVariant("Ant"));
+  EXPECT_FALSE(sum->HasVariant("missing"));
+  EXPECT_EQ(sum->GetVariantIndex("Zebra"), 0);
+  EXPECT_EQ(sum->GetVariantIndex("Ant"), 1);
+  EXPECT_EQ(sum->GetVariantIndex("missing"), std::nullopt);
+}
+
+TEST_F(AstTest, ModuleWithStructAndImpl) {
+  const std::vector<ParametricBinding*> empty_binding;
+
+  // One member var: `member_var: bool`.
+  BuiltinType bool_type = BuiltinTypeFromString("bool").value();
+  TypeAnnotation* bool_type_annot = m.Make<BuiltinTypeAnnotation>(
+      fake_span, bool_type, m.GetOrCreateBuiltinNameDef(bool_type));
+  NameDef* field_name_def =
+      m.Make<NameDef>(fake_span, std::string("member_var"), nullptr);
+  std::vector<StructMemberNode*> members{m.Make<StructMemberNode>(
+      fake_span, field_name_def, fake_span, bool_type_annot)};
+
+  // Struct definition.
+  NameDef* name_def =
+      m.Make<NameDef>(fake_span, std::string("MyStruct"), nullptr);
+  StructDef* struct_def =
+      m.Make<StructDef>(fake_span, name_def, empty_binding, members, false);
+  name_def->set_definer(struct_def);
+  XLS_ASSERT_OK(m.AddTop(struct_def, /*make_collision_error=*/nullptr));
+
+  // Impl definition.
+  TypeRef* type_ref = m.Make<TypeRef>(fake_span, TypeDefinition(struct_def));
+  TypeAnnotation* type_annot = m.Make<TypeRefTypeAnnotation>(
+      fake_span, type_ref, /*parametrics=*/std::vector<ExprOrType>{});
+  Impl* impl = m.Make<Impl>(fake_span, type_annot, std::vector<ImplMember>{},
+                            /*is_public=*/false);
+  XLS_ASSERT_OK(m.AddTop(impl, /*make_collision_error=*/nullptr));
+
+  constexpr std::string_view kExpected = R"(struct MyStruct {
+    member_var: bool,
+}
+impl MyStruct {
+})";
+
+  EXPECT_EQ(m.ToString(), kExpected);
+}
+
+TEST_F(AstTest, StructFieldsRetainCanonicalNodesAcrossAdditionsAndTypeChanges) {
+  auto* bool_type = m.Make<BuiltinTypeAnnotation>(
+      fake_span, BuiltinType::kBool,
+      m.GetOrCreateBuiltinNameDef(BuiltinType::kBool));
+  auto* u32_type = m.Make<BuiltinTypeAnnotation>(
+      fake_span, BuiltinType::kU32,
+      m.GetOrCreateBuiltinNameDef(BuiltinType::kU32));
+  auto* x = m.Make<StructMemberNode>(fake_span,
+                                     m.Make<NameDef>(fake_span, "x", nullptr),
+                                     fake_span, bool_type);
+  auto* s =
+      m.Make<StructDef>(fake_span, m.Make<NameDef>(fake_span, "S", nullptr),
+                        std::vector<ParametricBinding*>{},
+                        std::vector<StructMemberNode*>{x}, false);
+  auto* y = m.Make<StructMemberNode>(
+      fake_span, m.Make<NameDef>(fake_span, "y", nullptr), fake_span, u32_type);
+  s->AddMember(y);
+
+  EXPECT_EQ(s->GetMemberByName("x"), x);
+  EXPECT_EQ(s->GetMemberByName("y"), y);
+  EXPECT_EQ(s->named_fields().GetMemberIndex("y"), 1);
+  EXPECT_THAT(s->GetMemberNames(), testing::ElementsAre("x", "y"));
+  EXPECT_EQ(s->GetMemberByName("missing"), std::nullopt);
+
+  // Proc elaboration can wrap a member's type after declaration construction.
+  // Every field view must see that change without losing the original spelling.
+  x->set_type(u32_type);
+  EXPECT_EQ(s->members()[0], x);
+  EXPECT_EQ((*s->GetMemberByName("x"))->type(), u32_type);
+  EXPECT_EQ((*s->GetMemberByName("x"))->non_state_wrapped_type(), bool_type);
+}
+
+TEST_F(AstTest, GetNumberAsInt64) {
+  struct Example {
+    std::string text;
+    uint64_t want;
+  } kCases[] = {
+      {.text = "0b0", .want = 0},
+      {.text = "0b1", .want = 1},
+      {.text = "0b10", .want = 2},
+      {.text = "0b11", .want = 3},
+      {.text = "0b100", .want = 4},
+      {.text = "0b1000", .want = 8},
+      {.text = "0b1011", .want = 11},
+      {.text = "0b1_1000", .want = 24},
+      {.text = "0b1_1001", .want = 25},
+      {.text = "0b1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_1111_"
+               "1111_"
+               "1111_1111_1111",
+       .want = static_cast<uint64_t>(-1)},
+      {.text = "-1", .want = static_cast<uint64_t>(-1)},
+  };
+  auto make_num = [this](std::string text) {
+    return m.Make<Number>(fake_span, text, NumberKind::kOther,
+                          /*type=*/nullptr);
+  };
+  for (const Example& example : kCases) {
+    EXPECT_THAT(make_num(example.text)->GetAsUint64(file_table),
+                IsOkAndHolds(example.want));
+  }
+
+  EXPECT_THAT(make_num("0b")->GetAsUint64(file_table),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Could not convert 0b to a number")));
+}
+
+TEST_F(AstTest, CharacterNumberToStringTest) {
+  struct Example {
+    std::string text;
+    std::string want;
+  } kCases[] = {
+      {.text = R"(4)", .want = R"('4')"},  {.text = R"(2)", .want = R"('2')"},
+      {.text = R"(X)", .want = R"('X')"},  {.text = R"(l)", .want = R"('l')"},
+      {.text = R"(S)", .want = R"('S')"},  {.text = R"(")", .want = R"('"')"},
+      {.text = R"(')", .want = R"('\'')"}, {.text = R"(\)", .want = R"('\\')"},
+  };
+  auto make_char_num = [this](std::string text) {
+    return m.Make<Number>(fake_span, text, NumberKind::kCharacter,
+                          /*type=*/nullptr);
+  };
+  for (const Example& example : kCases) {
+    EXPECT_THAT(make_char_num(example.text)->ToString(), example.want);
+  }
+}
+
+TEST_F(AstTest, GetBuiltinTypeSignedness) {
+  XLS_ASSERT_OK_AND_ASSIGN(bool is_signed,
+                           GetBuiltinTypeSignedness(BuiltinType::kBool));
+  EXPECT_FALSE(is_signed);
+  XLS_ASSERT_OK_AND_ASSIGN(is_signed,
+                           GetBuiltinTypeSignedness(BuiltinType::kS1));
+  EXPECT_TRUE(is_signed);
+  XLS_ASSERT_OK_AND_ASSIGN(is_signed,
+                           GetBuiltinTypeSignedness(BuiltinType::kU1));
+  EXPECT_FALSE(is_signed);
+  XLS_ASSERT_OK_AND_ASSIGN(is_signed,
+                           GetBuiltinTypeSignedness(BuiltinType::kSN));
+  EXPECT_TRUE(is_signed);
+  XLS_ASSERT_OK_AND_ASSIGN(is_signed,
+                           GetBuiltinTypeSignedness(BuiltinType::kUN));
+  EXPECT_FALSE(is_signed);
+  XLS_ASSERT_OK_AND_ASSIGN(is_signed,
+                           GetBuiltinTypeSignedness(BuiltinType::kBits));
+  EXPECT_FALSE(is_signed);
+
+  // Tokens don't have signedness.
+  EXPECT_THAT(GetBuiltinTypeSignedness(BuiltinType::kToken),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Type \"token\" has no defined signedness.")));
+}
+
+TEST_F(AstTest, GetBuiltinTypeBitCount) {
+  int64_t bit_count = GetBuiltinTypeBitCount(BuiltinType::kBool);
+  EXPECT_EQ(bit_count, 1);
+  bit_count = GetBuiltinTypeBitCount(BuiltinType::kS1);
+  EXPECT_EQ(bit_count, 1);
+  bit_count = GetBuiltinTypeBitCount(BuiltinType::kS64);
+  EXPECT_EQ(bit_count, 64);
+  bit_count = GetBuiltinTypeBitCount(BuiltinType::kU1);
+  EXPECT_EQ(bit_count, 1);
+  bit_count = GetBuiltinTypeBitCount(BuiltinType::kU64);
+  EXPECT_EQ(bit_count, 64);
+  bit_count = GetBuiltinTypeBitCount(BuiltinType::kSN);
+  EXPECT_EQ(bit_count, 0);
+  bit_count = GetBuiltinTypeBitCount(BuiltinType::kUN);
+  EXPECT_EQ(bit_count, 0);
+  bit_count = GetBuiltinTypeBitCount(BuiltinType::kBits);
+  EXPECT_EQ(bit_count, 0);
+  bit_count = GetBuiltinTypeBitCount(BuiltinType::kToken);
+  EXPECT_EQ(bit_count, 0);
+}
+
+// See comment on `MakeCastWithinLtComparison()` -- we need to insert parens
+// appropriately here.
+TEST_F(AstTest, ToStringCastWithinLtComparison) {
+  auto [file_table, module, lt] = MakeCastWithinLtComparison();
+
+  EXPECT_EQ(lt->ToString(), "(x as t) < x");
+}
+
+TEST_F(AstTest, GetFuncParam) {
+  // Create an empty function
+  //  fn f(p: u32) -> u32 {}
+
+  BuiltinNameDef* builtin_name_def = m.GetOrCreateBuiltinNameDef("u32");
+  BuiltinTypeAnnotation* u32_type_annotation = m.Make<BuiltinTypeAnnotation>(
+      fake_span, BuiltinType::kU32, builtin_name_def);
+
+  NameDef* func_name_def =
+      m.Make<NameDef>(fake_span, std::string("f"), nullptr);
+  NameDef* param_name_def =
+      m.Make<NameDef>(fake_span, std::string("p"), nullptr);
+
+  std::vector<Param*> params;
+  params.push_back(m.Make<Param>(param_name_def, u32_type_annotation));
+
+  std::vector<ParametricBinding*> parametric_bindings;
+
+  StatementBlock* block =
+      m.Make<StatementBlock>(fake_span, std::vector<Statement*>{}, true);
+
+  Function* f = m.Make<Function>(fake_span, func_name_def, parametric_bindings,
+                                 params, u32_type_annotation, block,
+                                 FunctionTag::kNormal, false, false);
+
+  XLS_ASSERT_OK_AND_ASSIGN(Param * found_param, f->GetParamByName("p"));
+  EXPECT_EQ(found_param, params[0]);
+
+  EXPECT_THAT(f->GetParamByName("not_a_param"),
+              StatusIs(absl::StatusCode::kNotFound,
+                       HasSubstr("Param 'not_a_param' not a parameter")));
+}
+
+TEST_F(AstTest, ConstPatternTreeFlattensToConstLeaves) {
+  NameDef* first =
+      m.Make<NameDef>(fake_span, std::string("first"), /*definer=*/nullptr);
+  WildcardPattern* wildcard = m.Make<WildcardPattern>(fake_span);
+  NameDef* second =
+      m.Make<NameDef>(fake_span, std::string("second"), /*definer=*/nullptr);
+  TuplePattern* nested = m.Make<TuplePattern>(
+      fake_span, std::vector<PatternTree>{wildcard, second});
+  const TuplePattern* root =
+      m.Make<TuplePattern>(fake_span, std::vector<PatternTree>{first, nested});
+
+  ConstPatternTree pattern = root;
+  std::vector<ConstPatternLeaf> leaves = FlattenPattern(pattern);
+  ASSERT_EQ(leaves.size(), 3);
+  EXPECT_EQ(std::get<const NameDef*>(leaves[0]), first);
+  EXPECT_EQ(std::get<const WildcardPattern*>(leaves[1]), wildcard);
+  EXPECT_EQ(std::get<const NameDef*>(leaves[2]), second);
+
+  std::vector<const NameDef*> name_defs = GetPatternNameDefs(pattern);
+  ASSERT_EQ(name_defs.size(), 2);
+  EXPECT_EQ(name_defs[0], first);
+  EXPECT_EQ(name_defs[1], second);
+}
+
+TEST_F(AstTest, IsConstantNameRef) {
+  NameDef* name_def =
+      m.Make<NameDef>(fake_span, std::string("MyStruct"), nullptr);
+  NameRef* name_ref = m.Make<NameRef>(fake_span, "name", name_def);
+
+  EXPECT_FALSE(IsConstant(name_ref));
+}
+
+TEST_F(AstTest, IsConstantBinopOfNameRefs) {
+  NameDef* name_def =
+      m.Make<NameDef>(fake_span, std::string("MyStruct"), nullptr);
+  NameRef* left = m.Make<NameRef>(fake_span, "name", name_def);
+  NameRef* right = m.Make<NameRef>(fake_span, "name", name_def);
+  Binop* binop =
+      m.Make<Binop>(fake_span, BinopKind::kAdd, left, right, fake_span);
+
+  EXPECT_FALSE(IsConstant(binop));
+}
+
+TEST_F(AstTest, IsConstantBinopOfNumbers) {
+  Number* left = m.Make<Number>(fake_span, std::string("41"),
+                                NumberKind::kOther, /*type=*/nullptr);
+  Number* right = m.Make<Number>(fake_span, std::string("42"),
+                                 NumberKind::kOther, /*type=*/nullptr);
+  Binop* binop =
+      m.Make<Binop>(fake_span, BinopKind::kAdd, left, right, fake_span);
+
+  EXPECT_TRUE(IsConstant(binop));
+}
+
+TEST_F(AstTest, IsConstantUnopOfNameRefs) {
+  NameDef* name_def =
+      m.Make<NameDef>(fake_span, std::string("MyStruct"), nullptr);
+  NameRef* operand = m.Make<NameRef>(fake_span, "name", name_def);
+  Unop* unop = m.Make<Unop>(fake_span, UnopKind::kNegate, operand, fake_span);
+
+  EXPECT_FALSE(IsConstant(unop));
+}
+
+TEST_F(AstTest, IsConstantUnopOfNumbers) {
+  Number* operand = m.Make<Number>(fake_span, std::string("41"),
+                                   NumberKind::kOther, /*type=*/nullptr);
+  Unop* unop = m.Make<Unop>(fake_span, UnopKind::kNegate, operand, fake_span);
+
+  EXPECT_TRUE(IsConstant(unop));
+}
+
+TEST_F(AstTest, IsConstantNumber) {
+  Number* number = m.Make<Number>(fake_span, std::string("42"),
+                                  NumberKind::kOther, /*type=*/nullptr);
+
+  EXPECT_TRUE(IsConstant(number));
+}
+
+// Tests the IsConstant predicate on an array with a single `name` reference.
+//
+// Since the name reference is not constant, the array is not constant.
+TEST_F(AstTest, IsConstantArrayOfNameRefs) {
+  NameDef* name_def =
+      m.Make<NameDef>(fake_span, std::string("MyStruct"), nullptr);
+  NameRef* operand = m.Make<NameRef>(fake_span, "name", name_def);
+  Array* array = m.Make<Array>(fake_span, std::vector<Expr*>{operand}, false);
+
+  EXPECT_FALSE(IsConstant(array));
+}
+
+// Tests the IsConstant predicate on an array with a single `number` literal.
+// Since the number literal is constant, the array is constant.
+TEST_F(AstTest, IsConstantArrayOfNumbers) {
+  Number* operand = m.Make<Number>(fake_span, std::string("41"),
+                                   NumberKind::kOther, /*type=*/nullptr);
+  Array* array = m.Make<Array>(fake_span, std::vector<Expr*>{operand}, false);
+
+  EXPECT_TRUE(IsConstant(array));
+}
+
+// Tests the IsConstant predicate on an empty array.
+// Since there are no members, the array is constant.
+TEST_F(AstTest, IsConstantEmptyArray) {
+  Array* array = m.Make<Array>(fake_span, std::vector<Expr*>{}, false);
+
+  EXPECT_TRUE(IsConstant(array));
+}
+
+TEST_F(AstTest, AttributeToStringFuzzTestNoArgs) {
+  Attribute* attr = m.Make<Attribute>(
+      fake_span, std::nullopt, AttributeData(AttributeKind::kFuzzTest, {}));
+  EXPECT_EQ(attr->ToString(), "#[fuzz_test]");
+}
+
+TEST_F(AstTest, AttributeToStringFuzzTestSingleArg) {
+  AttributeData::StringKeyValueArgument arg("domains", "u32:0..1", true);
+  Attribute* attr = m.Make<Attribute>(
+      fake_span, fake_span, AttributeData(AttributeKind::kFuzzTest, {arg}));
+  EXPECT_EQ(attr->ToString(), "#[fuzz_test(domains = `u32:0..1`)]");
+}
+
+TEST_F(AstTest, AttributeToStringFuzzTestMultipleArgs) {
+  AttributeData::StringKeyValueArgument arg("domains", "u32:0..1, u32:10..20",
+                                            true);
+  Attribute* attr = m.Make<Attribute>(
+      fake_span, fake_span, AttributeData(AttributeKind::kFuzzTest, {arg}));
+  EXPECT_EQ(attr->ToString(), "#[fuzz_test(domains = `u32:0..1, u32:10..20`)]");
+}
+
+TEST_F(AstTest, AttributeToStringGenericArg) {
+  Attribute* attr =
+      m.Make<Attribute>(fake_span, fake_span,
+                        AttributeData(AttributeKind::kTest, {"some_string"}));
+  EXPECT_EQ(attr->ToString(), "#[test(some_string)]");
+}
+
+TEST_F(AstTest, AttributeToStringQuickcheckNoArgs) {
+  Attribute* attr = m.Make<Attribute>(
+      fake_span, std::nullopt, AttributeData(AttributeKind::kQuickcheck, {}));
+  EXPECT_EQ(attr->ToString(), "#[quickcheck]");
+}
+
+TEST_F(AstTest, AttributeToStringQuickcheckExhaustive) {
+  Attribute* attr = m.Make<Attribute>(
+      fake_span, fake_span,
+      AttributeData(AttributeKind::kQuickcheck, {std::string("exhaustive")}));
+  EXPECT_EQ(attr->ToString(), "#[quickcheck(exhaustive)]");
+}
+
+TEST_F(AstTest, AttributeToStringQuickcheckTestCount) {
+  AttributeData::IntKeyValueArgument arg("test_count", 1000);
+  Attribute* attr = m.Make<Attribute>(
+      fake_span, fake_span, AttributeData(AttributeKind::kQuickcheck, {arg}));
+  EXPECT_EQ(attr->ToString(), "#[quickcheck(test_count = 1000)]");
+}
+
+TEST_F(AstTest, AttributeToStringExternVerilogStringLiteral) {
+  AttributeData::StringLiteralArgument arg{"my_module"};
+  Attribute* attr =
+      m.Make<Attribute>(fake_span, fake_span,
+                        AttributeData(AttributeKind::kExternVerilog, {arg}));
+  EXPECT_EQ(attr->ToString(), "#[extern_verilog(\"my_module\")]");
+}
+
+TEST_F(AstTest, AttributeToStringTabulate) {
+  Attribute* attr = m.Make<Attribute>(
+      fake_span, std::nullopt, AttributeData(AttributeKind::kTabulate, {}));
+  EXPECT_EQ(attr->ToString(), "#[tabulate]");
+}
+
+TEST_F(AstTest, AttributeToStringTabulateDomains) {
+  AttributeData::StringKeyValueArgument arg("domains", "u32:0..4",
+                                            /*is_backticked=*/true);
+  Attribute* attr = m.Make<Attribute>(
+      fake_span, fake_span, AttributeData(AttributeKind::kTabulate, {arg}));
+  EXPECT_EQ(attr->ToString(), "#[tabulate(domains = `u32:0..4`)]");
+}
+
+TEST_F(AstTest, IsIrrefutablePatternWithRestOfTuple) {
+  NameDef* x =
+      m.Make<NameDef>(fake_span, std::string("x"), /*definer=*/nullptr);
+  WildcardPattern* wildcard = m.Make<WildcardPattern>(fake_span);
+  RestOfTuple* rest = m.Make<RestOfTuple>(fake_span);
+  TuplePattern* tuple = m.Make<TuplePattern>(
+      fake_span, std::vector<PatternTree>{x, wildcard, rest});
+
+  PatternTree pattern = tuple;
+  EXPECT_TRUE(IsIrrefutablePattern(pattern));
+  EXPECT_TRUE(IsIrrefutablePattern(ToConstPatternTree(pattern)));
+}
+
+}  // namespace
+}  // namespace xls::dslx

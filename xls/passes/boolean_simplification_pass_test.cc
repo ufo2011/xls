@@ -14,25 +14,35 @@
 
 #include "xls/passes/boolean_simplification_pass.h"
 
+#include <cstdint>
 #include <memory>
+#include <optional>
+#include <utility>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "absl/memory/memory.h"
+#include "xls/common/fuzzing/fuzztest.h"
 #include "absl/status/statusor.h"
 #include "xls/common/status/matchers.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/fuzzer/ir_fuzzer/ir_fuzz_domain.h"
+#include "xls/fuzzer/ir_fuzzer/ir_fuzz_test_library.h"
+#include "xls/ir/bits.h"
 #include "xls/ir/bits_ops.h"
+#include "xls/ir/function_builder.h"
 #include "xls/ir/ir_matcher.h"
 #include "xls/ir/ir_test_base.h"
+#include "xls/ir/op.h"
 #include "xls/passes/dce_pass.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/pass_base.h"
 
 namespace m = ::xls::op_matchers;
 
 namespace xls {
 namespace {
 
-using status_testing::IsOkAndHolds;
+using ::absl_testing::IsOkAndHolds;
 
 class BooleanSimplificationPassTest : public IrTestBase {
  protected:
@@ -40,13 +50,15 @@ class BooleanSimplificationPassTest : public IrTestBase {
 
   absl::StatusOr<bool> Run(Function* f) {
     PassResults results;
+    OptimizationContext context;
     XLS_ASSIGN_OR_RETURN(bool changed,
                          BooleanSimplificationPass().RunOnFunctionBase(
-                             f, PassOptions(), &results));
+                             f, OptimizationPassOptions(), &results, context));
     // Run dce to clean things up.
-    XLS_RETURN_IF_ERROR(DeadCodeEliminationPass()
-                            .RunOnFunctionBase(f, PassOptions(), &results)
-                            .status());
+    XLS_RETURN_IF_ERROR(
+        DeadCodeEliminationPass()
+            .RunOnFunctionBase(f, OptimizationPassOptions(), &results, context)
+            .status());
     // Return whether boolean simplification changed anything.
     return changed;
   }
@@ -54,7 +66,7 @@ class BooleanSimplificationPassTest : public IrTestBase {
 
 TEST_F(BooleanSimplificationPassTest, TruthTableTestSingleVariableNegated) {
   internal::TruthTable not_x(UBits(0b100, /*bit_count=*/3),
-                             UBits(0b100, /*bit_count=*/3), absl::nullopt);
+                             UBits(0b100, /*bit_count=*/3), std::nullopt);
   EXPECT_EQ(not_x.ComputeTruthTable(),
             bits_ops::Not(not_x.GetInitialVector(0)));
   EXPECT_TRUE(not_x.MatchesVector(not_x.ComputeTruthTable()));
@@ -88,7 +100,7 @@ fn f(x: bits[42], y: bits[42]) -> bits[42] {
 
 TEST_F(BooleanSimplificationPassTest, TruthTableMatchesNotX) {
   internal::TruthTable table(UBits(0b100, /*bit_count=*/3),
-                             UBits(0b100, /*bit_count=*/3), absl::nullopt);
+                             UBits(0b100, /*bit_count=*/3), std::nullopt);
   auto p = CreatePackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
 fn f(x: bits[42], y: bits[42]) -> bits[42] {
@@ -241,6 +253,32 @@ fn f(x: bits[3], y: bits[3], z: bits[3]) -> bits[3] {
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Nand(m::Param("z"), m::Not(m::Param("y"))));
 }
+
+TEST_F(BooleanSimplificationPassTest, ManyPaths) {
+  // Verify that the pass runs quickly even if there are exponentially many
+  // paths to consider.
+  auto p = CreatePackage();
+  Type* u1 = p->GetBitsType(1);
+
+  FunctionBuilder b(TestName(), p.get());
+  BValue x = b.Param("x", u1);
+  BValue y = b.Param("y", u1);
+  BValue tmp = b.And(x, y);
+  for (int64_t i = 0; i < 100; ++i) {
+    tmp = b.And(tmp, tmp);
+  }
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, b.Build());
+
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(), m::And(m::Param("x"), m::Param("y")));
+}
+
+void IrFuzzBooleanSimplification(FuzzPackageWithArgs fuzz_package_with_args) {
+  BooleanSimplificationPass pass;
+  OptimizationPassChangesOutputs(std::move(fuzz_package_with_args), pass);
+}
+FUZZ_TEST(IrFuzzTest, IrFuzzBooleanSimplification)
+    .WithDomains(IrFuzzDomainWithArgs(/*arg_set_count=*/10));
 
 // TODO(leary): 2019-10-11 Needs AOI21 logical function to map against.
 #if 0

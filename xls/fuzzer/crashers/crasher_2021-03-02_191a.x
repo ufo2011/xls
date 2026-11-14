@@ -11,137 +11,157 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-// options: {"input_is_dslx": true, "convert_to_ir": true, "optimize_ir": true, "use_jit": true, "codegen": true, "codegen_args": ["--use_system_verilog", "--generator=pipeline", "--pipeline_stages=4"], "simulate": false, "simulator": null, "use_system_verilog": true}
-// args: bits[43]:0x1000; bits[15]:0x2aaa
-// args: bits[43]:0x1000_0000; bits[15]:0x111
-// args: bits[43]:0x400; bits[15]:0x2106
-// args: bits[43]:0x3ff_ffff_ffff; bits[15]:0x5f6f
-// args: bits[43]:0x2000; bits[15]:0x794c
-// args: bits[43]:0x3ff_ffff_ffff; bits[15]:0x4000
-// args: bits[43]:0x2; bits[15]:0x5502
-// args: bits[43]:0x3ff_ffff_ffff; bits[15]:0x2
-// args: bits[43]:0x0; bits[15]:0x4256
-// args: bits[43]:0x20_0000; bits[15]:0x5301
-// args: bits[43]:0x200; bits[15]:0x1000
-// args: bits[43]:0x3ff_ffff_ffff; bits[15]:0x2000
-// args: bits[43]:0x100; bits[15]:0x100
-// args: bits[43]:0x282_e94e_62bf; bits[15]:0x7233
-// args: bits[43]:0x8; bits[15]:0x400
-// args: bits[43]:0x80_0000; bits[15]:0x2000
-// args: bits[43]:0x4000; bits[15]:0x488c
-// args: bits[43]:0x400_0000; bits[15]:0x5555
-// args: bits[43]:0x8_0000_0000; bits[15]:0x0
-// args: bits[43]:0x20; bits[15]:0x4e8
-// args: bits[43]:0x2_0000; bits[15]:0x5e0f
-// args: bits[43]:0x8; bits[15]:0x4209
-// args: bits[43]:0x400_0000_0000; bits[15]:0x20
-// args: bits[43]:0x0; bits[15]:0x3c02
-// args: bits[43]:0x4; bits[15]:0x804
-// args: bits[43]:0x555_5555_5555; bits[15]:0x4545
-// args: bits[43]:0x8_0000; bits[15]:0x4a08
-// args: bits[43]:0x7ee_c3dc_df0b; bits[15]:0x5f0b
-// args: bits[43]:0x20_0000; bits[15]:0xc00
-// args: bits[43]:0x2aa_aaaa_aaaa; bits[15]:0x0
-// args: bits[43]:0x200; bits[15]:0x200
-// args: bits[43]:0x200; bits[15]:0x4000
-// args: bits[43]:0x4000; bits[15]:0x100
-// args: bits[43]:0x1000; bits[15]:0x0
-// args: bits[43]:0x2_0000; bits[15]:0x8
-// args: bits[43]:0x1_0000_0000; bits[15]:0x10
-// args: bits[43]:0x2000_0000; bits[15]:0x0
-// args: bits[43]:0x100_0000; bits[15]:0x80
-// args: bits[43]:0x8_0000; bits[15]:0x0
-// args: bits[43]:0x4000; bits[15]:0x4000
-// args: bits[43]:0x800; bits[15]:0x4
-// args: bits[43]:0x3ff_ffff_ffff; bits[15]:0x2
-// args: bits[43]:0x1000; bits[15]:0x7fff
-// args: bits[43]:0x20_0000_0000; bits[15]:0x5555
-// args: bits[43]:0x16b_26a2_3499; bits[15]:0x3491
-// args: bits[43]:0x80_0000_0000; bits[15]:0x4
-// args: bits[43]:0x10_0000; bits[15]:0x800
-// args: bits[43]:0x200; bits[15]:0xa00
-// args: bits[43]:0x200_0000; bits[15]:0x400
-// args: bits[43]:0x64d_4d48_9cf5; bits[15]:0x58f9
-// args: bits[43]:0x80_0000_0000; bits[15]:0x0
-// args: bits[43]:0x1_0000; bits[15]:0x2c90
-// args: bits[43]:0x2aa_aaaa_aaaa; bits[15]:0x2253
-// args: bits[43]:0x4_0000_0000; bits[15]:0x34f3
-// args: bits[43]:0x8000_0000; bits[15]:0x3400
-// args: bits[43]:0x4; bits[15]:0x2
-// args: bits[43]:0x100; bits[15]:0x180
-// args: bits[43]:0x100; bits[15]:0x54a1
-// args: bits[43]:0x10_0000_0000; bits[15]:0x1
-// args: bits[43]:0x165_e997_6d9d; bits[15]:0x5555
-// args: bits[43]:0x4_0000_0000; bits[15]:0x100
-// args: bits[43]:0x1000; bits[15]:0x3fff
-// args: bits[43]:0x4; bits[15]:0x283
-// args: bits[43]:0x20_0000; bits[15]:0x2b
-// args: bits[43]:0x1000; bits[15]:0x4000
-// args: bits[43]:0x200_0000_0000; bits[15]:0x3fff
-// args: bits[43]:0x0; bits[15]:0x4100
-// args: bits[43]:0x0; bits[15]:0x200
-// args: bits[43]:0x400_0000; bits[15]:0x0
-// args: bits[43]:0x8_0000_0000; bits[15]:0x4000
-// args: bits[43]:0x4_0000_0000; bits[15]:0x5476
-// args: bits[43]:0x177_7c94_4ed4; bits[15]:0x4cd4
-// args: bits[43]:0x80; bits[15]:0xc1
-// args: bits[43]:0x1_0000; bits[15]:0x0
-// args: bits[43]:0x10_0000; bits[15]:0x1000
-// args: bits[43]:0x40_0000_0000; bits[15]:0x1
-// args: bits[43]:0x2000_0000; bits[15]:0x5801
-// args: bits[43]:0x40_0000; bits[15]:0x5331
-// args: bits[43]:0x400; bits[15]:0x4600
-// args: bits[43]:0xcd_d1c1_8151; bits[15]:0x2151
-// args: bits[43]:0x1b4_bbbd_edc9; bits[15]:0x4
-// args: bits[43]:0x4; bits[15]:0x40
-// args: bits[43]:0x2_0000; bits[15]:0x1081
-// args: bits[43]:0x400_0000; bits[15]:0x3fa3
-// args: bits[43]:0x800; bits[15]:0x4000
-// args: bits[43]:0x100_0000_0000; bits[15]:0x20
-// args: bits[43]:0x100; bits[15]:0x7c9
-// args: bits[43]:0x10; bits[15]:0x690
-// args: bits[43]:0x1_0000_0000; bits[15]:0x100
-// args: bits[43]:0x400_0000_0000; bits[15]:0x1
-// args: bits[43]:0x2; bits[15]:0x6003
-// args: bits[43]:0x4; bits[15]:0x800
-// args: bits[43]:0x2000_0000; bits[15]:0x80
-// args: bits[43]:0x3ff_ffff_ffff; bits[15]:0x80
-// args: bits[43]:0x80_0000_0000; bits[15]:0x40
-// args: bits[43]:0x8_0000; bits[15]:0x928
-// args: bits[43]:0x2_0000; bits[15]:0x4806
-// args: bits[43]:0x40_0000; bits[15]:0x100
-// args: bits[43]:0x8000_0000; bits[15]:0x4
-// args: bits[43]:0x800_0000; bits[15]:0x4100
-// args: bits[43]:0x400; bits[15]:0x400
-// args: bits[43]:0x1; bits[15]:0x181
-// args: bits[43]:0x377_16b1_b482; bits[15]:0x3402
-// args: bits[43]:0x200; bits[15]:0x2aaa
-// args: bits[43]:0x555_5555_5555; bits[15]:0x200
-// args: bits[43]:0x10; bits[15]:0x400
-// args: bits[43]:0x400_0000; bits[15]:0x2000
-// args: bits[43]:0x4000; bits[15]:0x75ad
-// args: bits[43]:0x80; bits[15]:0x4400
-// args: bits[43]:0x400_0000; bits[15]:0x10
-// args: bits[43]:0x2; bits[15]:0x195
-// args: bits[43]:0x4000; bits[15]:0x4800
-// args: bits[43]:0x80_0000; bits[15]:0x200
-// args: bits[43]:0x80; bits[15]:0x800
-// args: bits[43]:0x0; bits[15]:0x1000
-// args: bits[43]:0x80_0000; bits[15]:0x48
-// args: bits[43]:0x10; bits[15]:0x4
-// args: bits[43]:0x40_0000_0000; bits[15]:0x4440
-// args: bits[43]:0x20; bits[15]:0x20
-// args: bits[43]:0x200; bits[15]:0x200
-// args: bits[43]:0x1000; bits[15]:0x7fff
-// args: bits[43]:0x2_0000; bits[15]:0x910
-// args: bits[43]:0x40_0000; bits[15]:0x4000
-// args: bits[43]:0x4_0000; bits[15]:0x1000
-// args: bits[43]:0x2aa_aaaa_aaaa; bits[15]:0x2eee
-// args: bits[43]:0x40_0000_0000; bits[15]:0x2cc7
-// args: bits[43]:0x10_0000_0000; bits[15]:0x2aaa
-// args: bits[43]:0x2000; bits[15]:0x10
-const W2_V2 = u2:0x2;
+// BEGIN_CONFIG
+// sample_options {
+//   input_is_dslx: true
+//   sample_type: SAMPLE_TYPE_FUNCTION
+//   ir_converter_args: "--top=main"
+//   convert_to_ir: true
+//   optimize_ir: true
+//   use_jit: true
+//   codegen: true
+//   codegen_args: "--use_system_verilog"
+//   codegen_args: "--generator=pipeline"
+//   codegen_args: "--pipeline_stages=4"
+//   codegen_args: "--reset_data_path=false"
+//   simulate: false
+//   use_system_verilog: true
+//   calls_per_sample: 1
+// }
+// inputs {
+//   function_args {
+//     args: "bits[43]:0x1000; bits[15]:0x2aaa"
+//     args: "bits[43]:0x1000_0000; bits[15]:0x111"
+//     args: "bits[43]:0x400; bits[15]:0x2106"
+//     args: "bits[43]:0x3ff_ffff_ffff; bits[15]:0x5f6f"
+//     args: "bits[43]:0x2000; bits[15]:0x794c"
+//     args: "bits[43]:0x3ff_ffff_ffff; bits[15]:0x4000"
+//     args: "bits[43]:0x2; bits[15]:0x5502"
+//     args: "bits[43]:0x3ff_ffff_ffff; bits[15]:0x2"
+//     args: "bits[43]:0x0; bits[15]:0x4256"
+//     args: "bits[43]:0x20_0000; bits[15]:0x5301"
+//     args: "bits[43]:0x200; bits[15]:0x1000"
+//     args: "bits[43]:0x3ff_ffff_ffff; bits[15]:0x2000"
+//     args: "bits[43]:0x100; bits[15]:0x100"
+//     args: "bits[43]:0x282_e94e_62bf; bits[15]:0x7233"
+//     args: "bits[43]:0x8; bits[15]:0x400"
+//     args: "bits[43]:0x80_0000; bits[15]:0x2000"
+//     args: "bits[43]:0x4000; bits[15]:0x488c"
+//     args: "bits[43]:0x400_0000; bits[15]:0x5555"
+//     args: "bits[43]:0x8_0000_0000; bits[15]:0x0"
+//     args: "bits[43]:0x20; bits[15]:0x4e8"
+//     args: "bits[43]:0x2_0000; bits[15]:0x5e0f"
+//     args: "bits[43]:0x8; bits[15]:0x4209"
+//     args: "bits[43]:0x400_0000_0000; bits[15]:0x20"
+//     args: "bits[43]:0x0; bits[15]:0x3c02"
+//     args: "bits[43]:0x4; bits[15]:0x804"
+//     args: "bits[43]:0x555_5555_5555; bits[15]:0x4545"
+//     args: "bits[43]:0x8_0000; bits[15]:0x4a08"
+//     args: "bits[43]:0x7ee_c3dc_df0b; bits[15]:0x5f0b"
+//     args: "bits[43]:0x20_0000; bits[15]:0xc00"
+//     args: "bits[43]:0x2aa_aaaa_aaaa; bits[15]:0x0"
+//     args: "bits[43]:0x200; bits[15]:0x200"
+//     args: "bits[43]:0x200; bits[15]:0x4000"
+//     args: "bits[43]:0x4000; bits[15]:0x100"
+//     args: "bits[43]:0x1000; bits[15]:0x0"
+//     args: "bits[43]:0x2_0000; bits[15]:0x8"
+//     args: "bits[43]:0x1_0000_0000; bits[15]:0x10"
+//     args: "bits[43]:0x2000_0000; bits[15]:0x0"
+//     args: "bits[43]:0x100_0000; bits[15]:0x80"
+//     args: "bits[43]:0x8_0000; bits[15]:0x0"
+//     args: "bits[43]:0x4000; bits[15]:0x4000"
+//     args: "bits[43]:0x800; bits[15]:0x4"
+//     args: "bits[43]:0x3ff_ffff_ffff; bits[15]:0x2"
+//     args: "bits[43]:0x1000; bits[15]:0x7fff"
+//     args: "bits[43]:0x20_0000_0000; bits[15]:0x5555"
+//     args: "bits[43]:0x16b_26a2_3499; bits[15]:0x3491"
+//     args: "bits[43]:0x80_0000_0000; bits[15]:0x4"
+//     args: "bits[43]:0x10_0000; bits[15]:0x800"
+//     args: "bits[43]:0x200; bits[15]:0xa00"
+//     args: "bits[43]:0x200_0000; bits[15]:0x400"
+//     args: "bits[43]:0x64d_4d48_9cf5; bits[15]:0x58f9"
+//     args: "bits[43]:0x80_0000_0000; bits[15]:0x0"
+//     args: "bits[43]:0x1_0000; bits[15]:0x2c90"
+//     args: "bits[43]:0x2aa_aaaa_aaaa; bits[15]:0x2253"
+//     args: "bits[43]:0x4_0000_0000; bits[15]:0x34f3"
+//     args: "bits[43]:0x8000_0000; bits[15]:0x3400"
+//     args: "bits[43]:0x4; bits[15]:0x2"
+//     args: "bits[43]:0x100; bits[15]:0x180"
+//     args: "bits[43]:0x100; bits[15]:0x54a1"
+//     args: "bits[43]:0x10_0000_0000; bits[15]:0x1"
+//     args: "bits[43]:0x165_e997_6d9d; bits[15]:0x5555"
+//     args: "bits[43]:0x4_0000_0000; bits[15]:0x100"
+//     args: "bits[43]:0x1000; bits[15]:0x3fff"
+//     args: "bits[43]:0x4; bits[15]:0x283"
+//     args: "bits[43]:0x20_0000; bits[15]:0x2b"
+//     args: "bits[43]:0x1000; bits[15]:0x4000"
+//     args: "bits[43]:0x200_0000_0000; bits[15]:0x3fff"
+//     args: "bits[43]:0x0; bits[15]:0x4100"
+//     args: "bits[43]:0x0; bits[15]:0x200"
+//     args: "bits[43]:0x400_0000; bits[15]:0x0"
+//     args: "bits[43]:0x8_0000_0000; bits[15]:0x4000"
+//     args: "bits[43]:0x4_0000_0000; bits[15]:0x5476"
+//     args: "bits[43]:0x177_7c94_4ed4; bits[15]:0x4cd4"
+//     args: "bits[43]:0x80; bits[15]:0xc1"
+//     args: "bits[43]:0x1_0000; bits[15]:0x0"
+//     args: "bits[43]:0x10_0000; bits[15]:0x1000"
+//     args: "bits[43]:0x40_0000_0000; bits[15]:0x1"
+//     args: "bits[43]:0x2000_0000; bits[15]:0x5801"
+//     args: "bits[43]:0x40_0000; bits[15]:0x5331"
+//     args: "bits[43]:0x400; bits[15]:0x4600"
+//     args: "bits[43]:0xcd_d1c1_8151; bits[15]:0x2151"
+//     args: "bits[43]:0x1b4_bbbd_edc9; bits[15]:0x4"
+//     args: "bits[43]:0x4; bits[15]:0x40"
+//     args: "bits[43]:0x2_0000; bits[15]:0x1081"
+//     args: "bits[43]:0x400_0000; bits[15]:0x3fa3"
+//     args: "bits[43]:0x800; bits[15]:0x4000"
+//     args: "bits[43]:0x100_0000_0000; bits[15]:0x20"
+//     args: "bits[43]:0x100; bits[15]:0x7c9"
+//     args: "bits[43]:0x10; bits[15]:0x690"
+//     args: "bits[43]:0x1_0000_0000; bits[15]:0x100"
+//     args: "bits[43]:0x400_0000_0000; bits[15]:0x1"
+//     args: "bits[43]:0x2; bits[15]:0x6003"
+//     args: "bits[43]:0x4; bits[15]:0x800"
+//     args: "bits[43]:0x2000_0000; bits[15]:0x80"
+//     args: "bits[43]:0x3ff_ffff_ffff; bits[15]:0x80"
+//     args: "bits[43]:0x80_0000_0000; bits[15]:0x40"
+//     args: "bits[43]:0x8_0000; bits[15]:0x928"
+//     args: "bits[43]:0x2_0000; bits[15]:0x4806"
+//     args: "bits[43]:0x40_0000; bits[15]:0x100"
+//     args: "bits[43]:0x8000_0000; bits[15]:0x4"
+//     args: "bits[43]:0x800_0000; bits[15]:0x4100"
+//     args: "bits[43]:0x400; bits[15]:0x400"
+//     args: "bits[43]:0x1; bits[15]:0x181"
+//     args: "bits[43]:0x377_16b1_b482; bits[15]:0x3402"
+//     args: "bits[43]:0x200; bits[15]:0x2aaa"
+//     args: "bits[43]:0x555_5555_5555; bits[15]:0x200"
+//     args: "bits[43]:0x10; bits[15]:0x400"
+//     args: "bits[43]:0x400_0000; bits[15]:0x2000"
+//     args: "bits[43]:0x4000; bits[15]:0x75ad"
+//     args: "bits[43]:0x80; bits[15]:0x4400"
+//     args: "bits[43]:0x400_0000; bits[15]:0x10"
+//     args: "bits[43]:0x2; bits[15]:0x195"
+//     args: "bits[43]:0x4000; bits[15]:0x4800"
+//     args: "bits[43]:0x80_0000; bits[15]:0x200"
+//     args: "bits[43]:0x80; bits[15]:0x800"
+//     args: "bits[43]:0x0; bits[15]:0x1000"
+//     args: "bits[43]:0x80_0000; bits[15]:0x48"
+//     args: "bits[43]:0x10; bits[15]:0x4"
+//     args: "bits[43]:0x40_0000_0000; bits[15]:0x4440"
+//     args: "bits[43]:0x20; bits[15]:0x20"
+//     args: "bits[43]:0x200; bits[15]:0x200"
+//     args: "bits[43]:0x1000; bits[15]:0x7fff"
+//     args: "bits[43]:0x2_0000; bits[15]:0x910"
+//     args: "bits[43]:0x40_0000; bits[15]:0x4000"
+//     args: "bits[43]:0x4_0000; bits[15]:0x1000"
+//     args: "bits[43]:0x2aa_aaaa_aaaa; bits[15]:0x2eee"
+//     args: "bits[43]:0x40_0000_0000; bits[15]:0x2cc7"
+//     args: "bits[43]:0x10_0000_0000; bits[15]:0x2aaa"
+//     args: "bits[43]:0x2000; bits[15]:0x10"
+//   }
+// }
+// END_CONFIG
+const W32_V2 = u32:0x2;
 type x23 = (u9, (u9,));
 type x29 = u3;
 fn x3(x4: u44) -> (u9, (u9,)) {
@@ -150,33 +170,33 @@ fn x3(x4: u44) -> (u9, (u9,)) {
   let x7: u9 = ((x5) ++ (x5)) ++ (x5);
   let x8: (u44, u44) = (x4, x4);
   let x9: u9 = one_hot_sel(x5, [x7, x7, x7]);
-  let x10: u3 = for (i, x): (u4, u3) in range(u4:0x0, u4:0x6) {
+  let x10: u3 = for (i, x): (u4, u3) in u4:0x0..u4:0x6 {
     x
   }(x5);
   let x11: u9 = (x7) * (x7);
   let x12: (u9,) = (x11,);
-  let x13: u3 = (x6)[0x0];
-  let x14: u9 = for (i, x): (u4, u9) in range(u4:0x0, u4:0x3) {
+  let x13: u3 = (x6).0;
+  let x14: u9 = for (i, x): (u4, u9) in u4:0x0..u4:0x3 {
     x
   }(x7);
   let x15: s55 = s55:0x8000000000000;
   let x16: s55 = one_hot_sel(x10, [x15, x15, x15]);
-  let x17: u44 = (x8)[0x0];
+  let x17: u44 = (x8).0;
   let x18: u9 = rev(x11);
   let x19: u9 = !(x9);
-  let x20: u9 = for (i, x): (u4, u9) in range(u4:0x0, u4:0x7) {
+  let x20: u9 = for (i, x): (u4, u9) in u4:0x0..u4:0x7 {
     x
   }(x14);
-  let x21: u9 = for (i, x): (u4, u9) in range(u4:0x0, u4:0x0) {
+  let x21: u9 = for (i, x): (u4, u9) in u4:0x0..u4:0x0 {
     x
   }(x9);
-  let x22: u9 = for (i, x): (u4, u9) in range(u4:0x0, u4:0x1) {
+  let x22: u9 = for (i, x): (u4, u9) in u4:0x0..u4:0x1 {
     x
   }(x11);
   (x9, x12)
 }
-fn main(x0: s43, x1: u15) -> (u15, u15, u15, (u30,), u1, u23, (u1,), u15, u1, u15, (u30,), u15, u1, u30, u15, u1, u15, x23[W2_V2], x23[0x4], u55, u15, u15, x23[0x4], (u30,), u15, u1, u15, u15) {
-  let x2: x23[W2_V2] = map(u44[0x2]:[u44:0x8000000, u44:0x400], x3);
+fn main(x0: s43, x1: u15) -> (u15, u15, u15, (u30,), u1, u23, (u1,), u15, u1, u15, (u30,), u15, u1, u30, u15, u1, u15, x23[W32_V2], x23[0x4], u55, u15, u15, x23[0x4], (u30,), u15, u1, u15, u15) {
+  let x2: x23[W32_V2] = map(u44[0x2]:[u44:0x8000000, u44:0x400], x3);
   let x24: u15 = (x1)[:];
   let x25: u15 = one_hot_sel(u4:0x1, [x1, x1, x1, x1]);
   let x26: u1 = (x25) != (((x24) as u15));
@@ -198,7 +218,7 @@ fn main(x0: s43, x1: u15) -> (u15, u15, u15, (u30,), u1, u23, (u1,), u15, u1, u1
   let x43: u30 = !(x37);
   let x44: s20 = s20:0x400;
   let x45: x23[0x4] = (x2) ++ (x2);
-  let x46: u1 = for (i, x): (u4, u1) in range(u4:0x0, u4:0x7) {
+  let x46: u1 = for (i, x): (u4, u1) in u4:0x0..u4:0x7 {
     x
   }(x26);
   let x47: u55 = one_hot_sel(x26, [x40]);

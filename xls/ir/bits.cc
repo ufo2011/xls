@@ -14,27 +14,22 @@
 
 #include "xls/ir/bits.h"
 
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <utility>
+
 #include "absl/base/casts.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
-#include "absl/strings/str_join.h"
-#include "xls/common/logging/logging.h"
+#include "absl/types/span.h"
+#include "xls/data_structures/inline_bitmap.h"
 
 namespace xls {
-
-/* static */ Bits Bits::FromBytes(absl::Span<const uint8_t> bytes,
-                                  int64_t bit_count) {
-  XLS_CHECK_GE(bit_count, 0);
-  int64_t byte_count = bytes.size();
-  XLS_CHECK_LE(bit_count, byte_count * 8);
-  InlineBitmap bitmap(bit_count);
-  for (int64_t i = 0; i < byte_count; ++i) {
-    bitmap.SetByte(byte_count - i - 1, bytes[i]);
-  }
-  return Bits(std::move(bitmap));
-}
 
 /* static */ int64_t Bits::MinBitCountSigned(int64_t value) {
   if (value == 0) {
@@ -64,29 +59,42 @@ absl::StatusOr<Bits> SBitsWithStatus(int64_t value, int64_t bit_count) {
                         "datatype, but attempting to fit in %d bits.",
                         value, Bits::MinBitCountSigned(value), bit_count));
   }
-  bool fill = (value >> 63);
+  bool fill = (value >> 63) != 0;
   return Bits(InlineBitmap::FromWord(value, bit_count, fill));
 }
 
-Bits::Bits(absl::Span<bool const> bits) : bitmap_(bits.size()) {
-  for (int64_t i = 0; i < bits.size(); ++i) {
-    bitmap_.Set(i, bits[i]);
+Bits::Bits(absl::Span<bool const> bits)
+    : bitmap_(InlineBitmap::FromBitsLsbIs0(bits)) {}
+
+void Bits::SetRange(int64_t start_index, int64_t end_index, bool value) {
+  bitmap_.SetRange(start_index, end_index, value);
+}
+
+/* static */ Bits Bits::AllOnes(int64_t bit_count) {
+  return Bits::FromBitmap(InlineBitmap(bit_count, /*fill=*/true));
+}
+
+/* static */ Bits Bits::MaxSigned(int64_t bit_count) {
+  if (bit_count == 0) {
+    return SBits(0, 0);
   }
-}
-
-/* static */
-Bits Bits::AllOnes(int64_t bit_count) {
-  return bit_count == 0 ? Bits() : SBits(-1, bit_count);
-}
-
-/* static */
-Bits Bits::MaxSigned(int64_t bit_count) {
   return Bits::AllOnes(bit_count).UpdateWithSet(bit_count - 1, false);
 }
 
-/* static */
-Bits Bits::MinSigned(int64_t bit_count) {
+/* static */ Bits Bits::MinSigned(int64_t bit_count) {
+  if (bit_count == 0) {
+    return SBits(0, 0);
+  }
   return Bits::PowerOfTwo(bit_count - 1, bit_count);
+}
+
+std::string Bits::ToDebugString() const {
+  std::string result = "0b";
+  auto bits = ToBitVector();
+  for (auto it = bits.rbegin(); it != bits.rend(); ++it) {
+    absl::StrAppendFormat(&result, "%d", *it);
+  }
+  return result;
 }
 
 absl::InlinedVector<bool, 1> Bits::ToBitVector() const {
@@ -97,8 +105,7 @@ absl::InlinedVector<bool, 1> Bits::ToBitVector() const {
   return bits;
 }
 
-/* static */
-Bits Bits::PowerOfTwo(int64_t set_bit_index, int64_t bit_count) {
+/* static */ Bits Bits::PowerOfTwo(int64_t set_bit_index, int64_t bit_count) {
   Bits result(bit_count);
   result.bitmap_.Set(set_bit_index, true);
   return result;
@@ -156,26 +163,28 @@ bool Bits::HasSingleRunOfSetBits(int64_t* leading_zero_count,
                                  int64_t* set_bit_count,
                                  int64_t* trailing_zero_count) const {
   int64_t leading_zeros = CountLeadingZeros();
-  XLS_CHECK_GE(leading_zeros, 0);
+  CHECK_GE(leading_zeros, 0);
   int64_t trailing_zeros = CountTrailingZeros();
-  XLS_CHECK_GE(trailing_zeros, 0);
+  CHECK_GE(trailing_zeros, 0);
   if (bit_count() == trailing_zeros) {
-    XLS_CHECK_EQ(leading_zeros, bit_count());
+    CHECK_EQ(leading_zeros, bit_count());
     return false;
   }
   for (int64_t i = trailing_zeros; i < bit_count() - leading_zeros; ++i) {
-    if (Get(i) != 1) {
+    if (!Get(i)) {
       return false;
     }
   }
   *leading_zero_count = leading_zeros;
   *trailing_zero_count = trailing_zeros;
   *set_bit_count = bit_count() - leading_zeros - trailing_zeros;
-  XLS_CHECK_GE(*set_bit_count, 0);
+  CHECK_GE(*set_bit_count, 0);
   return true;
 }
 
 bool Bits::FitsInUint64() const { return FitsInNBitsUnsigned(64); }
+
+bool Bits::FitsInInt64Unsigned() const { return FitsInNBitsUnsigned(63); }
 
 bool Bits::FitsInInt64() const { return FitsInNBitsSigned(64); }
 
@@ -211,7 +220,7 @@ absl::StatusOr<uint64_t> Bits::ToUint64() const {
   if (!FitsInUint64()) {
     return absl::InvalidArgumentError(absl::StrCat(
         "Bits value cannot be represented as an unsigned 64-bit value: ",
-        ToString()));
+        ToDebugString()));
   }
   return bitmap_.GetWord(0);
 }
@@ -229,7 +238,7 @@ absl::StatusOr<int64_t> Bits::ToInt64() const {
   if (!FitsInInt64()) {
     return absl::InvalidArgumentError(absl::StrCat(
         "Bits value cannot be represented as a signed 64-bit value: ",
-        ToString()));
+        ToDebugString()));
   }
 
   uint64_t word = bitmap_.GetWord(0);
@@ -240,83 +249,58 @@ absl::StatusOr<int64_t> Bits::ToInt64() const {
   return absl::bit_cast<int64_t>(word);
 }
 
-Bits Bits::Slice(int64_t start, int64_t width) const {
-  XLS_CHECK_GE(width, 0);
-  XLS_CHECK_LE(start + width, bit_count())
-      << "start: " << start << " width: " << width;
-  Bits result(width);
-  for (int64_t i = 0; i < width; ++i) {
-    if (Get(start + i)) {
-      result.bitmap_.Set(i, true);
-    }
-  }
-  return result;
-}
-
-std::string Bits::ToString(FormatPreference preference,
-                           bool include_bit_count) const {
-  if (preference == FormatPreference::kDefault) {
-    if (bit_count() <= 64) {
-      preference = FormatPreference::kDecimal;
-    } else {
-      preference = FormatPreference::kHex;
-    }
-  }
-  std::string result;
-  if (preference == FormatPreference::kBinary) {
-    result = "0b";
-  } else if (preference == FormatPreference::kHex) {
-    result = "0x";
-  }
-  absl::StrAppend(&result, ToRawDigits(preference));
-  if (include_bit_count) {
-    absl::StrAppendFormat(&result, " [%d bits]", bit_count());
-  }
-  return result;
-}
-
-std::string Bits::ToRawDigits(FormatPreference preference,
-                              bool emit_leading_zeros) const {
-  XLS_CHECK_NE(preference, FormatPreference::kDefault);
-  if (preference == FormatPreference::kDecimal) {
-    // Leading zeros don't make a lot of sense in decimal format as there is no
-    // clean correspondence between decimal digits and binary digits.
-    XLS_CHECK(!emit_leading_zeros)
-        << "emit_leading_zeros not supported for decimal format.";
-    // TODO(meheff): 2019/4/3 Add support for arbitrary width decimal emission.
-    XLS_CHECK(FitsInUint64())
-        << "Decimal output not supported for values which do "
-           "not fit in a uint64_t";
-    return absl::StrCat(ToUint64().value());
-  }
+absl::StatusOr<int64_t> Bits::UnsignedToInt64() const {
   if (bit_count() == 0) {
-    return "0";
+    // By convention, an empty Bits has a numeric value of zero.
+    return 0;
   }
-
-  XLS_CHECK((preference == FormatPreference::kBinary) ||
-            (preference == FormatPreference::kHex));
-  const int64_t kSeparatorPeriod = 4;
-  const int64_t digit_width = preference == FormatPreference::kBinary ? 1 : 4;
-  const int64_t digit_count = CeilOfRatio(bit_count(), digit_width);
-  std::string result;
-  bool eliding_leading_zeros = !emit_leading_zeros;
-  for (int64_t digit_no = digit_count - 1; digit_no >= 0; --digit_no) {
-    // Add a '_' every kSeparatorPeriod digits.
-    if (((digit_no + 1) % kSeparatorPeriod == 0) && !result.empty()) {
-      absl::StrAppend(&result, "_");
-    }
-    // Slice out a Bits which contains 1 digit.
-    int64_t start = digit_no * digit_width;
-    int64_t width = std::min(digit_width, bit_count() - start);
-    // As single digit necessarily fits in a uint64_t, so the value() is safe.
-    uint64_t digit_value = Slice(start, width).ToUint64().value();
-    if (digit_value == 0 && eliding_leading_zeros && digit_no != 0) {
-      continue;
-    }
-    eliding_leading_zeros = false;
-    absl::StrAppend(&result, absl::StrFormat("%x", digit_value));
+  if (!FitsInInt64Unsigned()) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Unsigned Bits value cannot be represented as a signed 64-bit value: ",
+        ToDebugString()));
   }
-  return result;
+  DCHECK_LE(bitmap_.GetWord(0),
+            static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
+  return static_cast<int64_t>(bitmap_.GetWord(0));
 }
+
+absl::StatusOr<bool> Bits::ToBool() const {
+  if (bit_count() != 1) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Cannot convert Bits of width %d to bool", bit_count()));
+  }
+  return Get(0);
+}
+
+Bits Bits::Slice(int64_t start, int64_t width) && {
+  CHECK_GE(width, 0);
+  CHECK_LE(start + width, bit_count())
+      << "start: " << start << " width: " << width;
+  if (start == 0) {
+    // Do the fast truncate.
+    //
+    // This is the most common slice so make it fast.
+    return Bits::FromBitmap(std::move(bitmap_).WithSize(width));
+  }
+  InlineBitmap bm(width);
+  bm.Overwrite(bitmap_, width, /*w_offset=*/0, /*r_offset=*/start);
+  return Bits::FromBitmap(std::move(bm));
+}
+
+Bits Bits::Slice(int64_t start, int64_t width) const& {
+  CHECK_GE(width, 0);
+  CHECK_LE(start + width, bit_count())
+      << "start: " << start << " width: " << width;
+  if (start == 0) {
+    // Do the fast truncate.
+    //
+    // This is the most common slice so make it fast.
+    return Bits::FromBitmap(bitmap_.WithSize(width));
+  }
+  InlineBitmap bm(width);
+  bm.Overwrite(bitmap_, width, /*w_offset=*/0, /*r_offset=*/start);
+  return Bits::FromBitmap(std::move(bm));
+}
+
 
 }  // namespace xls

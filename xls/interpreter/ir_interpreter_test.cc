@@ -14,35 +14,58 @@
 
 #include "xls/interpreter/ir_interpreter.h"
 
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
+#include "absl/types/optional_ref.h"
+#include "absl/types/span.h"
 #include "xls/common/status/matchers.h"
-#include "xls/interpreter/ir_evaluator_test.h"
+#include "xls/interpreter/evaluator_options.h"
+#include "xls/interpreter/function_interpreter.h"
+#include "xls/interpreter/ir_evaluator_test_base.h"
+#include "xls/interpreter/observer.h"
 #include "xls/ir/bits.h"
-#include "xls/ir/bits_ops.h"
+#include "xls/ir/events.h"
 #include "xls/ir/function_builder.h"
 #include "xls/ir/ir_parser.h"
 #include "xls/ir/ir_test_base.h"
 #include "xls/ir/package.h"
+#include "xls/ir/value.h"
 #include "xls/ir/verifier.h"
 
 namespace xls {
 namespace {
 
-using status_testing::IsOkAndHolds;
-using status_testing::StatusIs;
+using ::absl_testing::IsOkAndHolds;
+using ::absl_testing::StatusIs;
+using ::testing::ElementsAre;
+using ::testing::ElementsAreArray;
 using ::testing::HasSubstr;
+using ::testing::UnorderedElementsAre;
 
 INSTANTIATE_TEST_SUITE_P(
-    IrInterpreterTest, IrEvaluatorTest,
+    IrInterpreterTest, IrEvaluatorTestBase,
     testing::Values(IrEvaluatorTestParam(
-        [](Function* function, const std::vector<Value>& args) {
-          return IrInterpreter::Run(function, args);
+        [](Function* function, absl::Span<const Value> args,
+           const EvaluatorOptions& options,
+           absl::optional_ref<EvaluationObserver> obs) {
+          return InterpretFunction(function, args, options, obs);
         },
         [](Function* function,
-           const absl::flat_hash_map<std::string, Value>& kwargs) {
-          return IrInterpreter::RunKwargs(function, kwargs);
-        })));
+           const absl::flat_hash_map<std::string, Value>& kwargs,
+           const EvaluatorOptions& options,
+           absl::optional_ref<EvaluationObserver> obs) {
+          return InterpretFunctionKwargs(function, kwargs, options, obs);
+        },
+        true, "IrInterpreter")),
+    testing::PrintToStringParamName());
 
 // Fixture for IrInterpreter-only tests (i.e., those that aren't common to all
 // IR evaluators).
@@ -62,30 +85,169 @@ TEST_F(IrInterpreterOnlyTest, EvaluateNode) {
   XLS_ASSERT_OK_AND_ASSIGN(Function * function,
                            Parser::ParseFunction(fn_text, &package));
 
-  Value a = Value(UBits(0b0011, 4));
-  Value b = Value(UBits(0b1010, 4));
-  EXPECT_THAT(
-      IrInterpreter::EvaluateNode(FindNode("and.3", function), {&a, &b}),
-      IsOkAndHolds(Value(UBits(0b0010, 4))));
-  EXPECT_THAT(IrInterpreter::EvaluateNode(FindNode("or.4", function), {&a, &b}),
+  EXPECT_THAT(InterpretNode(FindNode("and.3", function),
+                            {Value(UBits(0b0011, 4)), Value(UBits(0b1010, 4))}),
+              IsOkAndHolds(Value(UBits(0b0010, 4))));
+  EXPECT_THAT(InterpretNode(FindNode("or.4", function),
+                            {Value(UBits(0b0011, 4)), Value(UBits(0b1010, 4))}),
               IsOkAndHolds(Value(UBits(0b1011, 4))));
-  EXPECT_THAT(IrInterpreter::EvaluateNode(FindNode("literal.1", function), {}),
+  EXPECT_THAT(InterpretNode(FindNode("literal.1", function), {}),
               IsOkAndHolds(Value(UBits(6, 4))));
 }
 
-TEST_F(IrInterpreterOnlyTest, AssertTest) {
-  auto p = CreatePackage();
-  FunctionBuilder b(TestName(), p.get());
-  auto p0 = b.Param("tkn", p->GetTokenType());
-  auto p1 = b.Param("cond", p->GetBitsType(1));
-  b.Assert(p0, p1, "the assertion error message");
-  XLS_ASSERT_OK_AND_ASSIGN(Function * f, b.Build());
+TEST_F(IrInterpreterOnlyTest, TraceCalls) {
+  Package p("trace_calls");
 
-  EXPECT_THAT(IrInterpreter::Run(f, {Value::Token(), Value(UBits(1, 1))}),
-              IsOkAndHolds(Value::Token()));
-  EXPECT_THAT(IrInterpreter::Run(f, {Value::Token(), Value(UBits(0, 1))}),
-              StatusIs(absl::StatusCode::kAborted,
-                       HasSubstr("the assertion error message")));
+  // inner(a, b) = a + b
+  FunctionBuilder inner_b("inner", &p);
+  auto a = inner_b.Param("a", p.GetBitsType(8));
+  auto b = inner_b.Param("b", p.GetBitsType(8));
+  inner_b.Add(a, b);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * inner, inner_b.Build());
+
+  // mid(x, y) = inner(x, y)
+  FunctionBuilder mid_b("mid", &p);
+  auto x = mid_b.Param("x", p.GetBitsType(8));
+  auto y = mid_b.Param("y", p.GetBitsType(8));
+  mid_b.Invoke({x, y}, inner);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * mid, mid_b.Build());
+
+  // top(m, n) = mid(m, n) + inner(m, n)
+  FunctionBuilder top_b("my_function", &p);
+  auto m = top_b.Param("m", p.GetBitsType(8));
+  auto n = top_b.Param("n", p.GetBitsType(8));
+  auto v1 = top_b.Invoke({m, n}, mid);
+  auto v2 = top_b.Invoke({n, m}, inner);
+  top_b.Add(v1, v2);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * top, top_b.Build());
+
+  EvaluatorOptions opts;
+  opts.set_trace_calls(true);
+  XLS_ASSERT_OK_AND_ASSIGN(
+      InterpreterResult<Value> result,
+      InterpretFunction(top, {Value(UBits(1, 8)), Value(UBits(2, 8))}, opts));
+
+  // Calls should be recorded with entries and separate returns in order.
+  EXPECT_THAT(
+      result.events.GetTraceMessageStrings(),
+      ElementsAre("my_function(1, 2)", "  mid(1, 2)", "    inner(1, 2)",
+                  "    inner(...) => 3", "  mid(...) => 3", "  inner(2, 1)",
+                  "  inner(...) => 3", "my_function(...) => 6"));
+}
+
+TEST_F(IrInterpreterOnlyTest, SideEffectingNodes) {
+  Package package("my_package");
+  const std::string fn_text = R"(
+    fn bar(tkn: token, cond: bits[1], x: bits[5]) -> bits[5] {
+      trace.1: token = trace(tkn, cond, format="x is {}", data_operands=[x], id=1)
+      umul.2 : bits[5] = umul(x, x, id=2)
+      ret gate.3: bits[5] = gate(cond, umul.2, id=3)
+    }
+    )";
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * function,
+                           Parser::ParseFunction(fn_text, &package));
+
+  EXPECT_THAT(
+      InterpretNode(FindNode("trace.1", function),
+                    {Value::Token(), Value::Bool(true), Value(UBits(17, 5))}),
+      StatusIs(absl::StatusCode::kInvalidArgument,
+               HasSubstr("Cannot interpret side-effecting op")));
+
+  Node* gate_node = FindNode("gate.3", function);
+  EXPECT_THAT(
+      InterpretNode(gate_node, {Value::Bool(true), Value(UBits(17, 5))}),
+      IsOkAndHolds(Value(UBits(17, 5))));
+  EXPECT_THAT(
+      InterpretNode(gate_node, {Value::Bool(false), Value(UBits(17, 5))}),
+      IsOkAndHolds(Value(UBits(0, 5))));
+}
+
+// TODO(https://github.com/google/xls/issues/506): 2021-10-05 Move these to the
+// common IR evaluator tests and make them more comprehensive once the JIT
+// supports the full range of trace operations.
+
+// Test collecting traces across counted for loops.
+TEST_F(IrInterpreterOnlyTest, TraceCountedFor) {
+  const std::string pkg_text = R"(
+package trace_counted_for_test
+
+fn accum_body(i: bits[32], accum: bits[32]) -> bits[32] {
+  after_all.0: token = after_all()
+  literal.1: bits[1] = literal(value=1)
+  trace.2: token = trace(after_all.0, literal.1, format = "accum is {}", data_operands=[accum])
+  ret add.3: bits[32] = add(accum, i)
+}
+
+fn accum_fixed() -> bits[32] {
+  literal.4: bits[32] = literal(value=0)
+  ret counted_for.5: bits[32] = counted_for(literal.4, trip_count=5, stride=1, body=accum_body)
+}
+)";
+
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, ParsePackage(pkg_text));
+
+  Function* accum_fixed = FindFunction("accum_fixed", package.get());
+  XLS_ASSERT_OK_AND_ASSIGN(InterpreterResult<Value> accum_fixed_result,
+                           InterpretFunction(accum_fixed, {}));
+
+  Value accum_5_value = Value(UBits(10, 32));
+  std::vector<std::string> accum_5_traces = {
+      "accum is 0", "accum is 0", "accum is 1", "accum is 3", "accum is 6"};
+  EXPECT_EQ(accum_fixed_result.value, accum_5_value);
+  EXPECT_THAT(accum_fixed_result.events.GetTraceMessageStrings(),
+              ElementsAreArray(accum_5_traces));
+}
+
+// Test collecting traces across a map.
+TEST_F(IrInterpreterOnlyTest, TraceMap) {
+  const std::string pkg_text = R"(
+package trace_map_test
+
+fn square_with_trace_odd(x: bits[32]) -> bits[32] {
+  after_all.0: token = after_all()
+  bit_slice.1: bits[1] = bit_slice(x, start=0, width=1)
+  trace.2: token = trace(after_all.0, bit_slice.1, format = "{:x} is odd", data_operands=[x])
+  ret umul.3: bits[32] = umul(x, x)
+}
+
+fn map_trace() -> bits[32][5]{
+  literal.11: bits[32] = literal(value=11)
+  literal.12: bits[32] = literal(value=12)
+  literal.13: bits[32] = literal(value=13)
+  literal.14: bits[32] = literal(value=14)
+  literal.15: bits[32] = literal(value=15)
+  array.4: bits[32][5] = array(literal.11, literal.12, literal.13, literal.14, literal.15)
+  ret map.5: bits[32][5] = map(array.4, to_apply=square_with_trace_odd)
+}
+)";
+
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, ParsePackage(pkg_text));
+  Function* map_trace = FindFunction("map_trace", package.get());
+
+  XLS_ASSERT_OK_AND_ASSIGN(InterpreterResult<Value> map_trace_result,
+                           InterpretFunction(map_trace, {}));
+
+  XLS_ASSERT_OK_AND_ASSIGN(Value map_trace_expected,
+                           Value::UBitsArray({121, 144, 169, 196, 225}, 32));
+  EXPECT_EQ(map_trace_result.value, map_trace_expected);
+  EXPECT_THAT(map_trace_result.events.GetTraceMessageStrings(),
+              UnorderedElementsAre("f is odd", "d is odd", "b is odd"));
+}
+
+TEST_F(IrInterpreterOnlyTest, HandleSelEmptyCasesWith64BitSelector) {
+  Package p("p");
+  FunctionBuilder fb("f", &p);
+  auto s = fb.Param("s", p.GetBitsType(64));
+  auto def = fb.Literal(Value(UBits(42, 32)));
+  fb.Select(s, absl::Span<const BValue>(), def);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+
+  // Selector value == -1 (underflowed size - 1)
+  XLS_ASSERT_OK_AND_ASSIGN(
+      InterpreterResult<Value> result,
+      InterpretFunction(f, {Value(UBits(static_cast<uint64_t>(-1), 64))}));
+  EXPECT_EQ(result.value, Value(UBits(42, 32)));
 }
 
 }  // namespace

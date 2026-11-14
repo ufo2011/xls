@@ -14,14 +14,21 @@
 
 #include "xls/passes/bdd_cse_pass.h"
 
+#include <utility>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "xls/common/fuzzing/fuzztest.h"
 #include "absl/status/statusor.h"
 #include "xls/common/status/matchers.h"
+#include "xls/fuzzer/ir_fuzzer/ir_fuzz_domain.h"
+#include "xls/fuzzer/ir_fuzzer/ir_fuzz_test_library.h"
+#include "xls/ir/bits.h"
 #include "xls/ir/function.h"
 #include "xls/ir/function_builder.h"
 #include "xls/ir/ir_matcher.h"
 #include "xls/ir/ir_test_base.h"
+#include "xls/passes/optimization_pass.h"
 #include "xls/passes/pass_base.h"
 
 namespace m = ::xls::op_matchers;
@@ -29,7 +36,7 @@ namespace m = ::xls::op_matchers;
 namespace xls {
 namespace {
 
-using status_testing::IsOkAndHolds;
+using ::absl_testing::IsOkAndHolds;
 
 class BddCsePassTest : public IrTestBase {
  protected:
@@ -37,7 +44,9 @@ class BddCsePassTest : public IrTestBase {
 
   absl::StatusOr<bool> Run(Function* f) {
     PassResults results;
-    return BddCsePass().RunOnFunctionBase(f, PassOptions(), &results);
+    OptimizationContext context;
+    return BddCsePass().RunOnFunctionBase(f, OptimizationPassOptions(),
+                                          &results, context);
   }
 };
 
@@ -85,6 +94,13 @@ TEST_F(BddCsePassTest, DecodeEquivalentToDeconstructedDecode) {
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Tuple(m::Decode(), m::Decode()));
 }
+
+void IrFuzzBddCse(FuzzPackageWithArgs fuzz_package_with_args) {
+  BddCsePass pass;
+  OptimizationPassChangesOutputs(std::move(fuzz_package_with_args), pass);
+}
+FUZZ_TEST(IrFuzzTest, IrFuzzBddCse)
+    .WithDomains(IrFuzzDomainWithArgs(/*arg_set_count=*/10));
 
 }  // namespace
 }  // namespace xls

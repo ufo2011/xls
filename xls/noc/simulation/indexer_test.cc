@@ -16,14 +16,13 @@
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "xls/common/logging/logging.h"
+#include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "xls/common/status/matchers.h"
 #include "xls/noc/config/network_config.pb.h"
 #include "xls/noc/config/network_config_proto_builder.h"
-
-// TODO(tedhong): 2021-01-10 Move this to xls/common
-#define XLS_EXPECT_OK_AND_EQ(lhs, rexpr) \
-  EXPECT_THAT(lhs, status_testing::IsOkAndHolds(rexpr));
+#include "xls/noc/simulation/common.h"
+#include "xls/noc/simulation/parameters.h"
 
 namespace xls {
 namespace noc {
@@ -97,8 +96,8 @@ TEST(SimIndexerTest, PortVirtualChannelIndexerTest) {
   VirtualChannelIndexMapBuilder index_builder;
   EXPECT_THAT(
       index_builder.VirtualChannelCount(in0_id),
-      status_testing::StatusIs(absl::StatusCode::kOutOfRange,
-                               testing::HasSubstr("has not been indexed")));
+      absl_testing::StatusIs(absl::StatusCode::kOutOfRange,
+                             testing::HasSubstr("has not been indexed")));
   XLS_ASSERT_OK(index_builder.SetVirtualChannelIndex(in0_id, in0_param, 0, 0));
   XLS_EXPECT_OK_AND_EQ(index_builder.VirtualChannelCount(in0_id), 1);
   XLS_EXPECT_OK_AND_EQ(index_builder.GetVirtualChannelIndex(in0_id, vc0_param),
@@ -110,17 +109,16 @@ TEST(SimIndexerTest, PortVirtualChannelIndexerTest) {
 
   EXPECT_THAT(
       index_builder.VirtualChannelCount(out0_id),
-      status_testing::StatusIs(absl::StatusCode::kOutOfRange,
-                               testing::HasSubstr("has not been indexed")));
+      absl_testing::StatusIs(absl::StatusCode::kOutOfRange,
+                             testing::HasSubstr("has not been indexed")));
   XLS_ASSERT_OK(
       index_builder.SetVirtualChannelIndex(out0_id, out0_param, 0, 1));
-  EXPECT_THAT(
-      index_builder.SetVirtualChannelIndex(out0_id, out0_param, 2, 0),
-      status_testing::StatusIs(absl::StatusCode::kOutOfRange,
-                               testing::HasSubstr("VC original index")));
+  EXPECT_THAT(index_builder.SetVirtualChannelIndex(out0_id, out0_param, 2, 0),
+              absl_testing::StatusIs(absl::StatusCode::kOutOfRange,
+                                     testing::HasSubstr("VC original index")));
   EXPECT_THAT(index_builder.SetVirtualChannelIndex(out0_id, out0_param, 0, 2),
-              status_testing::StatusIs(absl::StatusCode::kOutOfRange,
-                                       testing::HasSubstr("VC index")));
+              absl_testing::StatusIs(absl::StatusCode::kOutOfRange,
+                                     testing::HasSubstr("VC index")));
   XLS_ASSERT_OK(
       index_builder.SetVirtualChannelIndex(out0_id, out0_param, 1, 0));
 
@@ -128,12 +126,14 @@ TEST(SimIndexerTest, PortVirtualChannelIndexerTest) {
                            index_builder.BuildVirtualChannelIndex());
   EXPECT_EQ(index1.GetVirtualChannelByIndex(out0_id, 0)->GetName(), "VC1");
   EXPECT_EQ(index1.GetVirtualChannelByIndex(out0_id, 1)->GetName(), "VC0");
+  XLS_EXPECT_OK_AND_EQ(index1.GetVirtualChannelIndexByName(out0_id, "VC1"), 0);
+  XLS_EXPECT_OK_AND_EQ(index1.GetVirtualChannelIndexByName(out0_id, "VC0"), 1);
   XLS_EXPECT_OK_AND_EQ(index1.GetVirtualChannelIndex(out0_id, vc0_param), 1);
   XLS_EXPECT_OK_AND_EQ(index1.GetVirtualChannelIndex(out0_id, vc1_param), 0);
   EXPECT_THAT(
       index1.VirtualChannelCount(out1_id),
-      status_testing::StatusIs(absl::StatusCode::kOutOfRange,
-                               testing::HasSubstr("has not been indexed")));
+      absl_testing::StatusIs(absl::StatusCode::kOutOfRange,
+                             testing::HasSubstr("has not been indexed")));
 
   XLS_ASSERT_OK(
       index_builder.SetVirtualChannelIndex(out1_id, out1_param, 0, 3));
@@ -144,10 +144,9 @@ TEST(SimIndexerTest, PortVirtualChannelIndexerTest) {
   XLS_ASSERT_OK(
       index_builder.SetVirtualChannelIndex(out1_id, out1_param, 3, 0));
   XLS_EXPECT_OK_AND_EQ(index_builder.VirtualChannelCount(out1_id), 4);
-  EXPECT_THAT(
-      index_builder.BuildVirtualChannelIndex(),
-      status_testing::StatusIs(absl::StatusCode::kInternal,
-                               testing::HasSubstr("duplicate indices")));
+  EXPECT_THAT(index_builder.BuildVirtualChannelIndex(),
+              absl_testing::StatusIs(absl::StatusCode::kInternal,
+                                     testing::HasSubstr("duplicate indices")));
   XLS_EXPECT_OK_AND_EQ(index_builder.GetVirtualChannelIndex(out1_id, vc0_param),
                        3);
   XLS_EXPECT_OK_AND_EQ(index_builder.GetVirtualChannelIndex(out1_id, vc1_param),
@@ -156,6 +155,7 @@ TEST(SimIndexerTest, PortVirtualChannelIndexerTest) {
                        0);
   XLS_EXPECT_OK_AND_EQ(index_builder.GetVirtualChannelIndex(out1_id, vc3_param),
                        0);
+
   XLS_ASSERT_OK(
       index_builder.SetVirtualChannelIndex(out1_id, out1_param, 3, 2));
 
@@ -165,6 +165,10 @@ TEST(SimIndexerTest, PortVirtualChannelIndexerTest) {
   XLS_EXPECT_OK_AND_EQ(index2.GetVirtualChannelIndex(out1_id, vc1_param), 1);
   XLS_EXPECT_OK_AND_EQ(index2.GetVirtualChannelIndex(out1_id, vc2_param), 0);
   XLS_EXPECT_OK_AND_EQ(index2.GetVirtualChannelIndex(out1_id, vc3_param), 2);
+  XLS_EXPECT_OK_AND_EQ(index2.GetVirtualChannelIndexByName(out1_id, "VC0"), 3);
+  XLS_EXPECT_OK_AND_EQ(index2.GetVirtualChannelIndexByName(out1_id, "VC1"), 1);
+  XLS_EXPECT_OK_AND_EQ(index2.GetVirtualChannelIndexByName(out1_id, "VC2"), 0);
+  XLS_EXPECT_OK_AND_EQ(index2.GetVirtualChannelIndexByName(out1_id, "VC3"), 2);
   EXPECT_EQ(index2.GetVirtualChannelByIndex(out1_id, 0)->GetName(), "VC2");
   EXPECT_EQ(index2.GetVirtualChannelByIndex(out1_id, 1)->GetName(), "VC1");
   EXPECT_EQ(index2.GetVirtualChannelByIndex(out1_id, 2)->GetName(), "VC3");
@@ -177,16 +181,16 @@ TEST(SimIndexerTest, NetworkComponentIndexerTest0) {
 
   EXPECT_EQ(index_builder.NetworkComponentCount(), 0);
   EXPECT_THAT(index_builder.GetNetworkComponentIndex(nc0),
-              status_testing::StatusIs(absl::StatusCode::kOutOfRange,
-                                       testing::HasSubstr("not been indexed")));
+              absl_testing::StatusIs(absl::StatusCode::kOutOfRange,
+                                     testing::HasSubstr("not been indexed")));
   XLS_ASSERT_OK(index_builder.SetNetworkComponentIndex(nc0, 1));
   XLS_EXPECT_OK_AND_EQ(index_builder.GetNetworkComponentIndex(nc0), 1);
   EXPECT_EQ(index_builder.NetworkComponentCount(), 1);
 
   EXPECT_THAT(
       index_builder.BuildNetworkComponentIndex(),
-      status_testing::StatusIs(absl::StatusCode::kInternal,
-                               testing::HasSubstr("Unable to add index")));
+      absl_testing::StatusIs(absl::StatusCode::kInternal,
+                             testing::HasSubstr("Unable to add index")));
 
   XLS_ASSERT_OK(index_builder.SetNetworkComponentIndex(nc0, 0));
   XLS_EXPECT_OK_AND_EQ(index_builder.GetNetworkComponentIndex(nc0), 0);
@@ -194,6 +198,7 @@ TEST(SimIndexerTest, NetworkComponentIndexerTest0) {
   XLS_ASSERT_OK_AND_ASSIGN(NetworkComponentIndexMap index,
                            index_builder.BuildNetworkComponentIndex());
   XLS_EXPECT_OK_AND_EQ(index.GetNetworkComponentByIndex(0), nc0);
+  EXPECT_EQ(index.GetNetworkComponents().at(0), nc0);
 }
 
 TEST(SimIndexerTest, NetworkComponentIndexerTest1) {
@@ -212,10 +217,9 @@ TEST(SimIndexerTest, NetworkComponentIndexerTest1) {
   XLS_EXPECT_OK_AND_EQ(index_builder.GetNetworkComponentIndex(nc2), 0);
   XLS_EXPECT_OK_AND_EQ(index_builder.GetNetworkComponentIndex(nc3), 0);
   EXPECT_EQ(index_builder.NetworkComponentCount(), 4);
-  EXPECT_THAT(
-      index_builder.BuildNetworkComponentIndex(),
-      status_testing::StatusIs(absl::StatusCode::kInternal,
-                               testing::HasSubstr("duplicate indices")));
+  EXPECT_THAT(index_builder.BuildNetworkComponentIndex(),
+              absl_testing::StatusIs(absl::StatusCode::kInternal,
+                                     testing::HasSubstr("duplicate indices")));
 
   XLS_ASSERT_OK(index_builder.SetNetworkComponentIndex(nc3, 1));
   XLS_EXPECT_OK_AND_EQ(index_builder.GetNetworkComponentIndex(nc3), 1);
@@ -226,6 +230,12 @@ TEST(SimIndexerTest, NetworkComponentIndexerTest1) {
   XLS_EXPECT_OK_AND_EQ(index.GetNetworkComponentByIndex(1), nc3);
   XLS_EXPECT_OK_AND_EQ(index.GetNetworkComponentByIndex(2), nc1);
   XLS_EXPECT_OK_AND_EQ(index.GetNetworkComponentByIndex(3), nc0);
+
+  ASSERT_EQ(index.GetNetworkComponents().size(), 4);
+  EXPECT_EQ(index.GetNetworkComponents().at(0), nc2);
+  EXPECT_EQ(index.GetNetworkComponents().at(1), nc3);
+  EXPECT_EQ(index.GetNetworkComponents().at(2), nc1);
+  EXPECT_EQ(index.GetNetworkComponents().at(3), nc0);
 }
 
 }  // namespace

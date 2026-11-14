@@ -18,9 +18,10 @@
 #define XLS_IR_NUMBER_PARSER_H_
 
 #include <cstdint>
+#include <string_view>
+#include <utility>
 
 #include "absl/status/statusor.h"
-#include "absl/strings/string_view.h"
 #include "xls/ir/bits.h"
 #include "xls/ir/format_preference.h"
 
@@ -30,11 +31,18 @@ namespace xls {
 // width necessary to represent the produced value.
 constexpr int64_t kMinimumBitCount = -1;
 
-// Returns a bool indicating whether the literal token is negative, and a Bits
-// containing the magnitude. The Bits value is the minimum width necessary to
-// hold the (necessarily) unsigned magnitude.
-absl::StatusOr<std::pair<bool, Bits>> GetSignAndMagnitude(
-    absl::string_view input);
+enum class Sign : uint8_t {
+  kUnspecified,
+  kPositive,
+  kNegative,
+};
+
+// Returns a signedness indicating whether the literal token is negative (or if
+// the signedness is unspecified), and a Bits containing the magnitude. The Bits
+// value is the minimum width necessary to hold the (necessarily) unsigned
+// magnitude.
+absl::StatusOr<std::pair<Sign, Bits>> GetSignAndMagnitude(
+    std::string_view input);
 
 // Parses the given string as a number and returns the result as a Bits
 // value. Number may be represented in decimal, hexadecimal (prefixed with
@@ -54,20 +62,20 @@ absl::StatusOr<std::pair<bool, Bits>> GetSignAndMagnitude(
 //   "10" => UBits(10, 4)
 //   "-10" => SBits(-10, 5) (equivalently UBits(22, 5))
 //   "0x17" => UBits(0x17, 5)
-absl::StatusOr<Bits> ParseNumber(absl::string_view input);
+absl::StatusOr<Bits> ParseNumber(std::string_view input);
 
 // Parses the string as a number and returns the value as a (u)int64_t. Returns
 // an error if the number is not representable as a (u)int64_t.
-absl::StatusOr<int64_t> ParseNumberAsInt64(absl::string_view input);
-absl::StatusOr<uint64_t> ParseNumberAsUint64(absl::string_view input);
+absl::StatusOr<int64_t> ParseNumberAsInt64(std::string_view input);
+absl::StatusOr<uint64_t> ParseNumberAsUint64(std::string_view input);
 
-absl::StatusOr<bool> ParseNumberAsBool(absl::string_view input);
+absl::StatusOr<bool> ParseNumberAsBool(std::string_view input);
 
 // Parse an unsigned number but the given input does not include any
 // format-specifying prefix (e.g., "0x" for hexadecimal). Rather, the format is
 // specified by argument.
 absl::StatusOr<Bits> ParseUnsignedNumberWithoutPrefix(
-    absl::string_view input, FormatPreference format = FormatPreference::kHex,
+    std::string_view input, FormatPreference format = FormatPreference::kHex,
     int64_t bit_count = kMinimumBitCount);
 
 }  // namespace xls

@@ -1,43 +1,41 @@
 # IR JIT Compiler
 
-[TOC]
-
-XLS provides a JIT compiler for evaluating functions written in the [XLS]
-compiler intermediate representation (IR) at native machine speed.
+XLS provides a JIT and AOT compiler for evaluating functions written in the
+[XLS] compiler intermediate representation (IR) at native machine speed.
 
 ## Usage
 
 Given a DSLX file and build target, one can build and run it through the JIT by:
 
 1.  Declaring a
-    [`dslx_jit_wrapper`](https://github.com/google/xls/tree/main/xls/build_rules/build_defs.bzl)
-    target matching the DSLX build target.
-2.  Creating a JIT object and calling its `Run()` method. Using the 2-way
+    [`cc_xls_ir_wrapper`](https://github.com/google/xls/tree/main/xls/build_rules/xls_build_defs.bzl)
+    target matching the DSLX build target. Note this actually compiles the IR
+    ahead-of-time (AOT) so there is minimal start-up time.
+
+1.  Creating a JIT object and calling its `Run()` method. Using the 2-way
     floating-point adder as an example:
 
-    ```c
-     # include "xls/modules/fpadd_2x24_jit_wrapper.h"
+    ```c++
+     #include "xls/modules/fpadd_2x24_jit_wrapper.h"
 
      absl::StatusOr<Value> foo(Value a, Value b) {
        ...
        // Only create this once and re-use it; it's created here just as
        // an illustration.
-       XLS_ASSIGN_OR_RETURN(Fpadd2x32 adder, Fpadd2x32::Create()); return
-       adder.Run(a, b);
+       XLS_ASSIGN_OR_RETURN(Fpadd2x32 adder, Fpadd2x32::Create());
+       return adder.Run(a, b);
      }
     ```
 
-The advantages of JIT compilation (or any compilation, for that matter) only
-come into play when repeatedly using the compiled object, so programs should be
-structured to create a JIT wrapper once and to reuse it many times, e.g., to
-test a module across many - or even exhaustively, across all possible - inputs.
+Because these objects are AOT they are relatively cheap to create however they
+do have some fixed setup costs so objects should be reused if possible.
 
 ### Specialized matching
 
 In many cases, the types used by DSLX designs map to native types, such as the
 C/C++ `float`. In that case, a simplified wrapper call is available:
 
-```
+```c++
 #include "xls/modules/fpadd_2x24_jit_wrapper.h"
 
 absl::StatusOr<float> foo(float a, float b) {
@@ -64,16 +62,16 @@ JIT).
 
 The JIT is also available as a library with a straightforward interface:
 
-```
+```c++
 absl::StatusOr<Value> RunOnJit(
     Function* function, absl::Span<const Value> args) {
-  XLS_ASSIGN_OR_RETURN(auto jit, LlvmIrJit::Create(function));
+  XLS_ASSIGN_OR_RETURN(auto jit, FunctionJit::Create(function));
   return jit->Run(args);
 }
 ```
 
 The IR JIT is the default backend for the
-[eval_ir_main](./tools.md#eval-ir-main)
+[eval_ir_main](./tools.md#ir-eval)
 tool, which loads IR from disk and runs with args present on either the command
 line or in a specified file.
 
@@ -99,12 +97,12 @@ pointer). Calling such a function pointer with concrete-typed arguments, though,
 is difficult: one must either make heavy [ab]use of C++ templates or "hide" the
 argument types behind an opaque pointer. The latter approach is taken here.
 
-When a compiled function is invoked (via `IrJit::Run()`), the typed input args
-are "packed" into an opaque byte buffer which is passed into the new function.
-Inside there, any references to an argument (via `DfsVisitor::HandleParam()`)
-calculate the offset of that param in the opaque buffer and load from there
-appropriately (this should happen at most once per arg; LLVM and/or XLS should
-optimize away redundant loads).
+When a compiled function is invoked (via `FunctionJit::Run()`), the typed input
+args are "packed" into an opaque byte buffer which is passed into the new
+function. Inside there, any references to an argument (via
+`DfsVisitor::HandleParam()`) calculate the offset of that param in the opaque
+buffer and load from there appropriately (this should happen at most once per
+arg; LLVM and/or XLS should optimize away redundant loads).
 
 A special case is for function invocations (inside the JITted function): for
 these, the arguments already exist inside "LLVM-space", so there's no need for
@@ -134,98 +132,14 @@ IRBuilder provides three means of extracting values from an aggregate type:
 Unfortunately, #2 doesn't apply, as arrays aren't LLVM vectors, and #3 doesn't
 apply, as an array index isn't necessarily a constant value. Uniformly managing
 arrays as allocas doesn't scale well (consider the case of arrays of arrays of
-tuples...), so for `ArrayIndex` nodes, we lazily create allocas for _only the
-array of interest_ and load the requested index from there.
+tuples...), so for `ArrayIndex` nodes, we lazily create allocas for *only the
+array of interest* and load the requested index from there.
 
-## `main()` generator
+### AOT Compilation
 
-The IR JIT finds more than its share of LLVM bugs, in large part due to XLS' use
-of fuzzing, which often generates bit widths not often found in software, e.g. a
-231-bit wide integer, which won't be emitted by Clang (as it's not a native C
-type). To ensure that any mismatches between the JIT and the IR interpreter are
-correctly triaged, it's important to compare results between the JIT and
-LLVM-provided tools, e.g., lli or llc, the LLVM IR interpreter and compiler,
-respectively.
+The compiler is largely identical for both the AOT and JIT paths with the main
+difference being that the JIT path compiles into memory while the AOT one
+compiles to standard object files.
 
-Both lli and llc execute self-contained LLVM IR programs, i.e., those with an
-`int main(int argc, char** argv)` entry point - the JIT does not produce these
-(as they're not part of a hardware description). To avoid the need to manually
-edit the JIT-produced IR (which experience has shown to be very error prone), we
-can generate a `main` driver function for our samples.
-
-### Usage
-
-To generate and execute a `main` for LLVM IR produced by the JIT, run the
-following:
-
-```
-$ bazel build //xls/tools:llvm_main_generator \
-              //xls/tools:run_llvm_main
-$ ./bazel-bin/xls/tools/llvm_main_generator \
-  -entry_function <Mangled IR function name> \
-  -input <Path to file containing JIT-generated LLVM IR> \
-  -output <Path to write output>
-$ ./bazel-bin/xls/tools/run_llvm_main \
-  <Output path from above> \
-  <Input values as string-formatted XLS Values>
-```
-
-For a concrete example:
-
-```
-$ bazel-bin/xls/tools/llvm_main_generator \
-  -entry_function "sample::__sample__main" \
-  -input ~/fuzz/mismatch/sample.opt.ll \
-  -output ./foo.ll
-$ bazel-bin/xls/tools/run_llvm_main \
-  ./foo.ll \
-  bits[56]:0x800_0000_0000 \
-  bits[66]:0x4000_0000 \
-  bits[7]:0x1 \
-  bits[2]:0x3 \
-  bits[12]:0x0 \
-  bits[74]:0x3c5_482a_0984_e061_1a90
-bits[74]:0x3ff_ffc5_482a_0984_e061
-```
-
-The final line is the result of running the sample.
-
-If the value mismatch occurs both in the IR JIT evaluation as well as lli
-evaluation, then there's likely a bug in LLVM. A main-annotated IR sample is
-suitable for attaching to an LLVM bug report (on http://bugs.llvm.org) as a
-reproducer, along with the input to generate the mismatch.
-
-### Design
-
-The main generator, at a high level, uses the LLVM tools (namely IRBuilder) to
-create a `main()` function to:
-
-1.  Examine its command-line parameters to determine their overall size and to
-    them into the input buffer (as in Arg Passing above).
-1.  Invoke the entry function (which remains unchanged from the source emitted
-    by the JIT).
-1.  Unpack the output buffer after the entry function completes and print its
-    contents.
-
-For arg packing/unpacking, the functions provided by JitRuntime are used, but in
-a stateless context wrapped in an `extern "C"` space, to simplify invocation
-from within LLVM IR.
-
-#### Output type determination
-
-Inferring the computation's output type merits special discussion. While it's
-trivial for the main generator to detect the output type, it's very difficult to
-do so inside the executing `main()` - in the former, the type is real data,
-wherein the latter, it's metadata.
-
-To make this possible (without doing down an RTTI rabbit hole, or even simply
-requiring the user to specify it on the command line), we do the following:
-
-1.  Determine the `llvm::Type` of the output.
-1.  Convert that into an `xls::Type`, and capture that type as a String.
-1.  Hardcode that string as a constant in the emitted `main()` function.
-1.  At runtime, pass that type string into `UnpackAndPrintBuffer()` (one of the
-    `extern "C"` function wrappers).
-1.  Inside `UnpackAndPrintBuffer()`, parse that string (via
-    `xls::Parser::ParseType()`), and use the resulting `xls::Type` to determine
-    the contents of the computation's output buffer.
+Generally the AOT code will be accessed through the 'wrapper' targets which
+provide helpers to setup and drive the compiled implementation.

@@ -16,16 +16,21 @@
 #define XLS_IR_TYPE_H_
 
 #include <cstdint>
-#include <memory>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "absl/base/casts.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/container/linked_hash_map.h"
+#include "absl/log/check.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
 #include "absl/types/span.h"
-#include "xls/common/casts.h"
-#include "xls/common/logging/logging.h"
 #include "xls/ir/xls_type.pb.h"
 
 namespace xls {
@@ -49,10 +54,6 @@ class Type {
  public:
   virtual ~Type() = default;
 
-  // Creates a Type object from the given proto.
-  static absl::StatusOr<std::unique_ptr<Type>> FromProto(
-      const TypeProto& proto);
-
   // Returns a proto representation of the type.
   virtual TypeProto ToProto() const = 0;
 
@@ -75,6 +76,8 @@ class Type {
   const ArrayType* AsArrayOrDie() const;
   absl::StatusOr<ArrayType*> AsArray();
 
+  absl::StatusOr<TupleType*> AsTuple();
+
   bool IsToken() const { return kind_ == TypeKind::kToken; }
   TokenType* AsTokenOrDie();
   const TokenType* AsTokenOrDie() const;
@@ -82,15 +85,56 @@ class Type {
   // Returns the count of bits required to represent the underlying type; e.g.
   // for tuples this will be the sum of the bit count from all its members, for
   // a "bits" type it will be the count of bits.
-  virtual int64_t GetFlatBitCount() const = 0;
+  int64_t GetFlatBitCount() const { return bit_count_; }
 
   // Returns the number of leaf Bits types in this object.
-  virtual int64_t leaf_count() const = 0;
+  int64_t leaf_count() const { return leaf_types_.size(); }
 
   virtual std::string ToString() const = 0;
 
+  template <typename Sink>
+  friend void AbslStringify(Sink& sink, const Type& tpe) {
+    absl::Format(&sink, "%s", tpe.ToString());
+  }
+
+  absl::Span<Type* const> leaf_types() const { return leaf_types_; }
+  Type* leaf_type(int64_t leaf_index) const { return leaf_types_[leaf_index]; }
+
+  absl::Span<const std::vector<int64_t>> tree_index_vectors() const {
+    return tree_index_vectors_;
+  }
+  absl::Span<const int64_t> tree_index(int64_t leaf_index) const {
+    return tree_index_vectors_[leaf_index];
+  }
+
+  // Find the subtype and first-leaf offset (in the flat `leaf_types` vector)
+  // at the given `tree_index`, which is interpreted as a sequence of indices
+  // into nested composite types (tuples and arrays).
+  std::pair<Type*, int64_t> GetSubtypeAndOffset(
+      absl::Span<const int64_t> tree_index);
+
+  // Find the subtype at the given `tree_index`, which is interpreted as a
+  // sequence of indices into nested composite types (tuples and arrays).
+  Type* GetSubtype(absl::Span<const int64_t> tree_index) {
+    return GetSubtypeAndOffset(tree_index).first;
+  }
+
+  // Find the offset of the first leaf (in the flat `leaf_types` vector)
+  // belonging to the subtype at the given `tree_index`. `tree_index` is
+  // interpreted as a sequence of indices into nested composite types (tuples
+  // and arrays).
+  int64_t GetLinearOffset(absl::Span<const int64_t> tree_index) {
+    return GetSubtypeAndOffset(tree_index).second;
+  }
+
  protected:
   explicit Type(TypeKind kind) : kind_(kind) {}
+
+  int64_t bit_count_;
+
+  // Structural metadata pre-populated during subclass construction
+  absl::InlinedVector<Type*, 1> leaf_types_;
+  absl::InlinedVector<std::vector<int64_t>, 1> tree_index_vectors_;
 
  private:
   TypeKind kind_;
@@ -103,20 +147,18 @@ std::ostream& operator<<(std::ostream& os, const Type* type);
 class BitsType : public Type {
  public:
   explicit BitsType(int64_t bit_count);
-  ~BitsType() override {}
+  BitsType(const BitsType& other);
+  BitsType(BitsType&& other);
+  BitsType& operator=(const BitsType& other);
+  BitsType& operator=(BitsType&& other);
+  ~BitsType() override = default;
   int64_t bit_count() const { return bit_count_; }
 
   TypeProto ToProto() const override;
   bool IsEqualTo(const Type* other) const override;
-  int64_t GetFlatBitCount() const override { return bit_count(); }
-
-  int64_t leaf_count() const override { return 1; }
 
   // Returns a string like "bits[32]".
   std::string ToString() const override;
-
- private:
-  int64_t bit_count_;
 };
 
 // Represents a type that is a tuple (of values of other potentially different
@@ -125,14 +167,8 @@ class BitsType : public Type {
 // Note that tuples can be empty.
 class TupleType : public Type {
  public:
-  explicit TupleType(absl::Span<Type* const> members)
-      : Type(TypeKind::kTuple), members_(members.begin(), members.end()) {
-    leaf_count_ = 0;
-    for (Type* t : members) {
-      leaf_count_ += t->leaf_count();
-    }
-  }
-  ~TupleType() override {}
+  explicit TupleType(absl::Span<Type* const> members);
+  ~TupleType() override = default;
   std::string ToString() const override;
 
   TypeProto ToProto() const override;
@@ -147,19 +183,16 @@ class TupleType : public Type {
   // Returns the element types of the tuple.
   absl::Span<Type* const> element_types() const { return members_; }
 
-  int64_t leaf_count() const override { return leaf_count_; }
-
-  int64_t GetFlatBitCount() const override {
-    int64_t total = 0;
-    for (const Type* type : members_) {
-      total += type->GetFlatBitCount();
-    }
-    return total;
+  absl::Span<const int64_t> member_leaf_offsets() const {
+    return member_leaf_offsets_;
+  }
+  int64_t member_leaf_offset(int64_t index) const {
+    return member_leaf_offsets_[index];
   }
 
  private:
-  int64_t leaf_count_;
   std::vector<Type*> members_;
+  std::vector<int64_t> member_leaf_offsets_;
 };
 
 // Represents a type that is a one-dimensional array of identical types.
@@ -167,9 +200,8 @@ class TupleType : public Type {
 // Note that arrays can be empty.
 class ArrayType : public Type {
  public:
-  explicit ArrayType(int64_t size, Type* element_type)
-      : Type(TypeKind::kArray), size_(size), element_type_(element_type) {}
-  ~ArrayType() override {}
+  explicit ArrayType(int64_t size, Type* element_type);
+  ~ArrayType() override = default;
   std::string ToString() const override;
 
   TypeProto ToProto() const override;
@@ -177,14 +209,7 @@ class ArrayType : public Type {
 
   Type* element_type() const { return element_type_; }
   int64_t size() const { return size_; }
-
-  int64_t GetFlatBitCount() const override {
-    return element_type_->GetFlatBitCount() * size_;
-  }
-
-  int64_t leaf_count() const override {
-    return size_ * element_type()->leaf_count();
-  }
+  bool empty() const { return size_ == 0; }
 
  private:
   int64_t size_;
@@ -194,16 +219,16 @@ class ArrayType : public Type {
 // Represents a token type used for ordering channel accesses.
 class TokenType : public Type {
  public:
-  explicit TokenType() : Type(TypeKind::kToken) {}
-  ~TokenType() override {}
+  explicit TokenType();
+  TokenType(const TokenType& other);
+  TokenType(TokenType&& other);
+  TokenType& operator=(const TokenType& other);
+  TokenType& operator=(TokenType&& other);
+  ~TokenType() override = default;
   std::string ToString() const override;
 
   TypeProto ToProto() const override;
   bool IsEqualTo(const Type* other) const override;
-
-  // Tokens contain no bits.
-  int64_t GetFlatBitCount() const override { return 0; }
-  int64_t leaf_count() const override { return 0; }
 };
 
 // Represents a type that is a function with parameters and return type.
@@ -212,7 +237,7 @@ class FunctionType {
   explicit FunctionType(absl::Span<Type* const> parameters, Type* return_type)
       : parameters_(parameters.begin(), parameters.end()),
         return_type_(return_type) {}
-  ~FunctionType() {}
+  ~FunctionType() = default;
   std::string ToString() const;
 
   FunctionTypeProto ToProto() const;
@@ -228,46 +253,97 @@ class FunctionType {
   Type* return_type_;
 };
 
+// Represents a type that is an instantiation with input and output ports.
+//
+// Note that input and output types are stored in linked_hash_maps to preserve
+// port order; we sometimes iterate over these maps.
+class InstantiationType {
+ public:
+  explicit InstantiationType(
+      absl::linked_hash_map<std::string, Type*> input_types,
+      absl::linked_hash_map<std::string, Type*> output_types)
+      : input_types_(std::move(input_types)),
+        output_types_(std::move(output_types)) {}
+
+  InstantiationType(const InstantiationType&) = default;
+  InstantiationType(InstantiationType&&) = default;
+  InstantiationType& operator=(const InstantiationType&) = default;
+  InstantiationType& operator=(InstantiationType&&) = default;
+
+  absl::StatusOr<Type*> GetInputPortType(std::string_view name) const;
+  absl::StatusOr<Type*> GetOutputPortType(std::string_view name) const;
+
+  const absl::linked_hash_map<std::string, Type*>& input_types() const {
+    return input_types_;
+  }
+  const absl::linked_hash_map<std::string, Type*>& output_types() const {
+    return output_types_;
+  }
+
+  bool operator==(const InstantiationType& o) const {
+    return input_types_ == o.input_types_ && output_types_ == o.output_types_;
+  }
+  bool operator!=(const InstantiationType& it) const { return !(*this == it); }
+
+  std::string ToString() const {
+    std::vector<std::string> inputs;
+    for (const auto& [name, type] : input_types_) {
+      inputs.push_back(absl::StrCat(name, ": ", type->ToString()));
+    }
+    std::vector<std::string> outputs;
+    for (const auto& [name, type] : output_types_) {
+      outputs.push_back(absl::StrCat(name, ": ", type->ToString()));
+    }
+    return absl::StrFormat("InstantiationType(inputs=[%s], outputs=[%s])",
+                           absl::StrJoin(inputs, ", "),
+                           absl::StrJoin(outputs, ", "));
+  }
+
+ private:
+  absl::linked_hash_map<std::string, Type*> input_types_;
+  absl::linked_hash_map<std::string, Type*> output_types_;
+};
+
 // -- Inlines
 
 inline const BitsType* Type::AsBitsOrDie() const {
-  XLS_CHECK_EQ(kind(), TypeKind::kBits) << ToString();
-  return down_cast<const BitsType*>(this);
+  CHECK_EQ(kind(), TypeKind::kBits) << ToString();
+  return absl::down_cast<const BitsType*>(this);
 }
 
 inline BitsType* Type::AsBitsOrDie() {
-  XLS_CHECK_EQ(kind(), TypeKind::kBits) << ToString();
-  return down_cast<BitsType*>(this);
+  CHECK_EQ(kind(), TypeKind::kBits) << ToString();
+  return absl::down_cast<BitsType*>(this);
 }
 
 inline const TupleType* Type::AsTupleOrDie() const {
-  XLS_CHECK_EQ(kind(), TypeKind::kTuple);
-  return down_cast<const TupleType*>(this);
+  CHECK_EQ(kind(), TypeKind::kTuple);
+  return absl::down_cast<const TupleType*>(this);
 }
 
 inline TupleType* Type::AsTupleOrDie() {
-  XLS_CHECK_EQ(kind(), TypeKind::kTuple);
-  return down_cast<TupleType*>(this);
+  CHECK_EQ(kind(), TypeKind::kTuple);
+  return absl::down_cast<TupleType*>(this);
 }
 
 inline const ArrayType* Type::AsArrayOrDie() const {
-  XLS_CHECK_EQ(kind(), TypeKind::kArray);
-  return down_cast<const ArrayType*>(this);
+  CHECK_EQ(kind(), TypeKind::kArray);
+  return absl::down_cast<const ArrayType*>(this);
 }
 
 inline ArrayType* Type::AsArrayOrDie() {
-  XLS_CHECK_EQ(kind(), TypeKind::kArray);
-  return down_cast<ArrayType*>(this);
+  CHECK_EQ(kind(), TypeKind::kArray);
+  return absl::down_cast<ArrayType*>(this);
 }
 
 inline const TokenType* Type::AsTokenOrDie() const {
-  XLS_CHECK_EQ(kind(), TypeKind::kToken);
-  return down_cast<const TokenType*>(this);
+  CHECK_EQ(kind(), TypeKind::kToken);
+  return absl::down_cast<const TokenType*>(this);
 }
 
 inline TokenType* Type::AsTokenOrDie() {
-  XLS_CHECK_EQ(kind(), TypeKind::kToken);
-  return down_cast<TokenType*>(this);
+  CHECK_EQ(kind(), TypeKind::kToken);
+  return absl::down_cast<TokenType*>(this);
 }
 
 // Returns type of the nested element inside of "type_to_index" resulting from
@@ -297,6 +373,10 @@ absl::StatusOr<Type*> GetIndexedElementType(Type* type_to_index,
 //   GetArrayDimensionCount(bits[8][9][10]) => 2
 //   GetArrayDimensionCount((bits[8][10], token)[42]) => 1
 int64_t GetArrayDimensionCount(Type* type);
+
+// Returns true if the given type is a token type or has a token type as a
+// subelement.
+bool TypeHasToken(Type* type);
 
 }  // namespace xls
 

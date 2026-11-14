@@ -14,17 +14,39 @@
 
 #include "xls/ir/function.h"
 
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "xls/common/attribute_data.h"
 #include "xls/common/status/matchers.h"
+#include "xls/ir/bits.h"
+#include "xls/ir/dfs_visitor.h"
+#include "xls/ir/function_base.h"
 #include "xls/ir/function_builder.h"
 #include "xls/ir/ir_test_base.h"
 #include "xls/ir/node_util.h"
+#include "xls/ir/nodes.h"
+#include "xls/ir/op.h"
+#include "xls/ir/package.h"
+#include "xls/ir/scheduled_builder.h"
+#include "xls/ir/source_location.h"
+#include "xls/ir/topo_sort.h"
+#include "xls/ir/type.h"
+#include "xls/ir/value.h"
 
 namespace xls {
 namespace {
 
-using status_testing::StatusIs;
+using ::absl_testing::IsOkAndHolds;
+using ::absl_testing::StatusIs;
 using ::testing::ElementsAre;
 using ::testing::HasSubstr;
 
@@ -39,8 +61,13 @@ ret add.3: bits[32] = add(x, y)
 )",
                                                           p.get()));
   EXPECT_EQ(func->name(), "foo");
+  EXPECT_EQ(func->qualified_name(), "BasicPropertiesTest::foo");
   EXPECT_TRUE(func->IsFunction());
   EXPECT_FALSE(func->IsProc());
+
+  func->SetName("bar");
+  EXPECT_EQ(func->name(), "bar");
+  EXPECT_EQ(func->qualified_name(), "BasicPropertiesTest::bar");
 }
 
 TEST_F(FunctionTest, CloneSimpleFunction) {
@@ -79,8 +106,8 @@ TEST_F(FunctionTest, DumpIrWhenParamIsRetval) {
   FunctionBuilder b("f", p.get());
   auto x = b.Param("x", p->GetBitsType(32));
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, b.BuildWithReturnValue(x));
-  EXPECT_EQ(f->DumpIr(), R"(fn f(x: bits[32]) -> bits[32] {
-  ret x: bits[32] = param(name=x)
+  EXPECT_EQ(f->DumpIr(), R"(fn f(x: bits[32] id=1) -> bits[32] {
+  ret x: bits[32] = param(name=x, id=1)
 }
 )");
 }
@@ -143,7 +170,7 @@ fn different_types(x: bits[16], y: bits[16]) -> bits[16] {
 }
 )"));
 
-  auto functions_equal = [&](absl::string_view a, absl::string_view b) {
+  auto functions_equal = [&](std::string_view a, std::string_view b) {
     return FindFunction(a, p.get())
         ->IsDefinitelyEqualTo(FindFunction(b, p.get()));
   };
@@ -164,9 +191,6 @@ fn id(x: bits[32], y: bits[32]) -> bits[32] {
 )",
                                                           p.get()));
   XLS_ASSERT_OK_AND_ASSIGN(Param * y, func->GetParamByName("y"));
-  EXPECT_THAT(func->RemoveNode(y, /*remove_param_ok=*/false),
-              StatusIs(absl::StatusCode::kInternal,
-                       HasSubstr("Attempting to remove parameter")));
   Type* u32 = p->GetBitsType(32);
   FunctionType* orig = p->GetFunctionType({u32, u32}, u32);
   FunctionType* updated = p->GetFunctionType({u32}, u32);
@@ -174,9 +198,47 @@ fn id(x: bits[32], y: bits[32]) -> bits[32] {
   EXPECT_EQ(func->GetType(), orig);
   EXPECT_THAT(func->params(),
               ElementsAre(FindNode("x", func), FindNode("y", func)));
-  XLS_EXPECT_OK(func->RemoveNode(y, /*remove_param_ok=*/true));
+  XLS_EXPECT_OK(func->RemoveNode(y));
   EXPECT_THAT(func->params(), ElementsAre(FindNode("x", func)));
   EXPECT_EQ(func->GetType(), updated);
+}
+
+TEST_F(FunctionTest, MoveParams) {
+  auto p = CreatePackage();
+  FunctionBuilder b("f", p.get());
+  auto x = b.Param("x", p->GetBitsType(32));
+  auto y = b.Param("y", p->GetBitsType(32));
+  auto z = b.Param("z", p->GetBitsType(32));
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func, b.BuildWithReturnValue(z));
+
+  EXPECT_EQ(func->params()[0]->GetName(), "x");
+  EXPECT_EQ(func->params()[1]->GetName(), "y");
+  EXPECT_EQ(func->params()[2]->GetName(), "z");
+
+  // Nop move.
+  XLS_ASSERT_OK(func->MoveParamToIndex(x.node()->As<Param>(), 0));
+
+  EXPECT_EQ(func->params()[0]->GetName(), "x");
+  EXPECT_EQ(func->params()[1]->GetName(), "y");
+  EXPECT_EQ(func->params()[2]->GetName(), "z");
+
+  XLS_ASSERT_OK(func->MoveParamToIndex(x.node()->As<Param>(), 1));
+
+  EXPECT_EQ(func->params()[0]->GetName(), "y");
+  EXPECT_EQ(func->params()[1]->GetName(), "x");
+  EXPECT_EQ(func->params()[2]->GetName(), "z");
+
+  XLS_ASSERT_OK(func->MoveParamToIndex(z.node()->As<Param>(), 0));
+
+  EXPECT_EQ(func->params()[0]->GetName(), "z");
+  EXPECT_EQ(func->params()[1]->GetName(), "y");
+  EXPECT_EQ(func->params()[2]->GetName(), "x");
+
+  XLS_ASSERT_OK(func->MoveParamToIndex(y.node()->As<Param>(), 2));
+
+  EXPECT_EQ(func->params()[0]->GetName(), "z");
+  EXPECT_EQ(func->params()[1]->GetName(), "x");
+  EXPECT_EQ(func->params()[2]->GetName(), "y");
 }
 
 TEST_F(FunctionTest, MakeInvalidNode) {
@@ -189,11 +251,12 @@ fn id(x: bits[16], y: bits[32]) -> bits[16] {
                                                           &p));
 
   EXPECT_THAT(
-      func->MakeNode<NaryOp>(
+      func->MakeNodeWithName<NaryOp>(
           FindNode("x", &p)->loc(),
-          std::vector<Node*>{FindNode("x", &p), FindNode("y", &p)}, Op::kXor),
+          std::vector<Node*>{FindNode("x", &p), FindNode("y", &p)}, Op::kXor,
+          "foo"),
       StatusIs(absl::StatusCode::kInternal,
-               HasSubstr("Expected operand 1 of xor.3 to have type bits[16], "
+               HasSubstr("Expected operand 1 of foo to have type bits[16], "
                          "has type bits[32]")));
 }
 
@@ -236,9 +299,9 @@ TEST_F(FunctionTest, CloneCountedForRemap) {
   FunctionBuilder fb_main("main", p.get());
   auto init = fb_main.Param("init_acc", p->GetBitsType(2));
   fb_main.CountedFor(init, /*trip_count=*/4, /*stride=*/1, body_a,
-                     /*invariant_args=*/{}, /*loc=*/std::nullopt, "counted_a");
+                     /*invariant_args=*/{}, SourceInfo(), "counted_a");
   fb_main.CountedFor(init, /*trip_count=*/4, /*stride=*/1, body_b,
-                     /*invariant_args=*/{}, /*loc=*/std::nullopt, "counted_b");
+                     /*invariant_args=*/{}, SourceInfo(), "counted_b");
   XLS_ASSERT_OK_AND_ASSIGN(Function * main, fb_main.Build());
 
   absl::flat_hash_map<const Function*, Function*> remap;
@@ -268,8 +331,8 @@ TEST_F(FunctionTest, CloneMapRemap) {
 
   FunctionBuilder fb_main("main", p.get());
   auto input = fb_main.Param("input", p->GetArrayType(2, p->GetBitsType(2)));
-  fb_main.Map(input, apply_a, /*loc=*/std::nullopt, "map_a");
-  fb_main.Map(input, apply_b, /*loc=*/std::nullopt, "map_b");
+  fb_main.Map(input, apply_a, SourceInfo(), "map_a");
+  fb_main.Map(input, apply_b, SourceInfo(), "map_b");
   XLS_ASSERT_OK_AND_ASSIGN(Function * main, fb_main.Build());
 
   absl::flat_hash_map<const Function*, Function*> remap;
@@ -296,8 +359,8 @@ TEST_F(FunctionTest, CloneInvokeForRemap) {
 
   FunctionBuilder fb_main("main", p.get());
   // TODO finish
-  fb_main.Invoke(/*args=*/{}, apply_a, /*loc=*/std::nullopt, "invoke_a");
-  fb_main.Invoke(/*args=*/{}, apply_b, /*loc=*/std::nullopt, "invoke_b");
+  fb_main.Invoke(/*args=*/{}, apply_a, SourceInfo(), "invoke_a");
+  fb_main.Invoke(/*args=*/{}, apply_b, SourceInfo(), "invoke_b");
   XLS_ASSERT_OK_AND_ASSIGN(Function * main, fb_main.Build());
 
   absl::flat_hash_map<const Function*, Function*> remap;
@@ -314,6 +377,290 @@ TEST_F(FunctionTest, CloneInvokeForRemap) {
   Invoke* invoke_b_clone = node_b_clone->As<Invoke>();
   EXPECT_EQ(invoke_a_clone->to_apply(), apply_c);
   EXPECT_EQ(invoke_b_clone->to_apply(), apply_b);
+}
+
+TEST_F(FunctionTest, IrReservedWordIdentifiers) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  auto token = fb.Param("token", p->GetBitsType(32));
+  auto reg = fb.Param("reg", p->GetBitsType(32));
+  auto rreg = fb.Param("rreg", p->GetBitsType(32));
+  XLS_ASSERT_OK(fb.Build().status());
+
+  EXPECT_EQ(token.GetName(), "_token");
+  EXPECT_EQ(reg.GetName(), "_reg");
+  EXPECT_EQ(rreg.GetName(), "rreg");
+
+  // Serialize to text and verify text is parsable.
+  std::string ir_text = p->DumpIr();
+  XLS_ASSERT_OK(ParsePackage(ir_text).status());
+}
+
+class TestVisitor : public DfsVisitorWithDefault {
+ public:
+  absl::Status DefaultHandler(Node* node) override { return absl::OkStatus(); }
+};
+
+TEST_F(FunctionTest, GraphWithCycle) {
+  std::string input = R"(
+fn graph(p: bits[42], q: bits[42]) -> bits[42] {
+  a: bits[42] = and(p, q)
+  b: bits[42] = add(a, q)
+  d: bits[42] = add(b, q)
+  ret c: bits[42] = sub(a, b)
+}
+)";
+  {
+    auto p = std::make_unique<Package>(TestName());
+    XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(input, p.get()));
+
+    // Introduce a cycle in the graph through two nodes.
+    ASSERT_TRUE(
+        FindNode("a", f)->ReplaceOperand(FindNode("p", f), FindNode("b", f)));
+    TestVisitor v;
+    EXPECT_THAT(std::string(f->Accept(&v).message()),
+                HasSubstr(std::string(
+                    "Cycle detected in function `graph`: [b -> a -> b]")));
+    EXPECT_THAT(TopoSort(f).status().message(),
+                HasSubstr("Cycle detected in function `graph`: [b -> a -> b]"));
+  }
+  {
+    auto p = std::make_unique<Package>(TestName());
+    XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(input, p.get()));
+
+    // Introduce a cycle in the graph through three nodes.
+    ASSERT_TRUE(
+        FindNode("a", f)->ReplaceOperand(FindNode("p", f), FindNode("d", f)));
+    TestVisitor v;
+    EXPECT_THAT(std::string(f->Accept(&v).message()),
+                HasSubstr(std::string(
+                    "Cycle detected in function `graph`: [a -> b -> d -> a]")));
+    EXPECT_THAT(
+        TopoSort(f).status().message(),
+        HasSubstr("Cycle detected in function `graph`: [a -> b -> d -> a]"));
+  }
+
+  {
+    auto p = std::make_unique<Package>(TestName());
+    XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(input, p.get()));
+
+    // Introduce a cycle in the graph through one node.
+    XLS_ASSERT_OK(FindNode("a", f)->ReplaceOperandNumber(0, FindNode("a", f)));
+    TestVisitor v;
+    EXPECT_THAT(
+        std::string(f->Accept(&v).message()),
+        HasSubstr(std::string("Cycle detected in function `graph`: [a -> a]")));
+    EXPECT_THAT(TopoSort(f).status().message(),
+                HasSubstr("Cycle detected in function `graph`: [a -> a]"));
+  }
+
+  {
+    auto p = std::make_unique<Package>(TestName());
+    XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(input, p.get()));
+
+    // Introduce a cycle such that no nodes in the graph are userless.
+    XLS_ASSERT_OK(FindNode("a", f)->ReplaceOperandNumber(1, FindNode("c", f)));
+    TestVisitor v;
+    EXPECT_THAT(std::string(f->Accept(&v).message()),
+                HasSubstr(std::string(
+                    "Cycle detected in function `graph`: [a -> c -> a]")));
+    EXPECT_THAT(TopoSort(f).status().message(),
+                HasSubstr("Cycle detected in function `graph`: [a -> c -> a]"));
+  }
+}
+
+class ScheduledFunctionTest : public IrTestBase {
+ protected:
+  absl::StatusOr<ScheduledFunction*> CreateScheduledFunction(Package* p) {
+    ScheduledFunctionBuilder fb("f", p);
+    BValue x = fb.Param("x", p->GetBitsType(32));
+    BValue y = fb.Param("y", p->GetBitsType(32));
+    BValue add = fb.Add(x, y);
+    return fb.BuildWithReturnValue(add);
+  }
+};
+
+TEST_F(ScheduledFunctionTest, StageAddAndClear) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledFunction * func,
+                           CreateScheduledFunction(p.get()));
+  EXPECT_EQ(func->stages().size(), 1);
+
+  Stage stage1;
+  func->AddStage(stage1);
+  EXPECT_EQ(func->stages().size(), 2);
+
+  Stage stage2;
+  func->AddStage(stage2);
+  EXPECT_EQ(func->stages().size(), 3);
+
+  func->ClearStages();
+  EXPECT_TRUE(func->stages().empty());
+
+  // Re-stage all nodes to satisfy the verifier.
+  func->AddEmptyStages(1);
+  for (Node* node : func->nodes()) {
+    XLS_ASSERT_OK(func->AddNodeToStage(0, node));
+  }
+}
+
+TEST_F(ScheduledFunctionTest, AddEmptyStages) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledFunction * func,
+                           CreateScheduledFunction(p.get()));
+  EXPECT_EQ(func->stages().size(), 1);
+
+  func->AddEmptyStages(3);
+  EXPECT_EQ(func->stages().size(), 4);
+  for (int i = 1; i < func->stages().size(); ++i) {
+    EXPECT_TRUE(func->stages()[i].active_inputs().empty());
+    EXPECT_TRUE(func->stages()[i].logic().empty());
+    EXPECT_TRUE(func->stages()[i].active_outputs().empty());
+  }
+
+  func->AddEmptyStages(0);
+  EXPECT_EQ(func->stages().size(), 4);
+}
+
+TEST_F(ScheduledFunctionTest, GetStageIndex) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledFunction * func,
+                           CreateScheduledFunction(p.get()));
+  func->AddEmptyStages(2);
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Node * lit1,
+      func->MakeNodeInStage<Literal>(1, SourceInfo(), Value(UBits(1, 32))));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Node * lit2,
+      func->MakeNodeInStage<Literal>(2, SourceInfo(), Value(UBits(2, 32))));
+
+  EXPECT_THAT(func->GetStageIndex(lit1), IsOkAndHolds(1));
+  EXPECT_THAT(func->GetStageIndex(lit2), IsOkAndHolds(2));
+  EXPECT_THAT(func->GetStageIndex(FindNode("x", func)), IsOkAndHolds(0));
+  EXPECT_THAT(func->GetStageIndex(FindNode("add.3", func)), IsOkAndHolds(0));
+}
+
+TEST_F(ScheduledFunctionTest, AddNodeToStage) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledFunction * func,
+                           CreateScheduledFunction(p.get()));
+  func->AddEmptyStages(1);
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Node * lit, func->MakeNode<Literal>(SourceInfo(), Value(UBits(10, 32))));
+  XLS_ASSERT_OK_AND_ASSIGN(bool added, func->AddNodeToStage(1, lit));
+  EXPECT_TRUE(added);
+  EXPECT_THAT(func->GetStageIndex(lit), IsOkAndHolds(1));
+
+  // Adding an existing node should return false.
+  EXPECT_THAT(func->AddNodeToStage(1, lit), IsOkAndHolds(false));
+}
+
+TEST_F(ScheduledFunctionTest, MakeNodeInStage) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledFunction * func,
+                           CreateScheduledFunction(p.get()));
+  func->AddEmptyStages(1);
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Literal * literal,
+      func->MakeNodeInStage<Literal>(1, SourceInfo(), Value(UBits(42, 32))));
+  EXPECT_THAT(func->GetStageIndex(literal), IsOkAndHolds(1));
+}
+
+TEST_F(ScheduledFunctionTest, MakeNodeWithNameInStage) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledFunction * func,
+                           CreateScheduledFunction(p.get()));
+  func->AddEmptyStages(1);
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Literal * literal, func->MakeNodeWithNameInStage<Literal>(
+                             1, SourceInfo(), Value(UBits(42, 32)), "my_lit"));
+  EXPECT_THAT(func->GetStageIndex(literal), IsOkAndHolds(1));
+  EXPECT_EQ(literal->GetName(), "my_lit");
+}
+
+TEST_F(ScheduledFunctionTest, CloneScheduledFunction) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledFunction * func,
+                           CreateScheduledFunction(p.get()));
+  func->AddEmptyStages(2);
+
+  XLS_ASSERT_OK(func->MakeNodeWithNameInStage<Literal>(
+      0, SourceInfo(), Value(UBits(1, 32)), "my_x"));
+  XLS_ASSERT_OK(func->MakeNodeWithNameInStage<Literal>(
+      0, SourceInfo(), Value(UBits(2, 32)), "my_y"));
+  XLS_ASSERT_OK(func->MakeNodeWithNameInStage<Literal>(
+      1, SourceInfo(), Value(UBits(3, 32)), "my_z"));
+
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledFunction * cloned_func,
+                           func->Clone("cloned", p.get()));
+
+  EXPECT_EQ(cloned_func->stages().size(), 3);
+  EXPECT_TRUE(cloned_func->IsScheduled());
+
+  Node* cloned_x = FindNode("my_x", cloned_func);
+  Node* cloned_y = FindNode("my_y", cloned_func);
+  Node* cloned_z = FindNode("my_z", cloned_func);
+
+  EXPECT_THAT(cloned_func->GetStageIndex(cloned_x), IsOkAndHolds(0));
+  EXPECT_THAT(cloned_func->GetStageIndex(cloned_y), IsOkAndHolds(0));
+  EXPECT_THAT(cloned_func->GetStageIndex(cloned_z), IsOkAndHolds(1));
+
+  // Verify Stage contents
+  EXPECT_TRUE(cloned_func->stages()[0].contains(cloned_x));
+  EXPECT_TRUE(cloned_func->stages()[0].contains(cloned_y));
+  EXPECT_FALSE(cloned_func->stages()[0].contains(cloned_z));
+  EXPECT_FALSE(cloned_func->stages()[1].contains(cloned_x));
+  EXPECT_FALSE(cloned_func->stages()[1].contains(cloned_y));
+  EXPECT_TRUE(cloned_func->stages()[1].contains(cloned_z));
+}
+
+TEST_F(FunctionTest, AttributeDataTest) {
+  auto p = CreatePackage();
+  FunctionBuilder b("f", p.get());
+  b.Param("x", p->GetBitsType(32));
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, b.BuildWithReturnValue(b.Tuple({})));
+
+  f->AddAttribute(AttributeData(AttributeKind::kFuzzTest, {}));
+
+  EXPECT_TRUE(f->HasAttribute(AttributeKind::kFuzzTest));
+  EXPECT_FALSE(f->HasAttribute(AttributeKind::kTest));
+  EXPECT_EQ(f->attributes().size(), 1);
+  EXPECT_EQ(f->attributes()[0].kind(), AttributeKind::kFuzzTest);
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f_clone, f->Clone("f_clone"));
+  EXPECT_TRUE(f_clone->HasAttribute(AttributeKind::kFuzzTest));
+  EXPECT_EQ(f_clone->attributes().size(), 1);
+
+  EXPECT_THAT(f->DumpIr(), HasSubstr("#[fuzz_test]"));
+
+  f->set_non_synth(true);
+  EXPECT_THAT(f->DumpIr(), HasSubstr("#[non_synth]"));
+  EXPECT_THAT(f->DumpIr(), HasSubstr("#[fuzz_test]"));
+}
+
+TEST_F(FunctionTest, AttributeSerializationWithArgumentsTest) {
+  auto p = CreatePackage();
+  FunctionBuilder b("f", p.get());
+  b.Param("x", p->GetBitsType(32));
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, b.BuildWithReturnValue(b.Tuple({})));
+
+  std::vector<AttributeData::Argument> args;
+  args.push_back("ident");
+  args.push_back(AttributeData::StringLiteralArgument{.text = "literal"});
+  args.push_back(AttributeData::StringKeyValueArgument{
+      .first = "key", .second = "backticked", .is_backticked = true});
+  args.push_back(AttributeData::IntKeyValueArgument{"int_key", 42});
+
+  f->AddAttribute(AttributeData(AttributeKind::kFuzzTest, args));
+
+  EXPECT_THAT(
+      f->DumpIr(),
+      HasSubstr(
+          "#[fuzz_test(ident, \"literal\", key=`backticked`, int_key=42)]"));
 }
 
 }  // namespace

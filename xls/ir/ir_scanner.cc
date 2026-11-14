@@ -14,13 +14,24 @@
 
 #include "xls/ir/ir_scanner.h"
 
+#include <cctype>
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
-#include "xls/common/logging/logging.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/ir/bits.h"
 #include "xls/ir/number_parser.h"
 
 namespace xls {
@@ -63,8 +74,14 @@ std::string LexicalTokenTypeToString(LexicalTokenType token_type) {
       return "(";
     case LexicalTokenType::kQuotedString:
       return "quoted string";
+    case LexicalTokenType::kBacktickedString:
+      return "backticked string";
     case LexicalTokenType::kRightArrow:
       return "->";
+    case LexicalTokenType::kHash:
+      return "#";
+    case LexicalTokenType::kBang:
+      return "!";
   }
   return absl::StrCat("LexicalTokenType(", static_cast<int>(token_type), ")");
 }
@@ -77,9 +94,8 @@ absl::StatusOr<bool> Token::IsNegative() const {
   if (type() != LexicalTokenType::kLiteral) {
     return absl::InternalError("Can only get sign for literal tokens.");
   }
-  std::pair<bool, Bits> pair;
-  XLS_ASSIGN_OR_RETURN(pair, GetSignAndMagnitude(value()));
-  return pair.first;
+  XLS_ASSIGN_OR_RETURN((auto [sign, bits]), GetSignAndMagnitude(value()));
+  return sign == Sign::kNegative;
 }
 
 absl::StatusOr<Bits> Token::GetValueBits() const {
@@ -121,7 +137,7 @@ class Tokenizer {
  public:
   // Tokenizes the given string and returns the vector of Tokens.
   static absl::StatusOr<std::vector<Token>> TokenizeString(
-      absl::string_view str) {
+      std::string_view str) {
     Tokenizer tokenizer(str);
     return tokenizer.Tokenize();
   }
@@ -152,28 +168,35 @@ class Tokenizer {
 
   // Returns true if the given string matches the substring starting at the
   // current index in the tokenized string.
-  bool MatchSubstring(absl::string_view substr) {
+  bool MatchSubstring(std::string_view substr) {
     return index_ + substr.size() <= str_.size() &&
-           substr == absl::string_view(str_.data() + index_, substr.size());
+           substr == std::string_view(str_.data() + index_, substr.size());
   }
 
   // Tries to match a quoted string with the given quote character sequence
   // (e.g., """). Returns the contents of the quoted string or nullopt if no
   // quoted string was matched. allow_multine indicates whether a newline
   // character is allowed in the quoted string.
-  absl::StatusOr<absl::optional<absl::string_view>> MatchQuotedString(
-      absl::string_view quote, bool allow_multiline) {
+  absl::StatusOr<std::optional<std::string_view>> MatchQuotedString(
+      std::string_view quote, bool allow_multiline) {
     if (!MatchSubstring(quote)) {
-      return absl::nullopt;
+      return std::nullopt;
     }
     int64_t start_colno = colno();
     int64_t start_lineno = lineno();
     Advance(quote.size());
     int64_t content_start = index();
     while (!EndOfString()) {
+      if (current() == '\\') {
+        Advance();
+        if (!EndOfString()) {
+          Advance();
+        }
+        continue;
+      }
       if (MatchSubstring(quote)) {
-        absl::string_view content = absl::string_view(
-            str_.data() + content_start, index() - content_start);
+        std::string_view content = std::string_view(str_.data() + content_start,
+                                                    index() - content_start);
         Advance(quote.size());
         return content;
       }
@@ -190,7 +213,7 @@ class Tokenizer {
   // Advances the current index into the tokenized string by the given
   // amount. Updates column and line numbers.
   int64_t Advance(int64_t amount = 1) {
-    XLS_CHECK_LE(index_ + amount, str_.size());
+    CHECK_LE(index_ + amount, str_.size());
     for (int64_t i = 0; i < amount; ++i) {
       if (current() == '\t') {
         colno_ += 2;
@@ -212,14 +235,14 @@ class Tokenizer {
   // starting at the current index. Current index is updated to one past the
   // last matching character. min_chars is the minimum number of characters
   // which are unconditionally captured.
-  absl::string_view CaptureWhile(std::function<bool(char)> test_f,
-                                 int64_t min_chars = 0) {
+  std::string_view CaptureWhile(std::function<bool(char)> test_f,
+                                int64_t min_chars = 0) {
     int64_t start = index();
     while (!EndOfString() &&
            ((index() < min_chars + start) || test_f(current()))) {
       Advance();
     }
-    return absl::string_view(str_.data() + start, index_ - start);
+    return std::string_view(str_.data() + start, index_ - start);
   }
 
   // Tokenizes the internal string.
@@ -238,9 +261,9 @@ class Tokenizer {
       // digit. Literal numbers can also contain '_'s after the first
       // character which are used to improve readability (example:
       // '0xabcd_ef00').
-      if (isdigit(current()) ||
-          (current() == '-' && next().has_value() && isdigit(*next()))) {
-        absl::string_view value = CaptureWhile(
+      if ((isdigit(current()) != 0) ||
+          (current() == '-' && next().has_value() && (isdigit(*next()) != 0))) {
+        std::string_view value = CaptureWhile(
             [](char c) { return absl::ascii_isalnum(c) || c == '_'; },
             /*min_chars=*/1);
         tokens.push_back(Token(LexicalTokenType::kLiteral, value, start_lineno,
@@ -248,9 +271,9 @@ class Tokenizer {
         continue;
       }
 
-      if (isalpha(current()) || current() == '_') {
-        absl::string_view value = CaptureWhile([](char c) {
-          return isalpha(c) || c == '_' || c == '.' || isdigit(c);
+      if (isalpha(current()) != 0 || current() == '_') {
+        std::string_view value = CaptureWhile([](char c) {
+          return isalpha(c) != 0 || c == '_' || c == '.' || isdigit(c) != 0;
         });
         tokens.push_back(
             Token::MakeIdentOrKeyword(value, start_lineno, start_colno));
@@ -268,7 +291,7 @@ class Tokenizer {
       // Match quoted strings. Double-quoted strings (e.g., "foo") and
       // triple-double-quoted strings (e.g., """foo""") are allowed. Only
       // triple-double-quoted strings can contain new lines.
-      absl::optional<absl::string_view> content;
+      std::optional<std::string_view> content;
       XLS_ASSIGN_OR_RETURN(
           content, MatchQuotedString("\"\"\"", /*allow_multiline=*/true));
       if (content.has_value()) {
@@ -281,6 +304,13 @@ class Tokenizer {
       if (content.has_value()) {
         tokens.push_back(Token(LexicalTokenType::kQuotedString, content.value(),
                                start_lineno, start_colno));
+        continue;
+      }
+      XLS_ASSIGN_OR_RETURN(content,
+                           MatchQuotedString("`", /*allow_multiline=*/false));
+      if (content.has_value()) {
+        tokens.push_back(Token(LexicalTokenType::kBacktickedString,
+                               content.value(), start_lineno, start_colno));
         continue;
       }
 
@@ -330,11 +360,17 @@ class Tokenizer {
         case '<':
           token_type = LexicalTokenType::kLt;
           break;
+        case '#':
+          token_type = LexicalTokenType::kHash;
+          break;
+        case '!':
+          token_type = LexicalTokenType::kBang;
+          break;
         default:
           std::string char_str = absl::ascii_iscntrl(current())
                                      ? absl::StrFormat("\\x%02x", current())
                                      : std::string(1, current());
-          XLS_LOG(ERROR) << "IR text with error: " << str_;
+          LOG(ERROR) << "IR text with error: " << str_;
           return absl::InvalidArgumentError(absl::StrFormat(
               "Invalid character in IR text \"%s\" @ %s", char_str,
               TokenPos{lineno(), colno()}.ToHumanString()));
@@ -350,11 +386,11 @@ class Tokenizer {
 
   // Returns the character at the current index + 1, or nullopt if current index
   // + 1 is beyond the end of the string.
-  absl::optional<char> next() const {
+  std::optional<char> next() const {
     if (index_ + 1 < str_.size()) {
       return str_[index_ + 1];
     }
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   // Returns the current index in the string.
@@ -365,10 +401,10 @@ class Tokenizer {
   int64_t colno() const { return colno_; }
 
  private:
-  explicit Tokenizer(absl::string_view str) : str_(str) {}
+  explicit Tokenizer(std::string_view str) : str_(str) {}
 
   // The string being tokenized.
-  absl::string_view str_;
+  std::string_view str_;
 
   // Current index.
   int64_t index_ = 0;
@@ -380,11 +416,11 @@ class Tokenizer {
 
 }  // namespace
 
-absl::StatusOr<std::vector<Token>> TokenizeString(absl::string_view str) {
+absl::StatusOr<std::vector<Token>> TokenizeString(std::string_view str) {
   return Tokenizer::TokenizeString(str);
 }
 
-absl::StatusOr<Scanner> Scanner::Create(absl::string_view text) {
+absl::StatusOr<Scanner> Scanner::Create(std::string_view text) {
   XLS_ASSIGN_OR_RETURN(auto tokens, TokenizeString(text));
   return Scanner(std::move(tokens));
 }
@@ -396,7 +432,7 @@ absl::StatusOr<Token> Scanner::PeekToken() const {
   return tokens_[token_idx_];
 }
 
-absl::StatusOr<Token> Scanner::PopTokenOrError(absl::string_view context) {
+absl::StatusOr<Token> Scanner::PopTokenOrError(std::string_view context) {
   if (AtEof()) {
     std::string context_str =
         context.empty() ? std::string("") : absl::StrCat(" in ", context);
@@ -415,7 +451,7 @@ bool Scanner::TryDropToken(LexicalTokenType target) {
 }
 
 absl::Status Scanner::DropTokenOrError(LexicalTokenType target,
-                                       absl::string_view context) {
+                                       std::string_view context) {
   if (AtEof()) {
     std::string context_str =
         context.empty() ? std::string("") : absl::StrCat(" in ", context);
@@ -429,7 +465,7 @@ absl::Status Scanner::DropTokenOrError(LexicalTokenType target,
 }
 
 absl::StatusOr<Token> Scanner::PopTokenOrError(LexicalTokenType target,
-                                               absl::string_view context) {
+                                               std::string_view context) {
   XLS_ASSIGN_OR_RETURN(Token token, PopTokenOrError());
   if (token.type() != target) {
     std::string context_str =
@@ -442,7 +478,35 @@ absl::StatusOr<Token> Scanner::PopTokenOrError(LexicalTokenType target,
   return token;
 }
 
-absl::Status Scanner::DropKeywordOrError(absl::string_view keyword) {
+absl::StatusOr<Token> Scanner::PopKeywordOrIdentToken(
+    std::string_view context) {
+  XLS_ASSIGN_OR_RETURN(Token token, PopTokenOrError());
+  if (token.type() != LexicalTokenType::kIdent &&
+      token.type() != LexicalTokenType::kKeyword) {
+    std::string context_str =
+        context.empty() ? std::string("") : absl::StrCat(" in ", context);
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Expected keyword or identifier token %s @ %s, but found: %s",
+        context_str, token.pos().ToHumanString(), token.ToString()));
+  }
+  return token;
+}
+
+absl::StatusOr<Token> Scanner::PopLiteralOrStringToken(
+    std::string_view context) {
+  XLS_ASSIGN_OR_RETURN(Token token, PopTokenOrError());
+  if (token.type() != LexicalTokenType::kLiteral &&
+      token.type() != LexicalTokenType::kQuotedString) {
+    std::string context_str =
+        context.empty() ? std::string("") : absl::StrCat(" in ", context);
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Expected literal or quoted string token %s @ %s, but found: %s",
+        context_str, token.pos().ToHumanString(), token.ToString()));
+  }
+  return token;
+}
+
+absl::Status Scanner::DropKeywordOrError(std::string_view keyword) {
   absl::StatusOr<Token> popped_status = PopTokenOrError();
   if (!popped_status.ok()) {
     return absl::InvalidArgumentError(

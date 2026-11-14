@@ -14,12 +14,20 @@
 
 #include "xls/netlist/logical_effort.h"
 
+#include <cmath>
+#include <cstdint>
+#include <vector>
+
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
-#include "xls/common/logging/logging.h"
+#include "absl/types/span.h"
 #include "xls/common/math_util.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/netlist/cell_library.h"
+#include "xls/netlist/netlist.h"
 
 namespace xls {
 namespace netlist {
@@ -32,16 +40,16 @@ absl::StatusOr<double> GetLogicalEffort(CellKind kind, int64_t input_count) {
       XLS_RET_CHECK_EQ(input_count, 1);
       return 1;
     case CellKind::kNand:
-      XLS_RET_CHECK_GE(input_count, 2);
+      XLS_RET_CHECK_GE(input_count, 1);
       return (input_count + 2.0) / 3.0;
     case CellKind::kNor:
-      XLS_RET_CHECK_GE(input_count, 2);
+      XLS_RET_CHECK_GE(input_count, 1);
       return (2.0 * input_count + 1.0) / 3.0;
     case CellKind::kMultiplexer:
       XLS_RET_CHECK_GE(input_count, 2);
       return 2;
     case CellKind::kXor:
-      XLS_RET_CHECK_GE(input_count, 2);
+      XLS_RET_CHECK_GE(input_count, 1);
       // Section 4.5.4 provides the formula for XOR: N * 2**(N-1). So a
       // two-input XOR has logical effort 4. For XORs with more inputs we
       // compute it as a tree of two-input XORs.
@@ -60,17 +68,17 @@ absl::StatusOr<double> GetParasiticDelay(CellKind kind, int64_t input_count) {
       XLS_RET_CHECK_EQ(input_count, 1);
       return 1.0;
     case CellKind::kNand:
-      XLS_RET_CHECK_GE(input_count, 2);
+      XLS_RET_CHECK_GE(input_count, 1);
       return input_count;
     case CellKind::kNor:
-      XLS_RET_CHECK_GE(input_count, 2);
+      XLS_RET_CHECK_GE(input_count, 1);
       return input_count;
     case CellKind::kMultiplexer:
       XLS_RET_CHECK_GE(input_count, 2);
       return 2.0 * input_count;
     case CellKind::kXor:
       // case CellKind::kXnor:
-      XLS_RET_CHECK_GE(input_count, 2);
+      XLS_RET_CHECK_GE(input_count, 1);
       return 4.0;
     default:
       return absl::UnimplementedError(
@@ -109,7 +117,7 @@ absl::StatusOr<double> ComputeDelay(rtl::Cell* cell) {
   XLS_ASSIGN_OR_RETURN(double p,
                        GetParasiticDelay(cell->kind(), cell->inputs().size()));
   double d = g * h + p;
-  XLS_VLOG(4) << absl::StreamFormat("g: %f h: %f p: %f d=gh+p: %f", g, h, p, d);
+  VLOG(4) << absl::StreamFormat("g: %f h: %f p: %f d=gh+p: %f", g, h, p, d);
   return d;
 }
 

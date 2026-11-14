@@ -12,8 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
 package(
+    default_applicable_licenses = ["//:license"],
     default_visibility = ["//xls:xls_internal"],
+    features = [
+        "layering_check",
+        "parse_headers",
+    ],
     licenses = ["notice"],  # Apache 2.0
 )
 
@@ -31,9 +39,22 @@ cc_library(
     hdrs = ["ir_integrator.h"],
     deps = [
         ":integration_options",
-        "@com_google_absl//absl/status:statusor",
+        "//xls/common:math_util",
+        "//xls/common/status:ret_check",
+        "//xls/common/status:status_macros",
         "//xls/ir",
-        "//xls/ir:ir_parser",
+        "//xls/ir:bits",
+        "//xls/ir:op",
+        "//xls/ir:source_location",
+        "//xls/ir:type",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/container:node_hash_map",
+        "@abseil-cpp//absl/memory",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -41,14 +62,20 @@ cc_test(
     name = "ir_integrator_test",
     srcs = ["ir_integrator_test.cc"],
     deps = [
+        ":integration_options",
         ":ir_integrator",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
         "//xls/ir",
         "//xls/ir:ir_matcher",
-        "//xls/ir:ir_parser",
         "//xls/ir:ir_test_base",
-        "@com_google_googletest//:gtest",
+        "//xls/ir:op",
+        "//xls/ir:source_location",
+        "//xls/ir:verifier",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@googletest//:gtest",
     ],
 )
 
@@ -59,9 +86,17 @@ cc_library(
     deps = [
         ":integration_options",
         ":ir_integrator",
-        "@com_google_absl//absl/status:statusor",
+        "//xls/common/status:ret_check",
+        "//xls/common/status:status_macros",
         "//xls/contrib/integrator/integration_algorithms:basic_integration_algorithm",
         "//xls/ir",
+        "//xls/ir:name_uniquer",
+        "//xls/ir:op",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/memory",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -73,9 +108,11 @@ cc_test(
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
         "//xls/ir",
+        "//xls/ir:bits",
         "//xls/ir:ir_matcher",
-        "//xls/ir:ir_parser",
         "//xls/ir:ir_test_base",
-        "@com_google_googletest//:gtest",
+        "//xls/ir:source_location",
+        "//xls/ir:verifier",
+        "@googletest//:gtest",
     ],
 )

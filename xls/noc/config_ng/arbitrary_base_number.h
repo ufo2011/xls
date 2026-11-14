@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef XLS_NOC_CONFIG_ARBITRARY_BASE_NUMBER_H_
-#define XLS_NOC_CONFIG_ARBITRARY_BASE_NUMBER_H_
+#ifndef XLS_NOC_CONFIG_NG_ARBITRARY_BASE_NUMBER_H_
+#define XLS_NOC_CONFIG_NG_ARBITRARY_BASE_NUMBER_H_
 
+#include <cstdint>
+#include <optional>
 #include <vector>
 
-#include "absl/status/statusor.h"
-#include "xls/common/logging/logging.h"
-#include "xls/ir/bits.h"
+#include "absl/status/status.h"
 
 namespace xls::noc {
 
@@ -41,7 +41,7 @@ class ArbitraryBaseNumber {
   //   returns 1.
   //
   // If start_index is out of bounds, returns nullopt.
-  absl::optional<int64_t> GetValue(int64_t start_index = 0) const;
+  std::optional<int64_t> GetValue(int64_t start_index = 0) const;
 
   // Sets all digits of the number to zero.
   void Reset();
@@ -67,4 +67,4 @@ class ArbitraryBaseNumber {
 
 }  // namespace xls::noc
 
-#endif  // XLS_NOC_CONFIG_ARBITRARY_BASE_NUMBER_H_
+#endif  // XLS_NOC_CONFIG_NG_ARBITRARY_BASE_NUMBER_H_

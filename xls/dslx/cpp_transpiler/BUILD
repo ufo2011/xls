@@ -1,0 +1,196 @@
+# Copyright 2023 The XLS Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//xls/build_rules:xls_build_defs.bzl", "xls_dslx_library")
+load(
+    "//xls/build_rules:xls_macros.bzl",
+    "xls_dslx_cpp_type_library",
+)
+
+package(
+    default_applicable_licenses = ["//:license"],
+    features = [
+        "layering_check",
+        "parse_headers",
+    ],
+    licenses = ["notice"],  # Apache 2.0
+)
+
+cc_library(
+    name = "cpp_transpiler",
+    srcs = ["cpp_transpiler.cc"],
+    hdrs = ["cpp_transpiler.h"],
+    deps = [
+        ":cpp_emitter",
+        ":cpp_type_generator",
+        "//xls/common/status:status_macros",
+        "//xls/dslx:import_data",
+        "//xls/dslx/frontend:ast",
+        "//xls/dslx/type_system:type_info",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "cpp_emitter",
+    srcs = ["cpp_emitter.cc"],
+    hdrs = ["cpp_emitter.h"],
+    deps = [
+        "//xls/common:case_converters",
+        "//xls/common:indent",
+        "//xls/common/status:ret_check",
+        "//xls/common/status:status_macros",
+        "//xls/dslx:import_data",
+        "//xls/dslx:interp_value",
+        "//xls/dslx/bytecode",
+        "//xls/dslx/bytecode:bytecode_emitter",
+        "//xls/dslx/bytecode:bytecode_interpreter",
+        "//xls/dslx/frontend:ast",
+        "//xls/dslx/frontend:ast_utils",
+        "//xls/dslx/type_system:type_info",
+        "//xls/dslx/type_system_v2:import_utils",
+        "//xls/dslx/type_system_v2:type_annotation_utils",
+        "@abseil-cpp//absl/algorithm:container",
+        "@abseil-cpp//absl/base:no_destructor",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "cpp_type_generator",
+    srcs = ["cpp_type_generator.cc"],
+    hdrs = ["cpp_type_generator.h"],
+    deps = [
+        ":cpp_emitter",
+        "//xls/common:indent",
+        "//xls/common:visitor",
+        "//xls/common/status:status_macros",
+        "//xls/dslx:import_data",
+        "//xls/dslx:interp_value",
+        "//xls/dslx/bytecode",
+        "//xls/dslx/bytecode:bytecode_emitter",
+        "//xls/dslx/bytecode:bytecode_interpreter",
+        "//xls/dslx/frontend:ast",
+        "//xls/dslx/type_system:type_info",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+        "@abseil-cpp//absl/types:variant",
+    ],
+)
+
+cc_test(
+    name = "cpp_transpiler_test",
+    srcs = ["cpp_transpiler_test.cc"],
+    data = glob([
+        "testdata/*",
+    ]),
+    deps = [
+        ":cpp_transpiler",
+        "//xls/common:golden_files",
+        "//xls/common:source_location",
+        "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
+        "//xls/dslx:create_import_data",
+        "//xls/dslx:import_data",
+        "//xls/dslx:parse_and_typecheck",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_binary(
+    name = "cpp_transpiler_main",
+    srcs = ["cpp_transpiler_main.cc"],
+    visibility = ["//xls:xls_public"],
+    deps = [
+        ":cpp_transpiler",
+        "//xls/common:exit_status",
+        "//xls/common:init_xls",
+        "//xls/common/file:filesystem",
+        "//xls/common/status:ret_check",
+        "//xls/common/status:status_macros",
+        "//xls/dslx:create_import_data",
+        "//xls/dslx:default_dslx_stdlib_path",
+        "//xls/dslx:import_data",
+        "//xls/dslx:parse_and_typecheck",
+        "//xls/dslx:virtualizable_file_system",
+        "//xls/dslx:warning_kind",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+xls_dslx_cpp_type_library(
+    name = "test_types_dep_lib",
+    src = ":test_types_dep.x",
+    namespace = "xls::test",
+)
+
+xls_dslx_cpp_type_library(
+    name = "test_types_lib",
+    src = ":test_types.x",
+    cpp_deps = [":test_types_dep_lib"],
+    namespace = "xls::test",
+    deps = [":test_types"],
+)
+
+cc_test(
+    name = "test_types_test",
+    srcs = ["test_types_test.cc"],
+    deps = [
+        ":test_types_dep_lib",
+        ":test_types_lib",
+        "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
+        "//xls/ir:bits",
+        "//xls/ir:value",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@googletest//:gtest",
+    ],
+)
+
+xls_dslx_library(
+    name = "test_types_dep",
+    srcs = ["test_types_dep.x"],
+)
+
+xls_dslx_library(
+    name = "test_types",
+    srcs = ["test_types.x"],
+    deps = [":test_types_dep"],
+)

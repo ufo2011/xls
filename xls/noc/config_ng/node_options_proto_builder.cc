@@ -14,17 +14,20 @@
 
 #include "xls/noc/config_ng/node_options_proto_builder.h"
 
-#include "xls/common/logging/logging.h"
-#include "xls/common/proto_adaptor_utils.h"
+#include <cstdint>
+#include <string_view>
+
+#include "absl/log/die_if_null.h"
+#include "xls/noc/config_ng/coordinate_options_proto_builder.h"
+#include "xls/noc/config_ng/topology_options_network_config_builder.pb.h"
 
 namespace xls::noc {
 
 NodeOptionsProtoBuilder::NodeOptionsProtoBuilder(NodeOptionsProto* proto_ptr)
-    : proto_ptr_(XLS_DIE_IF_NULL(proto_ptr)) {}
+    : proto_ptr_(ABSL_DIE_IF_NULL(proto_ptr)) {}
 
 NodeOptionsProtoBuilder::NodeOptionsProtoBuilder(
-    NodeOptionsProto* proto_ptr,
-    const NodeOptionsProto& default_proto)
+    NodeOptionsProto* proto_ptr, const NodeOptionsProto& default_proto)
     : NodeOptionsProtoBuilder(proto_ptr) {
   *proto_ptr_ = default_proto;
 }
@@ -36,8 +39,8 @@ NodeOptionsProtoBuilder& NodeOptionsProtoBuilder::CopyFrom(
 }
 
 NodeOptionsProtoBuilder& NodeOptionsProtoBuilder::SetName(
-    absl::string_view name) {
-  proto_ptr_->set_name(xls::ToProtoString(name));
+    std::string_view name) {
+  proto_ptr_->set_name(name);
   return *this;
 }
 

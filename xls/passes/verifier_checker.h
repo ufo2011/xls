@@ -16,15 +16,18 @@
 #define XLS_PASSES_VERIFIER_CHECKER_H_
 
 #include "absl/status/status.h"
-#include "xls/passes/passes.h"
+#include "xls/ir/package.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/pass_base.h"
 
 namespace xls {
 
 // Invariant checker which just runs xls::Verifier.
-class VerifierChecker : public InvariantChecker {
+class VerifierChecker : public OptimizationInvariantChecker {
  public:
-  absl::Status Run(Package* p, const PassOptions& options,
-                   PassResults* results) const override;
+  absl::Status Run(Package* p, const OptimizationPassOptions& options,
+                   PassResults* results,
+                   OptimizationContext& context) const override;
 };
 
 }  // namespace xls

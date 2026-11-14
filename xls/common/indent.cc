@@ -14,15 +14,19 @@
 
 #include "xls/common/indent.h"
 
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include "absl/strings/str_cat.h"
-#include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 
 namespace xls {
 
-std::string Indent(absl::string_view text, int64_t spaces) {
+std::string Indent(std::string_view text, int64_t spaces) {
   const std::string indent(spaces, ' ');
-  std::vector<absl::string_view> lines = absl::StrSplit(text, '\n');
+  std::vector<std::string_view> lines = absl::StrSplit(text, '\n');
   std::string result;
   // Indent lines. Don't indent empty lines to avoid creating trailing white
   // space.

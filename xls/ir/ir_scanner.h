@@ -16,12 +16,17 @@
 #define XLS_IR_IR_SCANNER_H_
 
 #include <cstdint>
+#include <ostream>
 #include <string>
+#include <string_view>
+#include <vector>
 
+#include "absl/base/no_destructor.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "xls/common/logging/logging.h"
 #include "xls/ir/bits.h"
 
 namespace xls {
@@ -46,6 +51,9 @@ enum class LexicalTokenType {
   kParenOpen,
   kQuotedString,
   kRightArrow,
+  kHash,
+  kBang,
+  kBacktickedString,
 };
 
 std::string LexicalTokenTypeToString(LexicalTokenType token_type);
@@ -62,14 +70,38 @@ class Token {
  public:
   // Returns the (singleton) set of keyword strings.
   static const absl::flat_hash_set<std::string>& GetKeywords() {
-    static auto* keywords = new absl::flat_hash_set<std::string>{
-        "fn", "bits", "token", "ret", "package", "proc", "chan", "next"};
+    // TODO(google/xls#1010) 2023-06-05 Verify these never used if kIdent needed
+    static const absl::NoDestructor<absl::flat_hash_set<std::string>> keywords(
+        {"fn",
+         "bits",
+         "token",
+         "ret",
+         "package",
+         "proc",
+         "chan",
+         "chan_interface",
+         "reg",
+         "next",
+         "block",
+         "clock",
+         "instantiation",
+         "top",
+         "file_number",
+         "proc_instantiation",
+         "scheduled_proc",
+         "scheduled_fn",
+         "stage",
+         "scheduled_block",
+         "source",
+         "controlled_stage",
+         "active_inputs_valid",
+         "active_outputs_ready"});
     return *keywords;
   }
 
   // Helper factory, returns a token of kKeyword type if "value" is a keyword
   // string, and a token of kIdent type otherwise.
-  static Token MakeIdentOrKeyword(absl::string_view value, int64_t lineno,
+  static Token MakeIdentOrKeyword(std::string_view value, int64_t lineno,
                                   int64_t colno) {
     LexicalTokenType type = GetKeywords().contains(value)
                                 ? LexicalTokenType::kKeyword
@@ -83,7 +115,7 @@ class Token {
   Token(LexicalTokenType type, int64_t lineno, int64_t colno)
       : type_(type), pos_({lineno, colno}) {}
 
-  Token(LexicalTokenType type, absl::string_view value, int64_t lineno,
+  Token(LexicalTokenType type, std::string_view value, int64_t lineno,
         int64_t colno)
       : type_(type), value_(value), pos_({lineno, colno}) {}
 
@@ -125,11 +157,11 @@ inline std::ostream& operator<<(std::ostream& os, const Token& token) {
 // source location information.  Right now this is a eager implementation - it
 // tokenizes the whole input. This can be easily changed later to a more demand
 // driven tokenization.
-absl::StatusOr<std::vector<Token>> TokenizeString(absl::string_view str);
+absl::StatusOr<std::vector<Token>> TokenizeString(std::string_view str);
 
 class Scanner {
  public:
-  static absl::StatusOr<Scanner> Create(absl::string_view text);
+  static absl::StatusOr<Scanner> Create(std::string_view text);
 
   // Peeks at the next token in the token stream, or returns an error if we're
   // at EOF and no more tokens are available.
@@ -137,28 +169,35 @@ class Scanner {
 
   // Return the current token.
   const Token& PeekTokenOrDie() const {
-    XLS_CHECK(!AtEof());
+    CHECK(!AtEof());
     return tokens_[token_idx_];
   }
 
-  // Helper that makes sure we don't peek past EOF.
+  // Returns true if the next token is the given type.
   bool PeekTokenIs(LexicalTokenType target) const {
     return !AtEof() && PeekTokenOrDie().type() == target;
   }
 
+  // Returns true if the nth next token is the given type. If `n` is zero this
+  // peeks at the immediate next token.
+  bool PeekNthTokenIs(int64_t n, LexicalTokenType target) const {
+    return (token_idx_ + n < tokens_.size()) &&
+           tokens_[token_idx_ + n].type() == target;
+  }
+
   // Pop the current token, advance token pointer to next token.
   Token PopToken() {
-    XLS_VLOG(6) << "Popping token: " << tokens_[token_idx_];
+    VLOG(6) << "Popping token: " << tokens_[token_idx_];
     return tokens_.at(token_idx_++);
   }
 
   // Same as PopToken() but returns a status error if we are at EOF (in which
   // case a token cannot be popped).
-  absl::StatusOr<Token> PopTokenOrError(absl::string_view context = "");
+  absl::StatusOr<Token> PopTokenOrError(std::string_view context = "");
 
   // As above, but the caller must ensure we are not possibly at EOF: if we are,
   // then the program will CHECK-fail.
-  void DropTokenOrDie() { XLS_CHECK_OK(PopTokenOrError().status()); }
+  void DropTokenOrDie() { CHECK_OK(PopTokenOrError().status()); }
 
   // Attempts to drop a token with type "target" from the token stream, and
   // returns true if it is possible to do so; otherwise, returns false.
@@ -166,7 +205,7 @@ class Scanner {
   // Note: This function is "EOF safe": trying to drop a token at EOF is ok.
   bool TryDropToken(LexicalTokenType target);
 
-  bool TryDropKeyword(absl::string_view which) {
+  bool TryDropKeyword(std::string_view which) {
     if (PeekTokenIs(LexicalTokenType::kKeyword) &&
         PeekTokenOrDie().value() == which) {
       DropTokenOrDie();
@@ -178,17 +217,27 @@ class Scanner {
   // As with PopTokenOrError, but also supplies an error if the token is not of
   // type "target".
   absl::StatusOr<Token> PopTokenOrError(LexicalTokenType target,
-                                        absl::string_view context = "");
+                                        std::string_view context = "");
+
+  // Pops the token if it is an identifier or keyword, or returns an error
+  // otherwise. Useful for tokens which are allowed to be arbitrary
+  // identifier-like strings including keywords.
+  absl::StatusOr<Token> PopKeywordOrIdentToken(std::string_view context = "");
+
+  // Pops the token if it is a literal or string otherwise.
+  // TODO(hzeller) 2023-06-05 Make a generic PopOneOfToken() for this and the
+  // method above.
+  absl::StatusOr<Token> PopLiteralOrStringToken(std::string_view context);
 
   // Wrapper around PopTokenOrError(target) above that can be used with
   // XLS_RETURN_IF_ERROR.
   absl::Status DropTokenOrError(LexicalTokenType target,
-                                absl::string_view context = "");
+                                std::string_view context = "");
 
   // Pop a keyword token with keyword (payload) "keyword".
   //
   // Returns an absl::Status error if we cannot.
-  absl::Status DropKeywordOrError(absl::string_view keyword);
+  absl::Status DropKeywordOrError(std::string_view keyword);
 
   // Check if more tokens are available.
   bool AtEof() const { return token_idx_ >= tokens_.size(); }

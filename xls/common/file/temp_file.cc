@@ -15,19 +15,27 @@
 #include "xls/common/file/temp_file.h"
 
 #include <fcntl.h>
-#include <stdlib.h>
+#include <stdlib.h>  // NOLINT (needed for mkostemps())
 #include <unistd.h>
 
+#include <cerrno>
+#include <filesystem>
+#include <string>
+#include <string_view>
+#include <system_error>  // NOLINT
+#include <utility>
+
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
-#include "xls/common/logging/logging.h"
 #include "xls/common/status/status_macros.h"
 #include "xls/common/strerror.h"
 
 namespace xls {
 namespace {
 
-absl::Status WriteContent(int fd, absl::string_view content) {
+absl::Status WriteContent(int fd, std::string_view content) {
   int bytes_written = 0;
   while (bytes_written < content.size()) {
     int bytes_written_this_time =
@@ -36,13 +44,11 @@ absl::Status WriteContent(int fd, absl::string_view content) {
     if (bytes_written_this_time == -1) {
       if (errno == EINTR) {
         continue;
-      } else {
-        return absl::UnavailableError(absl::StrCat(
-            "Failed to write content to temporary file: ", Strerror(errno)));
       }
-    } else {
-      bytes_written += bytes_written_this_time;
+      return absl::UnavailableError(absl::StrCat(
+          "Failed to write content to temporary file: ", Strerror(errno)));
     }
+    bytes_written += bytes_written_this_time;
   }
   return ::absl::OkStatus();
 }
@@ -60,30 +66,30 @@ absl::StatusOr<std::filesystem::path> GetGlobalTemporaryDirectory() {
 
 TempFile::~TempFile() { Cleanup(); }
 
-absl::StatusOr<TempFile> TempFile::Create(absl::string_view suffix) {
+absl::StatusOr<TempFile> TempFile::Create(std::string_view suffix) {
   XLS_ASSIGN_OR_RETURN(std::filesystem::path temp_dir,
                        GetGlobalTemporaryDirectory());
   return CreateInDirectory(temp_dir, suffix);
 }
 
 absl::StatusOr<TempFile> TempFile::CreateInDirectory(
-    const std::filesystem::path& directory, absl::string_view suffix) {
+    const std::filesystem::path& directory, std::string_view suffix) {
   int fd;
   XLS_ASSIGN_OR_RETURN(TempFile temp_file, Create(directory, suffix, &fd));
   close(fd);
   return temp_file;
 }
 
-absl::StatusOr<TempFile> TempFile::CreateWithContent(absl::string_view content,
-                                                     absl::string_view suffix) {
+absl::StatusOr<TempFile> TempFile::CreateWithContent(std::string_view content,
+                                                     std::string_view suffix) {
   XLS_ASSIGN_OR_RETURN(std::filesystem::path temp_dir,
                        GetGlobalTemporaryDirectory());
   return CreateWithContentInDirectory(content, temp_dir, suffix);
 }
 
 absl::StatusOr<TempFile> TempFile::CreateWithContentInDirectory(
-    absl::string_view content, const std::filesystem::path& directory,
-    absl::string_view suffix) {
+    std::string_view content, const std::filesystem::path& directory,
+    std::string_view suffix) {
   int fd;
   XLS_ASSIGN_OR_RETURN(TempFile temp_file, Create(directory, suffix, &fd));
   absl::Status write_status = WriteContent(fd, content);
@@ -118,13 +124,13 @@ TempFile::TempFile(const std::filesystem::path& path) : path_(path) {}
 void TempFile::Cleanup() {
   if (!path_.empty()) {
     if (unlink(path_.c_str()) != 0) {
-      XLS_LOG(ERROR) << "Failed to delete temporary file " << path_;
+      LOG(ERROR) << "Failed to delete temporary file " << path_;
     }
   }
 }
 
 absl::StatusOr<TempFile> TempFile::Create(
-    const std::filesystem::path& directory, absl::string_view suffix,
+    const std::filesystem::path& directory, std::string_view suffix,
     int* file_descriptor) {
   std::string path_template =
       (directory / absl::StrCat("xls_tempfile_XXXXXX", suffix)).string();

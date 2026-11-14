@@ -18,17 +18,22 @@
 #include <system_error>  // NOLINT(build/c++11)
 
 #include "absl/status/status.h"
-#include "xls/common/status/status_builder.h"
+#include "absl/status/status_builder.h"
+#include "absl/types/source_location.h"
 
 namespace xls {
 
 absl::StatusCode ErrorCodeToStatusCode(const std::error_code& ec);
 
-xabsl::StatusBuilder ErrorCodeToStatus(const std::error_code& ec);
+absl::StatusBuilder ErrorCodeToStatus(
+    const std::error_code& ec,
+    absl::SourceLocation loc = absl::SourceLocation::current());
 
 // Converts an `errno` value into an absl::Status.
-xabsl::StatusBuilder ErrnoToStatus(int errno_value);
+absl::StatusBuilder ErrnoToStatus(
+    int errno_value,
+    absl::SourceLocation loc = absl::SourceLocation::current());
 
-}
+}  // namespace xls
 
 #endif  // XLS_COMMON_STATUS_ERROR_CODE_TO_STATUS_H_

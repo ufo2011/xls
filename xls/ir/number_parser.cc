@@ -14,23 +14,37 @@
 
 #include "xls/ir/number_parser.h"
 
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/algorithm/container.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/numbers.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/str_replace.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
 #include "xls/common/string_to_int.h"
+#include "xls/ir/bits.h"
 #include "xls/ir/bits_ops.h"
+#include "xls/ir/format_preference.h"
 
 namespace xls {
-
-using absl::StrFormat;
 
 // Parses the given input as an unsigned number (with no format prefix) of the
 // given format. 'orig_string' is the string used in error message.
 static absl::StatusOr<Bits> ParseUnsignedNumberHelper(
-    absl::string_view input, FormatPreference format,
-    absl::string_view orig_string, int64_t bit_count = kMinimumBitCount) {
+    std::string_view input, FormatPreference format,
+    std::string_view orig_string, int64_t bit_count = kMinimumBitCount) {
   if (format == FormatPreference::kDefault) {
     return absl::InvalidArgumentError("Cannot specify default format.");
   }
@@ -38,24 +52,53 @@ static absl::StatusOr<Bits> ParseUnsignedNumberHelper(
   std::string numeric_string = absl::StrReplaceAll(input, {{"_", ""}});
   if (numeric_string.empty()) {
     return absl::InvalidArgumentError(
-        StrFormat("Could not convert %s to a number", orig_string));
+        absl::StrFormat("Could not convert %s to a number", orig_string));
   }
 
-  if (format == FormatPreference::kDecimal) {
-    Bits result(UBits(0, 32));
-    Bits bits_10(UBits(10, 8));
-    for (int i = 0; i < numeric_string.size(); i++) {
-      result = bits_ops::UMul(result, bits_10);
-      uint32_t magnitude;
-      std::string digit_str(1, numeric_string.at(i));
-      if (!absl::SimpleAtoi(digit_str, &magnitude)) {
-        return absl::InvalidArgumentError(StrFormat(
-            "Could not convert %s to 32-bit decimal number", orig_string));
+  if (format == FormatPreference::kUnsignedDecimal) {
+    if (!absl::c_all_of(numeric_string, absl::ascii_isdigit)) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Could not convert %s to 32-bit decimal number", orig_string));
+    }
+    // Consume the digits in chunks of up to 19 (the most that are guaranteed
+    // to fit in a uint64_t: 10^19 - 1 < 2^64) using native parsing, and fold
+    // each chunk into the running result with arbitrary-precision arithmetic:
+    //   result = result * 10^len(chunk) + chunk.
+    // The overwhelmingly common case (node ids, source locations, bit widths,
+    // small literals) is a single chunk, which never touches `Bits`
+    // arithmetic. Parsing one digit at a time with `Bits` arithmetic was ~100x
+    // slower and dominated IR parsing time on large packages.
+    constexpr int64_t kMaxChunkDigits = 19;
+    // Powers of ten up to 10^19, indexed by exponent.
+    static constexpr std::array<uint64_t, kMaxChunkDigits + 1> kPowersOfTen =
+        [] {
+          std::array<uint64_t, kMaxChunkDigits + 1> powers{};
+          powers[0] = 1;
+          for (int64_t i = 1; i <= kMaxChunkDigits; ++i) {
+            powers[i] = powers[i - 1] * 10;
+          }
+          return powers;
+        }();
+    // Narrowed to the minimum width at every step; zero is zero-width.
+    Bits result;
+    std::string_view remaining = numeric_string;
+    while (!remaining.empty()) {
+      std::string_view chunk = remaining.substr(0, kMaxChunkDigits);
+      remaining.remove_prefix(chunk.size());
+      uint64_t chunk_value;
+      // All-digit chunks of at most 19 characters always parse and fit.
+      CHECK(absl::SimpleAtoi(chunk, &chunk_value));
+      Bits chunk_bits =
+          UBits(chunk_value, Bits::MinBitCountUnsigned(chunk_value));
+      if (result.bit_count() == 0) {
+        // result == 0, so result * 10^k + chunk == chunk.
+        result = std::move(chunk_bits);
+        continue;
       }
-      Bits new_char(UBits(magnitude, result.bit_count()));
-
-      result = bits_ops::Add(result, new_char);
-      result = bits_ops::DropLeadingZeroes(result);
+      Bits scaled =
+          bits_ops::UMul(result, UBits(kPowersOfTen[chunk.size()], 64));
+      result = bits_ops::DropLeadingZeroes(bits_ops::Add(
+          scaled, bits_ops::ZeroExtend(chunk_bits, scaled.bit_count())));
     }
     return result;
   }
@@ -72,7 +115,8 @@ static absl::StatusOr<Bits> ParseUnsignedNumberHelper(
     base_bits = 4;
     base_name = "hexadecimal";
   } else {
-    return absl::InvalidArgumentError(StrFormat("Invalid format: %d", format));
+    return absl::InvalidArgumentError(
+        absl::StrFormat("Invalid format: %d", format));
   }
 
   // Walk through string 64 bits at a time (16 hexadecimal symbols or 64
@@ -83,14 +127,14 @@ static absl::StatusOr<Bits> ParseUnsignedNumberHelper(
   for (int64_t i = 0; i < numeric_string.size(); i = i + step_size) {
     int64_t chunk_length =
         std::min<int64_t>(step_size, numeric_string.size() - i);
-    absl::StatusOr<uint64_t> chunk_value_or =
+    absl::StatusOr<uint64_t> chunk_value =
         StrTo64Base(numeric_string.substr(i, chunk_length), base);
-    if (!chunk_value_or.ok()) {
+    if (!chunk_value.ok()) {
       return absl::InvalidArgumentError(
-          StrFormat("Could not convert %s to %s number: %s", orig_string,
-                    base_name, chunk_value_or.status().message()));
+          absl::StrFormat("Could not convert %s to %s number: %s", orig_string,
+                          base_name, chunk_value.status().message()));
     }
-    chunks.push_back(UBits(*chunk_value_or, chunk_length * base_bits));
+    chunks.push_back(UBits(*chunk_value, chunk_length * base_bits));
   }
 
   Bits unnarrowed = bits_ops::Concat(chunks);
@@ -98,25 +142,25 @@ static absl::StatusOr<Bits> ParseUnsignedNumberHelper(
     // Narrow the Bits value to be just wide enough to hold the value.
     int64_t new_width = unnarrowed.bit_count() - unnarrowed.CountLeadingZeros();
     return unnarrowed.Slice(0, new_width);
-  } else if (bit_count > unnarrowed.bit_count()) {
+  }
+  if (bit_count > unnarrowed.bit_count()) {
     BitsRope rope(bit_count);
     rope.push_back(unnarrowed);
     rope.push_back(Bits(bit_count - unnarrowed.bit_count()));
     return rope.Build();
-  } else {
-    return unnarrowed.Slice(0, bit_count);
   }
+  return unnarrowed.Slice(0, bit_count);
 }
 
-absl::StatusOr<Bits> ParseUnsignedNumberWithoutPrefix(absl::string_view input,
+absl::StatusOr<Bits> ParseUnsignedNumberWithoutPrefix(std::string_view input,
                                                       FormatPreference format,
                                                       int64_t bit_count) {
   return ParseUnsignedNumberHelper(input, format, /*orig_string=*/input,
                                    bit_count);
 }
 
-absl::StatusOr<std::pair<bool, Bits>> GetSignAndMagnitude(
-    absl::string_view input) {
+absl::StatusOr<std::pair<Sign, Bits>> GetSignAndMagnitude(
+    std::string_view input) {
   // Literal numbers can be one of:
   //   1) decimal numbers, eg '123'
   //   2) binary numbers, eg '0b010101'
@@ -125,16 +169,19 @@ absl::StatusOr<std::pair<bool, Bits>> GetSignAndMagnitude(
   // must fit in 64 bits.
   if (input.empty()) {
     return absl::InvalidArgumentError(
-        StrFormat("Cannot parse empty string as a number."));
+        absl::StrFormat("Cannot parse empty string as a number."));
   }
-  bool is_negative = false;
+  Sign sign = Sign::kUnspecified;
   // The substring containing the actual numeric characters.
-  absl::string_view numeric_substring = input;
+  std::string_view numeric_substring = input;
   if (input[0] == '-') {
-    is_negative = true;
+    sign = Sign::kNegative;
+    numeric_substring = numeric_substring.substr(1);
+  } else if (input[0] == '+') {
+    sign = Sign::kPositive;
     numeric_substring = numeric_substring.substr(1);
   }
-  FormatPreference format = FormatPreference::kDecimal;
+  FormatPreference format = FormatPreference::kUnsignedDecimal;
   if (numeric_substring.size() >= 2 && numeric_substring[0] == '0') {
     char base_char = numeric_substring[1];
     if (base_char == 'b') {
@@ -142,31 +189,36 @@ absl::StatusOr<std::pair<bool, Bits>> GetSignAndMagnitude(
     } else if (base_char == 'x') {
       format = FormatPreference::kHex;
     } else {
-      return absl::InvalidArgumentError(
-          StrFormat("Invalid numeric base %#x = '%c'. Expected 'b' or 'x'.",
-                    base_char, base_char));
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Invalid numeric base %#x = '%c'. Expected 'b' or 'x'.", base_char,
+          base_char));
     }
     numeric_substring = numeric_substring.substr(2);
+  }
+  if ((format == FormatPreference::kDefault ||
+       format == FormatPreference::kUnsignedDecimal ||
+       format == FormatPreference::kSignedDecimal) &&
+      sign == Sign::kUnspecified) {
+    // On a decimal number, unspecified sign implies it's positive.
+    sign = Sign::kPositive;
   }
   XLS_ASSIGN_OR_RETURN(Bits value,
                        ParseUnsignedNumberHelper(numeric_substring, format,
                                                  /*orig_string=*/input));
-  return std::make_pair(is_negative, value);
+  return std::make_pair(sign, value);
 }
 
-absl::StatusOr<Bits> ParseNumber(absl::string_view input) {
-  std::pair<bool, Bits> pair;
-  XLS_ASSIGN_OR_RETURN(pair, GetSignAndMagnitude(input));
-  bool is_negative = pair.first;
-  const Bits& magnitude = pair.second;
+absl::StatusOr<Bits> ParseNumber(std::string_view input) {
+  XLS_ASSIGN_OR_RETURN((auto [sign, magnitude]), GetSignAndMagnitude(input));
+  bool is_negative = sign == Sign::kNegative;
   if (is_negative && !magnitude.IsZero()) {
     Bits result = bits_ops::Negate(
         bits_ops::ZeroExtend(magnitude, magnitude.bit_count() + 1));
     // We want to return the narrowest Bits object which can hold the (negative)
     // twos-complement number. Shave off all but one of the leading ones.
     int64_t leading_ones = 0;
-    for (int64_t i = result.bit_count() - 1; i >= 0 && result.Get(i) == 1;
-         --i) {
+    for (int64_t i = result.bit_count() - 1;
+         i >= 0 && static_cast<int>(result.Get(i)) == 1; --i) {
       ++leading_ones;
     }
     XLS_RET_CHECK_GT(leading_ones, 0);
@@ -175,25 +227,22 @@ absl::StatusOr<Bits> ParseNumber(absl::string_view input) {
   return magnitude;
 }
 
-absl::StatusOr<uint64_t> ParseNumberAsUint64(absl::string_view input) {
-  std::pair<bool, Bits> pair;
-  XLS_ASSIGN_OR_RETURN(pair, GetSignAndMagnitude(input));
-  bool is_negative = pair.first;
-  if ((is_negative && !pair.second.IsZero()) || pair.second.bit_count() > 64) {
-    return absl::InvalidArgumentError(
-        StrFormat("Value is not representable as an uint64_t: %s", input));
+absl::StatusOr<uint64_t> ParseNumberAsUint64(std::string_view input) {
+  XLS_ASSIGN_OR_RETURN((auto [sign, magnitude]), GetSignAndMagnitude(input));
+  bool is_negative = sign == Sign::kNegative;
+  if ((is_negative && !magnitude.IsZero()) || magnitude.bit_count() > 64) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Value is not representable as an uint64_t: %s", input));
   }
-  return pair.second.ToUint64();
+  return magnitude.ToUint64();
 }
 
-absl::StatusOr<int64_t> ParseNumberAsInt64(absl::string_view input) {
-  std::pair<bool, Bits> pair;
-  XLS_ASSIGN_OR_RETURN(pair, GetSignAndMagnitude(input));
-  bool is_negative = pair.first;
-  Bits magnitude = pair.second;
+absl::StatusOr<int64_t> ParseNumberAsInt64(std::string_view input) {
+  XLS_ASSIGN_OR_RETURN((auto [sign, magnitude]), GetSignAndMagnitude(input));
+  bool is_negative = sign == Sign::kNegative;
   auto not_representable = [&]() {
     return absl::InvalidArgumentError(
-        StrFormat("Value is not representable as an int64_t: %s", input));
+        absl::StrFormat("Value is not representable as an int64_t: %s", input));
   };
   if (!is_negative) {
     // A non-negative number must fit in 63 bits to be represented as a 64-bit
@@ -219,20 +268,18 @@ absl::StatusOr<int64_t> ParseNumberAsInt64(absl::string_view input) {
   return bits_ops::Negate(bits_ops::ZeroExtend(magnitude, 64)).ToInt64();
 }
 
-absl::StatusOr<bool> ParseNumberAsBool(absl::string_view input) {
+absl::StatusOr<bool> ParseNumberAsBool(std::string_view input) {
   if (input == "true") {
     return true;
   }
   if (input == "false") {
     return false;
   }
-  std::pair<bool, Bits> pair;
-  XLS_ASSIGN_OR_RETURN(pair, GetSignAndMagnitude(input));
-  Bits magnitude = pair.second;
-  bool is_negative = pair.first;
+  XLS_ASSIGN_OR_RETURN((auto [sign, magnitude]), GetSignAndMagnitude(input));
+  bool is_negative = sign == Sign::kNegative;
   auto not_representable = [&]() {
     return absl::InvalidArgumentError(
-        StrFormat("Value is not representable as a bool: %s", input));
+        absl::StrFormat("Value is not representable as a bool: %s", input));
   };
   if (is_negative) {
     return not_representable();
@@ -240,7 +287,7 @@ absl::StatusOr<bool> ParseNumberAsBool(absl::string_view input) {
   if (magnitude.bit_count() > 1) {
     return not_representable();
   }
-  return magnitude.Get(0);
+  return magnitude.bit_count() > 0 && magnitude.Get(0);
 }
 
 }  // namespace xls

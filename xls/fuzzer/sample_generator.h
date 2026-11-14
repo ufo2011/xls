@@ -15,45 +15,19 @@
 #ifndef XLS_FUZZER_SAMPLE_GENERATOR_H_
 #define XLS_FUZZER_SAMPLE_GENERATOR_H_
 
-#include <random>
-
-#include "xls/dslx/concrete_type.h"
+#include "absl/random/bit_gen_ref.h"
+#include "absl/status/statusor.h"
+#include "xls/dslx/frontend/pos.h"
 #include "xls/fuzzer/ast_generator.h"
 #include "xls/fuzzer/sample.h"
 
 namespace xls {
 
-// Holds RNG state and provides wrapper helper functions for useful
-// distributions.
-class RngState {
- public:
-  explicit RngState(std::mt19937 rng) : rng_(std::move(rng)) {}
-
-  // Returns a random double value in the range [0.0, 1.0).
-  double RandomDouble();
-
-  // Returns a random integer in the range [0, limit).
-  int64_t RandRange(int64_t limit);
-
-  // Returns a triangular distribution biased towards the zero side, with limit
-  // as the exclusive limit.
-  int64_t RandRangeBiasedTowardsZero(int64_t limit);
-
-  std::mt19937& rng() { return rng_; }
-
- private:
-  std::mt19937 rng_;
-};
-
-// Returns randomly generated values of the given types.
-absl::StatusOr<std::vector<dslx::InterpValue>> GenerateArguments(
-    absl::Span<const dslx::ConcreteType* const> arg_types, RngState* rng);
-
 // Generates and returns a random Sample with the given options.
-absl::StatusOr<Sample> GenerateSample(const dslx::AstGeneratorOptions& options,
-                                      int64_t calls_per_sample,
-                                      const SampleOptions& default_options,
-                                      RngState* rng);
+absl::StatusOr<Sample> GenerateSample(
+    const dslx::AstGeneratorOptions& generator_options,
+    const SampleOptions& sample_options, absl::BitGenRef bit_gen,
+    dslx::FileTable& file_table);
 
 }  // namespace xls
 

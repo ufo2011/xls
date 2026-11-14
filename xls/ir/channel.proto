@@ -12,33 +12,52 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-syntax = "proto2";
+edition = "2024";
 
 package xls;
 
-// Metadata for a channel which describes ports on a Verilog module.
-message ModulePortProto {
-  // Whether the port is flopped on entry (exit) to (from) the module.
-  optional bool flopped = 1;
+import option "google/protobuf/cpp_features.proto";
 
-  // A number used to determine the ordering of the ports. Within a proc, the
-  // port_order of the channels must be numbered densely from zero. Channels
-  // with lower numbered port_order values will have corresponding ports earlier
-  // in the module declaration. The port_order value does not necessarily
-  // correspond to the position of the port in the Verilog module because a
-  // channel can correspond to multiple ports and the module may have other
-  // ports such as clock and reset.
-  // TODO(meheff): Input ports are ordered separately from output ports. Fix
-  // that.
-  optional int64 port_order = 2;
+// TODO(joshuata): Migrate to string_view over legacy strings.
+option features.(pb.cpp).string_type = STRING;
+
+// TODO: google/xls#1561 - document supported options DSLX reference.
+message FifoConfigProto {
+  int64 width = 1;
+  int64 depth = 2;
+  bool bypass = 3;
+  bool register_push_outputs = 4;
+  bool register_pop_outputs = 5;
+  string fifo_wrapper = 6;
 }
 
-// Metadata about an XLS channel. Generally, information held in this proto is
-// used by code generation. Information used for IR transformations or analysis
-// (e.g., data types) should be held directly in the xls::Channel data
-// structure.
-message ChannelMetadataProto {
-  oneof channel_oneof {
-    ModulePortProto module_port = 1;
-  }
+// The kinds of flops a channels input/output may have.
+enum FlopKindProto {
+  // Use the default passed by codegen options
+  FLOP_KIND_DEFAULT = 0;
+  // The input/output is not flopped and is directly connected by wires.
+  FLOP_KIND_NONE = 1;
+  // Adds a pipeline stage at the beginning or end of the channel to hold
+  // inputs or outputs. This is essentially a single-element FIFO.
+  FLOP_KIND_FLOP = 2;
+  // Adds a skid buffer at the inputs or outputs of the channel. The skid
+  // buffer can hold 2 entries
+  FLOP_KIND_SKID = 3;
+  // Adds a zero-latency buffer at the beginning or end of the block. This is
+  // essentially a single-element FIFO with bypass
+  FLOP_KIND_ZERO_LATENCY = 4;
+}
+
+// Configuration for a single channel.
+message ChannelConfigProto {
+  // Configuration passed to the MaybeMaterializeFifosPass or the FIFO module
+  // instantiation to set up the actual verilog fifo backing the channel.
+  //
+  // It is an error to include this for non-streaming channels.
+  FifoConfigProto fifo = 1;
+
+  // Flop to put before all inputs associated with this channel.
+  FlopKindProto flop_inputs = 2;
+  // Flop to put before all outputs associated with this channel.
+  FlopKindProto flop_outputs = 3;
 }

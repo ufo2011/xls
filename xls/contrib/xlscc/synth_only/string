@@ -18,15 +18,17 @@
 namespace std {
 class string {
  public:
-  string() {}
-  string(const char *s) {}
+  string() {(void)__xlscc_unimplemented();}
+  string(const char *s) {(void)__xlscc_unimplemented();}
 
-  string &operator += (const string&rhs) {return *this;}
-  string &operator += (char rhs) {return *this;}
+  string &operator += (const string&rhs) {(void)__xlscc_unimplemented();return *this;}
+  string &operator += (char rhs) {(void)__xlscc_unimplemented();return *this;}
 
 };
 
 string operator + (const std::string& lhs, char rhs) {return lhs;}
+
+string to_string(long long val) {(void)__xlscc_unimplemented();return "";}
 
 }  // namespace std
 

@@ -15,6 +15,12 @@
 #ifndef XLS_NOC_CONFIG_NETWORK_CONFIG_PROTO_BUILDER_H_
 #define XLS_NOC_CONFIG_NETWORK_CONFIG_PROTO_BUILDER_H_
 
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include "absl/status/statusor.h"
 #include "xls/noc/config/link_config_proto_builder.h"
 #include "xls/noc/config/network_config.pb.h"
@@ -29,50 +35,50 @@ class NetworkConfigProtoBuilder {
  public:
   NetworkConfigProtoBuilder() = default;
 
-  explicit NetworkConfigProtoBuilder(absl::string_view network_name);
+  explicit NetworkConfigProtoBuilder(std::string_view network_name);
 
   // Sets the description of the network.
-  NetworkConfigProtoBuilder& WithDescription(absl::string_view description);
+  NetworkConfigProtoBuilder& WithDescription(std::string_view description);
 
   // Sets default flit bit width for links.
   NetworkConfigProtoBuilder& SetDefaultLinkPhitBitWidth(
-      absl::optional<int64_t> phit_bit_width);
+      std::optional<int64_t> phit_bit_width);
 
   // Sets default source to sink pipeline stage for links.
   NetworkConfigProtoBuilder& SetDefaultLinkSourceSinkPipelineStage(
-      absl::optional<int64_t> pipeline_stage);
+      std::optional<int64_t> pipeline_stage);
 
   // Sets default sink to source pipeline stage for links.
   NetworkConfigProtoBuilder& SetDefaultLinkSinkSourcePipelineStage(
-      absl::optional<int64_t> pipeline_stage);
+      std::optional<int64_t> pipeline_stage);
 
   // Sets default flit bit width for Virtual Channels.
   NetworkConfigProtoBuilder& SetDefaultVirtualChannelFlitBitWidth(
-      absl::optional<int64_t> flit_bit_width);
+      std::optional<int64_t> flit_bit_width);
 
   // Sets default depth for Virtual Channels.
   NetworkConfigProtoBuilder& SetDefaultVirtualChannelDepth(
-      absl::optional<int64_t> depth);
+      std::optional<int64_t> depth);
 
   // Adds a port to this object. Returns its builder.
-  PortConfigProtoBuilder WithPort(absl::string_view name);
+  PortConfigProtoBuilder WithPort(std::string_view name);
 
   // Sets default Virtual Channels for input ports.
   NetworkConfigProtoBuilder& SetDefaultVirtualChannelsForRouterInputPort(
-      absl::optional<std::vector<std::string>> virtual_channels);
+      std::optional<std::vector<std::string>> virtual_channels);
 
   // Sets default Virtual Channels for output ports.
   NetworkConfigProtoBuilder& SetDefaultVirtualChannelsForRouterOutputPort(
-      absl::optional<std::vector<std::string>> virtual_channels);
+      std::optional<std::vector<std::string>> virtual_channels);
 
   // Adds a router to this object. Returns its builder.
-  RouterConfigProtoBuilder WithRouter(absl::string_view name);
+  RouterConfigProtoBuilder WithRouter(std::string_view name);
 
   // Adds a link to this object. Returns its builder.
-  LinkConfigProtoBuilder WithLink(absl::string_view name);
+  LinkConfigProtoBuilder WithLink(std::string_view name);
 
   // Adds a virtual channel to this object. Returns its builder.
-  VirtualChannelConfigProtoBuilder WithVirtualChannel(absl::string_view name);
+  VirtualChannelConfigProtoBuilder WithVirtualChannel(std::string_view name);
 
   // If the builder defines a valid proto, returns the proto. Otherwise, returns
   // an error.
@@ -82,13 +88,13 @@ class NetworkConfigProtoBuilder {
   NetworkConfigProto proto_;
   // The members below are used to preserve the default state for the builder.
   // See corresponding methods above for details.
-  absl::optional<int64_t> link_phit_bit_width_;
-  absl::optional<int64_t> link_source_sink_pipeline_stage_;
-  absl::optional<int64_t> link_sink_source_pipeline_stage_;
-  absl::optional<int64_t> virtual_channel_flit_bit_width_;
-  absl::optional<int64_t> virtual_channel_depth_;
-  absl::optional<std::vector<std::string>> virtual_channels_for_input_;
-  absl::optional<std::vector<std::string>> virtual_channels_for_output_;
+  std::optional<int64_t> link_phit_bit_width_;
+  std::optional<int64_t> link_source_sink_pipeline_stage_;
+  std::optional<int64_t> link_sink_source_pipeline_stage_;
+  std::optional<int64_t> virtual_channel_flit_bit_width_;
+  std::optional<int64_t> virtual_channel_depth_;
+  std::optional<std::vector<std::string>> virtual_channels_for_input_;
+  std::optional<std::vector<std::string>> virtual_channels_for_output_;
 };
 
 }  // namespace xls::noc

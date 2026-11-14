@@ -15,88 +15,44 @@
 #ifndef XLS_CODEGEN_PIPELINE_GENERATOR_H_
 #define XLS_CODEGEN_PIPELINE_GENERATOR_H_
 
-#include <string>
-
 #include "absl/status/statusor.h"
-#include "absl/types/optional.h"
-#include "xls/codegen/module_signature.h"
-#include "xls/codegen/module_signature.pb.h"
-#include "xls/codegen/name_to_bit_count.h"
-#include "xls/codegen/vast.h"
-#include "xls/ir/function.h"
+#include "xls/codegen/codegen_options.h"
+#include "xls/codegen/codegen_result.h"
+#include "xls/estimators/delay_model/delay_estimator.h"
+#include "xls/ir/function_base.h"
+#include "xls/ir/package.h"
 #include "xls/scheduling/pipeline_schedule.h"
 
 namespace xls {
 namespace verilog {
 
-// Class describing the options passed to the pipeline generator.
-class PipelineOptions {
- public:
-  // Reset logic to use for the pipeline.
-  PipelineOptions& reset(const ResetProto& reset_proto) {
-    reset_proto_ = reset_proto;
-    return *this;
-  }
-  const absl::optional<ResetProto>& reset() const { return reset_proto_; }
+// Class setting up default options passed to the pipeline generator.
+inline CodegenOptions BuildPipelineOptions() {
+  return CodegenOptions()
+      .flop_inputs(true)
+      .flop_outputs(true)
+      .clock_name("clk")
+      .emit_as_pipeline(true);
+}
 
-  // Name to use for the generated module. If not given, the name of the XLS
-  // function is used.
-  PipelineOptions& module_name(absl::string_view name) {
-    module_name_ = name;
-    return *this;
-  }
-  const absl::optional<std::string> module_name() const { return module_name_; }
-
-  // Specifies manual pipeline register load-enable control.
-  PipelineOptions& manual_control(absl::string_view input_name);
-  absl::optional<ManualPipelineControl> manual_control() const;
-
-  // Specifies pipeline register load-enable controlled by a valid signal.
-  PipelineOptions& valid_control(absl::string_view input_name,
-                                 absl::optional<absl::string_view> output_name);
-  absl::optional<ValidProto> valid_control() const;
-
-  // Returns the proto describing the pipeline control scheme.
-  const absl::optional<PipelineControl>& control() const {
-    return pipeline_control_;
-  }
-
-  // Whether to use SystemVerilog in the generated code otherwise Verilog is
-  // used. The default is to use SystemVerilog.
-  PipelineOptions& use_system_verilog(bool value);
-  bool use_system_verilog() const { return use_system_verilog_; }
-
-  // Whether to flop inputs into a register at the beginning of the pipeline. If
-  // true, adds a single cycle to the latency of the pipline.
-  PipelineOptions& flop_inputs(bool value);
-  bool flop_inputs() const { return flop_inputs_; }
-
-  // Whether to flop outputs into a register at the end of the pipeline. If
-  // true, adds a single cycle to the latency of the pipline.
-  PipelineOptions& flop_outputs(bool value);
-  bool flop_outputs() const { return flop_outputs_; }
-
-  // If the output is tuple-typed, generate an output port for each element of
-  // the output tuple.
-  PipelineOptions& split_outputs(bool value);
-  bool split_outputs() const { return split_outputs_; }
-
- private:
-  absl::optional<std::string> module_name_;
-  absl::optional<ResetProto> reset_proto_;
-  absl::optional<PipelineControl> pipeline_control_;
-  bool use_system_verilog_ = true;
-  bool flop_inputs_ = true;
-  bool flop_outputs_ = true;
-  bool split_outputs_ = false;
-};
-
-// Emits the given function as a verilog module which follows the given
+// Emits the given function or proc as a verilog module which follows the given
 // schedule. The module is pipelined with a latency and initiation interval
 // given in the signature.
-absl::StatusOr<ModuleGeneratorResult> ToPipelineModuleText(
-    const PipelineSchedule& schedule, Function* func,
-    const PipelineOptions& options = PipelineOptions());
+// If a delay estimator is provided, the signature also includes delay
+// information about the pipeline stages.
+absl::StatusOr<CodegenResult> ToPipelineModuleText(
+    const PipelineSchedule& schedule, FunctionBase* module,
+    const CodegenOptions& options = BuildPipelineOptions(),
+    const DelayEstimator* delay_estimator = nullptr);
+
+// Emits the given package as a verilog module which follows the given
+// schedules. Modules are pipelined with a latency and initiation interval
+// given in the signature. If a delay estimator is provided, the signature also
+// includes delay information about the pipeline stages.
+absl::StatusOr<CodegenResult> ToPipelineModuleText(
+    const PackageSchedule& package_schedule, Package* package,
+    const CodegenOptions& options = BuildPipelineOptions(),
+    const DelayEstimator* delay_estimator = nullptr);
 
 }  // namespace verilog
 }  // namespace xls

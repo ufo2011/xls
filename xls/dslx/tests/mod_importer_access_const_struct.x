@@ -12,16 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import xls.dslx.tests.mod_imported_const_struct
+import xls.dslx.tests.mod_imported_const_struct;
 
 const TWO = mod_imported_const_struct::MY_POINT.x;
+
 const FOUR = mod_imported_const_struct::MY_POINT.y;
 
-fn main() -> (u32, u16) {
-  (TWO, FOUR)
-}
+fn main() -> (u32, u16) { (TWO, FOUR) }
 
-#![test]
-fn test_main() {
-  assert_eq(main(), (u32:2, u16:4))
-}
+#[test]
+fn test_main() { assert_eq(main(), (u32:2, u16:4)) }

@@ -15,27 +15,57 @@
 #ifndef XLS_IR_VERIFIER_H_
 #define XLS_IR_VERIFIER_H_
 
+#include <functional>
+#include <vector>
+
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "xls/ir/block.h"
+#include "xls/ir/topo_sort.h"
 
 namespace xls {
 
 class Node;
 class Function;
 class Proc;
+class Block;
 class Package;
+class FunctionBase;
 
-// Verifies numerous invariants of the IR for the given package. Returns a
+struct VerifyOptions {
+  bool codegen = false;
+  bool incomplete_lowering = false;
+};
+
+// Verifies numerous invariants of the IR for the given IR construct. Returns a
 // error status if a violation is found.
-absl::Status VerifyPackage(Package* package);
+absl::Status VerifyPackage(
+    Package* package, const VerifyOptions& options,
+    std::function<absl::StatusOr<std::vector<Node*>>(FunctionBase*)> topo_sort =
+        [](FunctionBase* fb) { return TopoSort(fb); });
+inline absl::Status VerifyPackage(
+    Package* package, bool codegen = false,
+    std::function<absl::StatusOr<std::vector<Node*>>(FunctionBase*)> topo_sort =
+        [](FunctionBase* fb) { return TopoSort(fb); }) {
+  return VerifyPackage(package, {.codegen = codegen}, topo_sort);
+}
+absl::Status VerifyFunction(Function* function, const VerifyOptions& options);
+inline absl::Status VerifyFunction(Function* function, bool codegen = false) {
+  return VerifyFunction(function, {.codegen = codegen});
+}
+absl::Status VerifyProc(Proc* proc, const VerifyOptions& options);
+inline absl::Status VerifyProc(Proc* proc, bool codegen = false) {
+  return VerifyProc(proc, {.codegen = codegen});
+}
+absl::Status VerifyBlock(Block* block, const VerifyOptions& options);
+inline absl::Status VerifyBlock(Block* block, bool codegen = false) {
+  return VerifyBlock(block, {.codegen = codegen});
+}
 
-// Overload for Procs.
-absl::Status VerifyProc(Proc* Proc);
-
-// Overload for functions.
-absl::Status VerifyFunction(Function* function);
-
-// Overload for nodes.
-absl::Status VerifyNode(Node* Node);
+inline absl::Status VerifyScheduledBlock(ScheduledBlock* block,
+                                         bool codegen = false) {
+  return VerifyBlock(block, {.codegen = codegen, .incomplete_lowering = true});
+}
 
 }  // namespace xls
 

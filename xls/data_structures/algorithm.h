@@ -15,9 +15,17 @@
 #ifndef XLS_DATA_STRUCTURES_ALGORITHM_H_
 #define XLS_DATA_STRUCTURES_ALGORITHM_H_
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <list>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
+#include "absl/algorithm/container.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/container/inlined_vector.h"
 #include "absl/functional/function_ref.h"
 #include "absl/types/span.h"
 
@@ -60,6 +68,249 @@ std::vector<T> GatherFromSequence(absl::Span<const T> sequence,
     result.push_back(sequence[index]);
   }
   return result;
+}
+
+namespace internal {
+
+template <typename T, typename Func>
+inline void ForEachUniqueLinearScan(absl::Span<const T> values, Func func) {
+  for (int64_t i = 0; i < values.size(); ++i) {
+    bool already_seen = false;
+    for (int64_t j = 0; j < i; ++j) {
+      if (values[j] == values[i]) {
+        already_seen = true;
+        break;
+      }
+    }
+    if (already_seen) {
+      continue;
+    }
+    func(values[i]);
+  }
+}
+
+template <typename T, typename Func>
+inline void ForEachUniqueHashSet(absl::Span<const T> values, Func func,
+                                 absl::flat_hash_set<T>& scratch_set) {
+  scratch_set.reserve(values.size());
+  for (const T& value : values) {
+    if (scratch_set.insert(value).second) {
+      func(value);
+    }
+  }
+}
+
+}  // namespace internal
+
+// Calls `func` on each unique value in `values`.
+//
+// If provided, `scratch_set` will be used as scratch space if the size of
+// `values` is above `kSmallSetThreshold`, potentially avoiding an allocation.
+template <typename T, size_t kSmallSetThreshold = 16, typename Func>
+void ForEachUnique(absl::Span<const T> values, Func func,
+                   absl::flat_hash_set<T>& scratch_set) {
+  if (values.size() <= kSmallSetThreshold) {
+    internal::ForEachUniqueLinearScan(values, func);
+    return;
+  }
+
+  scratch_set.clear();
+  internal::ForEachUniqueHashSet(values, func, scratch_set);
+}
+template <typename T, size_t kSmallSetThreshold = 16, typename Func>
+void ForEachUnique(absl::Span<const T> values, Func func) {
+  if (values.size() <= kSmallSetThreshold) {
+    internal::ForEachUniqueLinearScan(values, func);
+    return;
+  }
+
+  absl::flat_hash_set<T> scratch_set;
+  internal::ForEachUniqueHashSet(values, func, scratch_set);
+}
+
+namespace internal {
+
+template <typename T>
+inline std::vector<T> DeduplicateToVectorLinearScan(
+    absl::Span<const T> values) {
+  std::vector<T> result;
+  result.reserve(values.size());
+  for (int64_t i = 0; i < values.size(); ++i) {
+    bool already_seen = false;
+    for (int64_t j = 0; j < i; ++j) {
+      if (values[j] == values[i]) {
+        already_seen = true;
+        break;
+      }
+    }
+    if (already_seen) {
+      continue;
+    }
+    result.push_back(values[i]);
+  }
+  return result;
+}
+
+template <typename T>
+inline std::vector<T> DeduplicateToVectorHashSet(
+    absl::Span<const T> values, absl::flat_hash_set<T>& scratch_set) {
+  scratch_set.reserve(values.size());
+  std::vector<T> result;
+  result.reserve(values.size());
+  for (const T& value : values) {
+    if (scratch_set.insert(value).second) {
+      result.push_back(value);
+    }
+  }
+  return result;
+}
+
+}  // namespace internal
+
+// Returns a vector of the unique values in `values`.
+//
+// If provided, `scratch_set` will be used as scratch space if the size of
+// `values` is above `kSmallSetThreshold`, potentially avoiding an allocation.
+template <typename T, size_t kSmallSetThreshold = 16>
+std::vector<T> DeduplicateToVector(absl::Span<const T> values,
+                                   absl::flat_hash_set<T>& scratch_set) {
+  if (values.size() <= kSmallSetThreshold) {
+    return internal::DeduplicateToVectorLinearScan(values);
+  }
+
+  scratch_set.clear();
+  return internal::DeduplicateToVectorHashSet(values, scratch_set);
+}
+template <typename T, size_t kSmallSetThreshold = 16>
+std::vector<T> DeduplicateToVector(absl::Span<const T> values) {
+  if (values.size() <= kSmallSetThreshold) {
+    return internal::DeduplicateToVectorLinearScan(values);
+  }
+
+  absl::flat_hash_set<T> scratch_set;
+  return internal::DeduplicateToVectorHashSet(values, scratch_set);
+}
+
+namespace internal {
+
+constexpr size_t kSortByKeyInlineStorageCount = 16;
+
+// Sorts `container` by moving elements into a (Key, Element) paired buffer,
+// sorting the buffer, and then moving the elements back.
+//
+// Ideal for small types that are cheap to move.
+template <typename Container, typename KeyFunc, typename Compare>
+void SortByKeyAuxiliary(Container& container, KeyFunc&& key_func,
+                        Compare&& comp) {
+  using Element = typename Container::value_type;
+  using Key = std::decay_t<std::invoke_result_t<KeyFunc, const Element&>>;
+
+  absl::InlinedVector<std::pair<Key, Element>, kSortByKeyInlineStorageCount>
+      keyed;
+  keyed.reserve(container.size());
+  for (auto& elem : container) {
+    auto key = key_func(elem);
+    keyed.emplace_back(std::move(key), std::move(elem));
+  }
+  absl::c_sort(keyed, [&](const auto& a, const auto& b) {
+    return comp(a.first, b.first);
+  });
+  for (size_t i = 0; i < container.size(); ++i) {
+    container[i] = std::move(keyed[i].second);
+  }
+}
+
+// Sorts `container` by building a (Key, Index) buffer, sorting it, and using
+// the result to permute `container` in-place.
+//
+// Ideal for large types that might not be cheap to move.
+template <typename Container, typename KeyFunc, typename Compare>
+void SortByKeyInPlace(Container& container, KeyFunc&& key_func,
+                      Compare&& comp) {
+  using Element = typename Container::value_type;
+  using Key = std::decay_t<std::invoke_result_t<KeyFunc, const Element&>>;
+
+  absl::InlinedVector<std::pair<Key, size_t>, kSortByKeyInlineStorageCount>
+      keyed_indices;
+  keyed_indices.reserve(container.size());
+  for (size_t i = 0; i < container.size(); ++i) {
+    keyed_indices.emplace_back(key_func(container[i]), i);
+  }
+  absl::c_sort(keyed_indices, [&](const auto& a, const auto& b) {
+    return comp(a.first, b.first);
+  });
+
+  // Permute container to match the sorted order of the keys.
+  //
+  // For efficiency, we move the elements in cycles, letting us do this in O(n)
+  // time and with O(1) extra space.
+  for (size_t i = 0; i < container.size(); ++i) {
+    if (keyed_indices[i].second == i) {
+      continue;
+    }
+    Element tmp = std::move(container[i]);
+    size_t cur = i;
+    while (keyed_indices[cur].second != i) {
+      size_t prev = keyed_indices[cur].second;
+      container[cur] = std::move(container[prev]);
+      keyed_indices[cur].second = cur;
+      cur = prev;
+    }
+    container[cur] = std::move(tmp);
+    keyed_indices[cur].second = cur;
+  }
+}
+
+// Sorts `container` by building a (Key, Iterator) buffer, sorting it, and
+// using the result to permute `container` in-place.
+//
+// Ideal for linked lists and other types that don't support random access.
+template <typename T, typename Alloc, typename KeyFunc, typename Compare>
+void SortListByKey(std::list<T, Alloc>& container, KeyFunc&& key_func,
+                   Compare&& comp) {
+  using Key = std::decay_t<std::invoke_result_t<KeyFunc, const T&>>;
+  using Iter = typename std::list<T, Alloc>::iterator;
+  absl::InlinedVector<std::pair<Key, Iter>, kSortByKeyInlineStorageCount>
+      keyed_iters;
+  keyed_iters.reserve(container.size());
+  for (auto it = container.begin(); it != container.end(); ++it) {
+    keyed_iters.emplace_back(key_func(*it), it);
+  }
+  absl::c_sort(keyed_iters, [&](const auto& a, const auto& b) {
+    return comp(a.first, b.first);
+  });
+  std::list<T, Alloc> sorted_list(container.get_allocator());
+  for (auto& [key, it] : keyed_iters) {
+    sorted_list.splice(sorted_list.end(), container, it);
+  }
+  container.swap(sorted_list);
+}
+
+}  // namespace internal
+
+// Sorts `container` by evaluating `key_func` on each element.
+// `key_func` is guaranteed to be evaluated exactly once per element.
+template <typename Container, typename KeyFunc, typename Compare = std::less<>>
+void SortByKey(Container& container, KeyFunc&& key_func, Compare&& comp = {}) {
+  using Element = typename Container::value_type;
+  constexpr bool kUseDirectCopy = sizeof(Element) <= 16;
+
+  if constexpr (kUseDirectCopy) {
+    internal::SortByKeyAuxiliary(container, std::forward<KeyFunc>(key_func),
+                                 std::forward<Compare>(comp));
+  } else {
+    internal::SortByKeyInPlace(container, std::forward<KeyFunc>(key_func),
+                               std::forward<Compare>(comp));
+  }
+}
+
+// Special overload for std::list
+template <typename T, typename Alloc, typename KeyFunc,
+          typename Compare = std::less<>>
+void SortByKey(std::list<T, Alloc>& container, KeyFunc&& key_func,
+               Compare&& comp = {}) {
+  internal::SortListByKey(container, std::forward<KeyFunc>(key_func),
+                          std::forward<Compare>(comp));
 }
 
 }  // namespace xls

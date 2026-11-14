@@ -15,6 +15,12 @@
 #ifndef XLS_NOC_CONFIG_ROUTER_CONFIG_PROTO_BUILDER_H_
 #define XLS_NOC_CONFIG_ROUTER_CONFIG_PROTO_BUILDER_H_
 
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "absl/log/die_if_null.h"
 #include "xls/noc/config/arbiter_scheme_config_proto_builder.h"
 #include "xls/noc/config/network_config.pb.h"
 #include "xls/noc/config/port_config_proto_builder.h"
@@ -27,24 +33,24 @@ class RouterConfigProtoBuilder {
  public:
   // proto cannot be nullptr.
   explicit RouterConfigProtoBuilder(RouterConfigProto* proto)
-      : proto_(XLS_DIE_IF_NULL(proto)) {}
+      : proto_(ABSL_DIE_IF_NULL(proto)) {}
 
   // Adds the name of the router.
-  RouterConfigProtoBuilder& WithName(absl::string_view name);
+  RouterConfigProtoBuilder& WithName(std::string_view name);
 
   // Adds an input port to this object. Returns its builder.
-  PortConfigProtoBuilder WithInputPort(absl::string_view name);
+  PortConfigProtoBuilder WithInputPort(std::string_view name);
 
   // Adds an output port to this object. Returns its builder.
-  PortConfigProtoBuilder WithOutputPort(absl::string_view name);
+  PortConfigProtoBuilder WithOutputPort(std::string_view name);
 
   // Sets default Virtual Channels for input ports.
   RouterConfigProtoBuilder& SetDefaultVirtualChannelsForInputPort(
-      absl::optional<std::vector<std::string>> virtual_channels);
+      std::optional<std::vector<std::string>> virtual_channels);
 
   // Sets default Virtual Channels for output ports.
   RouterConfigProtoBuilder& SetDefaultVirtualChannelsForOutputPort(
-      absl::optional<std::vector<std::string>> virtual_channels);
+      std::optional<std::vector<std::string>> virtual_channels);
 
   // Returns the routing scheme configuration builder of this builder.
   RoutingSchemeConfigProtoBuilder GetRoutingSchemeConfigProtoBuilder();
@@ -56,8 +62,8 @@ class RouterConfigProtoBuilder {
   RouterConfigProto* proto_;
   // The members below are used to preserve the default state for the builder.
   // See corresponding methods above for details.
-  absl::optional<std::vector<std::string>> virtual_channels_for_input_;
-  absl::optional<std::vector<std::string>> virtual_channels_for_output_;
+  std::optional<std::vector<std::string>> virtual_channels_for_input_;
+  std::optional<std::vector<std::string>> virtual_channels_for_output_;
 };
 
 }  // namespace xls::noc

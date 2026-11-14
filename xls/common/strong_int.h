@@ -38,7 +38,7 @@
 //
 // ...should be identical to the generated assembly for:
 //
-//    DEFINE_STRONG_INT_TYPE(MyStrongInt, int64_t);
+//    XLS_DEFINE_STRONG_INT_TYPE(MyStrongInt, int64_t);
 //    MyStrongInt foo(123);
 //    MyStrongInt bar(456);
 //    MyStrongInt baz = foo + bar;
@@ -54,12 +54,12 @@
 // For example, the below demonstrates a case where the 2 are not equivalent
 // at compile time and can lead to subtle initialization bugs:
 //
-//    DEFINE_STRONG_INT_TYPE(MyStrongInt8, int8_t);
+//    XLS_DEFINE_STRONG_INT_TYPE(MyStrongInt8, int8_t);
 //    int8_t foo = 1024;        // Compile error: const conversion to ...
 //    MyStrongInt8 foo(1024); // Compiles ok: foo has undefined / 0 value.
 //
 // Usage:
-//   DEFINE_STRONG_INT_TYPE(Name, NativeType);
+//   XLS_DEFINE_STRONG_INT_TYPE(Name, NativeType);
 //
 //     Defines a new StrongInt type named 'Name' in the current namespace with
 //     no validation of operations.
@@ -116,17 +116,18 @@
 #ifndef XLS_COMMON_STRONG_INT_H_
 #define XLS_COMMON_STRONG_INT_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <iosfwd>
 #include <limits>
 #include <ostream>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
-#include "absl/base/macros.h"
+#include "absl/base/attributes.h"
 #include "absl/meta/type_traits.h"
-#include "absl/strings/string_view.h"
 
 namespace xls {
 
@@ -153,7 +154,7 @@ struct NullStrongIntValidator {
   //
   //   template<typename T, typename U>
   //   static void ValidateInit(U arg) {
-  //     if (arg < 0) XLS_LOG(FATAL) << "arg < 0";
+  //     if (arg < 0) LOG(FATAL) << "arg < 0";
   //   }
   //
   //   template<typename T, typename U>
@@ -247,7 +248,7 @@ class StrongInt {
     }
   };
 
-  static constexpr absl::string_view TypeName() { return TagType::TypeName(); }
+  static constexpr std::string_view TypeName() { return TagType::TypeName(); }
 
   // Default value initialization.
   constexpr StrongInt()
@@ -264,8 +265,8 @@ class StrongInt {
   //
   // Example: Assume you have two StrongInt types.
   //
-  //      DEFINE_STRONG_INT_TYPE(Bytes, int64_t);
-  //      DEFINE_STRONG_INT_TYPE(Megabytes, int64_t);
+  //      XLS_DEFINE_STRONG_INT_TYPE(Bytes, int64_t);
+  //      XLS_DEFINE_STRONG_INT_TYPE(Megabytes, int64_t);
   //
   //  If you want to be able to (explicitly) construct an instance of Bytes from
   //  an instance of Megabytes, simply define a converter function in the same
@@ -325,12 +326,12 @@ class StrongInt {
 
   // Unary operators.
   bool operator!() const { return value_ == 0; }
-  const StrongInt operator+() const { return StrongInt(value_); }
-  const StrongInt operator-() const {
+  StrongInt operator+() const { return StrongInt(value_); }
+  StrongInt operator-() const {
     ValidatorType::template ValidateNegate<ValueType>(value_);
     return StrongInt(-value_);
   }
-  const StrongInt operator~() const {
+  StrongInt operator~() const {
     ValidatorType::template ValidateBitNot<ValueType>(value_);
     return StrongInt(ValueType(~value_));
   }
@@ -341,7 +342,7 @@ class StrongInt {
     ++value_;
     return *this;
   }
-  const StrongInt operator++(int postfix_flag) {  // x++
+  StrongInt operator++(int postfix_flag) {  // x++
     ValidatorType::template ValidateAdd<ValueType>(value_, ValueType(1));
     StrongInt temp(*this);
     ++value_;
@@ -352,7 +353,7 @@ class StrongInt {
     --value_;
     return *this;
   }
-  const StrongInt operator--(int postfix_flag) {  // x--
+  StrongInt operator--(int postfix_flag) {  // x--
     ValidatorType::template ValidateSubtract<ValueType>(value_, ValueType(1));
     StrongInt temp(*this);
     --value_;
@@ -574,12 +575,12 @@ struct IsStrongInt<StrongInt<Ts...>> : public std::true_type {};
 // validation of under/overflow situations.
 // The struct int_type_name ## _tag_ trickery is needed to ensure that a new
 // type is created per type_name.
-#define DEFINE_STRONG_INT_TYPE(type_name, value_type)                       \
-  struct type_name##_strong_int_tag_ {                                      \
-    static constexpr absl::string_view TypeName() { return #type_name; }    \
-  };                                                                        \
-  typedef ::xls::StrongInt<type_name##_strong_int_tag_, value_type,         \
-                           ::xls::NullStrongIntValidator>                   \
+#define XLS_DEFINE_STRONG_INT_TYPE(type_name, value_type)               \
+  struct type_name##_strong_int_tag_ {                                  \
+    static constexpr std::string_view TypeName() { return #type_name; } \
+  };                                                                    \
+  typedef ::xls::StrongInt<type_name##_strong_int_tag_, value_type,     \
+                           ::xls::NullStrongIntValidator>               \
       type_name;
 
 namespace std {

@@ -16,20 +16,23 @@
 #define XLS_IR_BITS_H_
 
 #include <algorithm>
-#include <cmath>
+#include <bitset>
 #include <cstdint>
-#include <numeric>
 #include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
-#include "absl/base/casts.h"
+#include "absl/base/attributes.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
-#include "xls/common/bits_util.h"
-#include "xls/common/logging/logging.h"
+#include "absl/types/span.h"
 #include "xls/common/math_util.h"
 #include "xls/data_structures/inline_bitmap.h"
 #include "xls/ir/bit_push_buffer.h"
-#include "xls/ir/format_preference.h"
 
 namespace xls {
 namespace internal {
@@ -38,7 +41,7 @@ namespace internal {
 // a result.
 template <typename T>
 T CheckGe(T lhs, T rhs) {
-  XLS_CHECK_GE(lhs, rhs);
+  CHECK_GE(lhs, rhs);
   return lhs;
 }
 
@@ -60,6 +63,10 @@ class Bits {
   // absl::InlinedVector instead.
   explicit Bits(absl::Span<bool const> bits);
 
+  // Sets the values of a range. The range is defined as:
+  // [lower_index, upper_index).
+  void SetRange(int64_t start_index, int64_t end_index, bool value = true);
+
   // Returns a Bits object with all ones. If 'bit_count' is zero, an empty Bits
   // object is returned as, vacuously, an empty bits object has all of its bits
   // set to one.
@@ -77,11 +84,22 @@ class Bits {
   // order where the byte zero is the most significant byte. The size of 'bytes'
   // must be at least than bit_count / 8. Any bits beyond 'bit_count' in 'bytes'
   // are ignored.
-  static Bits FromBytes(absl::Span<const uint8_t> bytes, int64_t bit_count);
+  static Bits FromBytes(absl::Span<const uint8_t> bytes, int64_t bit_count) {
+    return Bits(InlineBitmap::FromBytes(bit_count, bytes));
+  }
+
+  // Variant of FromBytes for converting a string.
+  static Bits FromBytes(std::string_view string) {
+    return Bits(InlineBitmap::FromBytes(string));
+  }
 
   // Constructs a Bits object from a bitmap.
   static Bits FromBitmap(InlineBitmap bitmap) {
     return Bits(std::move(bitmap));
+  }
+
+  static Bits FromBitmapView(BitmapView bitmap) {
+    return Bits(bitmap.ToBitmap());
   }
 
   // Note: we flatten into the pushbuffer with the MSb pushed first.
@@ -91,8 +109,8 @@ class Bits {
     }
   }
 
-  // Return the Bits object as a vector of bytes. Bytes are in big endian order
-  // where the byte zero of the returned vector is the most significant
+  // Return the Bits object as a vector of bytes. Bytes are in little endian
+  // order where the byte zero of the returned vector is the least significant
   // byte. The returned vector has size ceil(bit_count()/8). Any bits in the
   // returned vector beyond the bit_count()-th are set to zero.
   std::vector<uint8_t> ToBytes() const {
@@ -103,50 +121,45 @@ class Bits {
 
   // Implements ToBytes() as above by inserting values into a user-provided raw
   // byte buffer.
-  //
-  // "big_endian" determines whether the least significant byte from this bits
-  // object ends up in the 0th byte (on false), or in the N-1th byte (on true).
-  // This can be useful to control when calling machine code.
-  void ToBytes(absl::Span<uint8_t> bytes, bool big_endian = true) const {
-    int64_t byte_count = bitmap_.byte_count();
-    XLS_DCHECK(bytes.size() >= byte_count);
-    // Use raw access to avoid evaluating ABSL_ASSERT on every reference.
-    uint8_t* buffer = bytes.data();
-    for (int64_t i = 0; i < byte_count; ++i) {
-      int64_t index = big_endian ? byte_count - i - 1 : i;
-      buffer[index] = bitmap_.GetByte(i);
-    }
-    // Mask off final byte.
-    if (bit_count() % 8 != 0) {
-      buffer[big_endian ? 0 : byte_count - 1] &= Mask(bit_count() % 8);
-    }
+  void ToBytes(absl::Span<uint8_t> bytes) const {
+    bitmap_.WriteBytesToBuffer(bytes);
   }
 
-  // Return the Bits object as a vector of bits. The n-th element of the
-  // returned vector is the n-th bit of the Bits object. Returns
-  // absl::InlinedVector to avoid std::vector<bool> specialization.
+  // Returns the underlying bitmap contents as a binary string (suitable for
+  // debugging printouts in e.g. error messages) -- this is used for any error
+  // reporting that needs to happen at the `Bits` level of functionality --
+  // nicer pretty printing is available in `bits_ops.h`.
+  std::string ToDebugString() const;
+
+  // Returns the Bits object as a vector of bits. The n-th element of the
+  // returned vector is the n-th bit of the Bits object, i.e. the msb is at the
+  // end of the vector.
+  //
+  // Returns absl::InlinedVector to avoid std::vector<bool> specialization.
   absl::InlinedVector<bool, 1> ToBitVector() const;
 
+  template <int64_t N>
+  absl::Status FillBitSet(std::bitset<N>& bitset) const {
+    if (N != bit_count()) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Bit array size %d does not match bit count %d", N, bit_count()));
+    }
+    for (int64_t i = 0; i < N; ++i) {
+      bitset[i] = Get(i);
+    }
+    return absl::OkStatus();
+  }
+
+  template <int64_t N>
+  static Bits FromBitSet(const std::bitset<N>& bitset) {
+    InlineBitmap bits(N);
+    for (int64_t i = 0; i < N; ++i) {
+      bits.Set(i, bitset[i]);
+    }
+    return Bits::FromBitmap(std::move(bits));
+  }
+
   int64_t bit_count() const { return bitmap_.bit_count(); }
-
-  // Returns a string representation of the Bits object. A kDefault format
-  // preference emits a decimal string if the bit count is less than or equal to
-  // 64, or a hexadecimal string otherwise. If include_bit_count is true, then
-  // also emit the bit width as a suffix; example: "0xabcd [16 bits]".
-  std::string ToString(FormatPreference preference = FormatPreference::kDefault,
-                       bool include_bit_count = false) const;
-
-  // Emits the bits value as an string of digits. Supported FormatPreferences
-  // are: kDecimal, kHex, and kBinary. The string is not prefixed (e.g., no
-  // leading "0x"). Hexadecimal and binary numbers have '_' separators inserted
-  // every 4th digit. For example, the decimal number 1000 in binary:
-  // 111_1110_1000. If emit_leading_zeros is true, binary and hexadecimal
-  // formatted number will include leading zero up to the width of the
-  // underlying Bits object. For example, if emit_leading_zeros is true:
-  // Bits(42, 11) will result in '02a' and '000_0010_1010' for binary and
-  // hexadecimal format respectively.
-  std::string ToRawDigits(FormatPreference preference,
-                          bool emit_leading_zeros = false) const;
 
   // Return the most-significant bit.
   bool msb() const { return bit_count() == 0 ? false : Get(bit_count() - 1); }
@@ -158,7 +171,7 @@ class Bits {
   // As above, but retrieves with index "0" starting at the MSb side of the bit
   // vector.
   bool GetFromMsb(int64_t index) const {
-    XLS_DCHECK_LT(index, bit_count());
+    DCHECK_LT(index, bit_count());
     return bitmap_.Get(bit_count() - index - 1);
   }
 
@@ -215,14 +228,20 @@ class Bits {
   // uint64_t/int64_t.
   bool FitsInUint64() const;
   bool FitsInInt64() const;
+  bool FitsInInt64Unsigned() const;
 
   // Converts the value held by this "bits" object into a uint64_t (int64_t).
-  // ToUint64 interprets the bits as unsigned. ToInt64 interprets the bits in
-  // twos-complement representation. Returns an error if the *value* cannot be
-  // represented in 64 bits (the width of the Bits object can be arbitrarily
-  // large).
+  // ToUint64 & UnsignedToInt64 interpret the bits as unsigned. ToInt64
+  // interprets the bits in twos-complement representation. Returns an error if
+  // the *value* cannot be represented in the target 64-bit type (the width of
+  // the Bits object can be arbitrarily large).
   absl::StatusOr<uint64_t> ToUint64() const;
   absl::StatusOr<int64_t> ToInt64() const;
+  absl::StatusOr<int64_t> UnsignedToInt64() const;
+
+  // Converts the value of a single-bit Bits object to a boolean. Returns an
+  // error if the width is not 1.
+  absl::StatusOr<bool> ToBool() const;
 
   // Extracts the "word_number"th u64 from this value, as in Bitmap::GetWord.
   // (Zero-bit values get 0 by convention.)
@@ -237,7 +256,8 @@ class Bits {
   // the slice. 'start' is zero-indexed with zero being the LSb (same indexing
   // as Get/Set). 'width' is the number of bits to slice out and is the
   // bit_count of the result.
-  Bits Slice(int64_t start, int64_t width) const;
+  Bits Slice(int64_t start, int64_t width) const&;
+  Bits Slice(int64_t start, int64_t width) &&;
 
   // Returns the minimum number of bits required to store the given value as an
   // unsigned number.
@@ -249,7 +269,32 @@ class Bits {
   // twos complement signed number.
   static int64_t MinBitCountSigned(int64_t value);
 
-  const InlineBitmap& bitmap() const { return bitmap_; }
+  const InlineBitmap& bitmap() const& { return bitmap_; }
+  InlineBitmap&& bitmap() && { return std::move(bitmap_); }
+
+  using Iterator = InlineBitmap::Iterator;
+  Iterator begin() const { return bitmap_.begin(); }
+  Iterator end() const { return bitmap_.end(); }
+
+  template <typename H>
+  friend H AbslHashValue(H h, const Bits& bits) {
+    return H::combine(std::move(h), bits.bitmap_);
+  }
+
+  template <typename Sink>
+  friend void FuzzTestPrintSourceCode(Sink& sink, const Bits& bits) {
+    if (bits.FitsInUint64()) {
+      absl::Format(&sink, "UBits(%v, %v)", bits.ToUint64().value(),
+                   bits.bit_count());
+    } else if (bits.FitsInInt64()) {
+      absl::Format(&sink, "SBits(%v, %v)", bits.ToInt64().value(),
+                   bits.bit_count());
+    } else {
+      absl::Format(&sink, "Bits::FromBitmap(");
+      FuzzTestPrintSourceCode(sink, bits.bitmap());
+      absl::Format(&sink, ")");
+    }
+  }
 
  private:
   friend class BitsRope;
@@ -263,6 +308,9 @@ class Bits {
 
 // Helper for "stringing together" bits objects into a final result, avoiding
 // intermediate allocations.
+//
+// Note that to use this object you have to know the total bit count up front.
+// If the total bit count is unknown see `BitPushBuffer`.
 class BitsRope {
  public:
   explicit BitsRope(int64_t total_bit_count) : bitmap_(total_bit_count) {}
@@ -281,16 +329,15 @@ class BitsRope {
   //
   // So b.Get(0) is now at result.Get(2).
   void push_back(const Bits& bits) {
-    for (int64_t i = 0; i < bits.bit_count(); ++i) {
-      bitmap_.Set(index_ + i, bits.Get(i));
-    }
+    bitmap_.Overwrite(bits.bitmap(), bits.bit_count(),
+                      /*w_offset=*/index_, /*r_offset=*/0);
     index_ += bits.bit_count();
   }
 
   void push_back(bool bit) { bitmap_.Set(index_++, bit); }
 
   Bits Build() {
-    XLS_CHECK_EQ(index_, bitmap_.bit_count());
+    CHECK_EQ(index_, bitmap_.bit_count());
     return Bits{std::move(bitmap_)};
   }
 
@@ -311,11 +358,6 @@ inline Bits UBits(uint64_t value, int64_t bit_count) {
 }
 inline Bits SBits(int64_t value, int64_t bit_count) {
   return SBitsWithStatus(value, bit_count).value();
-}
-
-inline std::ostream& operator<<(std::ostream& os, const Bits& bits) {
-  os << bits.ToString(FormatPreference::kDefault, /*include_bit_count=*/true);
-  return os;
 }
 
 }  // namespace xls

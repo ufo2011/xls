@@ -12,10 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# cc_proto_library is used in this file
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 
 package(
-    default_visibility = ["//xls:xls_internal"],
+    default_applicable_licenses = ["//:license"],
+    features = [
+        "layering_check",
+        "parse_headers",
+    ],
     licenses = ["notice"],  # Apache 2.0
 )
 
@@ -79,7 +86,7 @@ cc_library(
     hdrs = ["topology_endpoint_options_proto_builder.h"],
     deps = [
         ":topology_options_network_config_builder_cc_proto",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -88,8 +95,9 @@ cc_test(
     srcs = ["topology_endpoint_options_proto_builder_test.cc"],
     deps = [
         ":topology_endpoint_options_proto_builder",
+        ":topology_options_network_config_builder_cc_proto",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -99,7 +107,7 @@ cc_library(
     hdrs = ["dimension_order_entry_options_proto_builder.h"],
     deps = [
         ":topology_options_network_config_builder_cc_proto",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -108,8 +116,9 @@ cc_test(
     srcs = ["dimension_order_entry_options_proto_builder_test.cc"],
     deps = [
         ":dimension_order_entry_options_proto_builder",
+        ":topology_options_network_config_builder_cc_proto",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -121,7 +130,7 @@ cc_library(
         ":dimension_order_entry_options_proto_builder",
         ":topology_endpoint_options_proto_builder",
         ":topology_options_network_config_builder_cc_proto",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -129,10 +138,12 @@ cc_test(
     name = "dimension_order_options_proto_builder_test",
     srcs = ["dimension_order_options_proto_builder_test.cc"],
     deps = [
+        ":dimension_order_entry_options_proto_builder",
         ":dimension_order_options_proto_builder",
         ":topology_endpoint_options_proto_builder",
+        ":topology_options_network_config_builder_cc_proto",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -142,7 +153,7 @@ cc_library(
     hdrs = ["unidirectional_butterfly_options_proto_builder.h"],
     deps = [
         ":topology_options_network_config_builder_cc_proto",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -150,9 +161,10 @@ cc_test(
     name = "unidirectional_butterfly_options_proto_builder_test",
     srcs = ["unidirectional_butterfly_options_proto_builder_test.cc"],
     deps = [
+        ":topology_options_network_config_builder_cc_proto",
         ":unidirectional_butterfly_options_proto_builder",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -162,7 +174,7 @@ cc_library(
     hdrs = ["bidirectional_butterfly_options_proto_builder.h"],
     deps = [
         ":topology_options_network_config_builder_cc_proto",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -171,8 +183,9 @@ cc_test(
     srcs = ["bidirectional_butterfly_options_proto_builder_test.cc"],
     deps = [
         ":bidirectional_butterfly_options_proto_builder",
+        ":topology_options_network_config_builder_cc_proto",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -184,7 +197,7 @@ cc_library(
         ":bidirectional_butterfly_options_proto_builder",
         ":topology_options_network_config_builder_cc_proto",
         ":unidirectional_butterfly_options_proto_builder",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -194,9 +207,10 @@ cc_test(
     deps = [
         ":bidirectional_butterfly_options_proto_builder",
         ":butterfly_options_proto_builder",
+        ":topology_options_network_config_builder_cc_proto",
         ":unidirectional_butterfly_options_proto_builder",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -206,7 +220,7 @@ cc_library(
     hdrs = ["level_options_proto_builder.h"],
     deps = [
         ":topology_options_network_config_builder_cc_proto",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -215,8 +229,9 @@ cc_test(
     srcs = ["level_options_proto_builder_test.cc"],
     deps = [
         ":level_options_proto_builder",
+        ":topology_options_network_config_builder_cc_proto",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -226,7 +241,7 @@ cc_library(
     hdrs = ["unidirectional_tree_options_proto_builder.h"],
     deps = [
         ":topology_options_network_config_builder_cc_proto",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -234,9 +249,10 @@ cc_test(
     name = "unidirectional_tree_options_proto_builder_test",
     srcs = ["unidirectional_tree_options_proto_builder_test.cc"],
     deps = [
+        ":topology_options_network_config_builder_cc_proto",
         ":unidirectional_tree_options_proto_builder",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -246,7 +262,7 @@ cc_library(
     hdrs = ["bidirectional_tree_options_proto_builder.h"],
     deps = [
         ":topology_options_network_config_builder_cc_proto",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -255,8 +271,9 @@ cc_test(
     srcs = ["bidirectional_tree_options_proto_builder_test.cc"],
     deps = [
         ":bidirectional_tree_options_proto_builder",
+        ":topology_options_network_config_builder_cc_proto",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -269,8 +286,8 @@ cc_library(
         ":level_options_proto_builder",
         ":topology_options_network_config_builder_cc_proto",
         ":unidirectional_tree_options_proto_builder",
-        "@com_google_absl//absl/types:span",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -279,10 +296,12 @@ cc_test(
     srcs = ["tree_options_proto_builder_test.cc"],
     deps = [
         ":bidirectional_tree_options_proto_builder",
+        ":level_options_proto_builder",
+        ":topology_options_network_config_builder_cc_proto",
         ":tree_options_proto_builder",
         ":unidirectional_tree_options_proto_builder",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -293,7 +312,7 @@ cc_library(
     deps = [
         ":topology_endpoint_options_proto_builder",
         ":topology_options_network_config_builder_cc_proto",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -303,8 +322,9 @@ cc_test(
     deps = [
         ":fully_connected_options_proto_builder",
         ":topology_endpoint_options_proto_builder",
+        ":topology_options_network_config_builder_cc_proto",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -314,7 +334,7 @@ cc_library(
     hdrs = ["coordinate_options_proto_builder.h"],
     deps = [
         ":topology_options_network_config_builder_cc_proto",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -323,8 +343,9 @@ cc_test(
     srcs = ["coordinate_options_proto_builder_test.cc"],
     deps = [
         ":coordinate_options_proto_builder",
+        ":topology_options_network_config_builder_cc_proto",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -335,9 +356,7 @@ cc_library(
     deps = [
         ":coordinate_options_proto_builder",
         ":topology_options_network_config_builder_cc_proto",
-        "@com_google_absl//absl/strings",
-        "//xls/common:proto_adaptor_utils",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -347,8 +366,9 @@ cc_test(
     deps = [
         ":coordinate_options_proto_builder",
         ":node_options_proto_builder",
+        ":topology_options_network_config_builder_cc_proto",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -358,9 +378,7 @@ cc_library(
     hdrs = ["channel_options_proto_builder.h"],
     deps = [
         ":topology_options_network_config_builder_cc_proto",
-        "@com_google_absl//absl/strings",
-        "//xls/common:proto_adaptor_utils",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -369,8 +387,9 @@ cc_test(
     srcs = ["channel_options_proto_builder_test.cc"],
     deps = [
         ":channel_options_proto_builder",
+        ":topology_options_network_config_builder_cc_proto",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -382,7 +401,7 @@ cc_library(
         ":channel_options_proto_builder",
         ":node_options_proto_builder",
         ":topology_options_network_config_builder_cc_proto",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -393,8 +412,9 @@ cc_test(
         ":channel_options_proto_builder",
         ":custom_topology_options_proto_builder",
         ":node_options_proto_builder",
+        ":topology_options_network_config_builder_cc_proto",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -403,8 +423,8 @@ cc_library(
     srcs = ["network_component_port.cc"],
     hdrs = ["network_component_port.h"],
     deps = [
-        "@com_google_absl//absl/container:flat_hash_set",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -416,7 +436,7 @@ cc_test(
         ":network_component_port",
         ":network_view",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -426,10 +446,11 @@ cc_library(
     hdrs = ["network_component.h"],
     deps = [
         ":network_component_port",
-        "@com_google_absl//absl/status",
         "//xls/common:iterator_range",
-        "//xls/common/logging",
         "//xls/ir:unwrapping_iterator",
+        "@abseil-cpp//absl/log:die_if_null",
+        "@abseil-cpp//absl/memory",
+        "@abseil-cpp//absl/status",
     ],
 )
 
@@ -438,9 +459,10 @@ cc_test(
     srcs = ["network_component_test.cc"],
     deps = [
         ":fake_network_component",
+        ":network_component_port",
         ":network_view",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -450,7 +472,7 @@ cc_library(
     hdrs = ["network_connection.h"],
     deps = [
         ":network_component_port",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -463,7 +485,7 @@ cc_test(
         ":network_connection",
         ":network_view",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -474,6 +496,9 @@ cc_library(
     deps = [
         ":network_component",
         ":network_connection",
+        "//xls/common:iterator_range",
+        "//xls/ir:unwrapping_iterator",
+        "@abseil-cpp//absl/memory",
     ],
 )
 
@@ -482,9 +507,10 @@ cc_test(
     srcs = ["network_view_test.cc"],
     deps = [
         ":fake_network_component",
+        ":network_connection",
         ":network_view",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -494,6 +520,7 @@ cc_library(
     hdrs = ["fake_network_component.h"],
     deps = [
         ":network_component",
+        "@abseil-cpp//absl/status",
     ],
 )
 
@@ -504,10 +531,11 @@ cc_library(
     deps = [
         ":network_component_port",
         ":network_connection",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/types:span",
-        "//xls/common/logging",
         "//xls/common/status:ret_check",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -521,7 +549,7 @@ cc_test(
         ":network_view",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -533,10 +561,10 @@ cc_library(
         ":network_component",
         ":network_component_port_utils",
         ":network_connection",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/status",
         "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
     ],
 )
 
@@ -545,11 +573,13 @@ cc_test(
     srcs = ["network_component_utils_test.cc"],
     deps = [
         ":fake_network_component",
+        ":network_component_port",
         ":network_component_utils",
         ":network_view",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@googletest//:gtest",
     ],
 )
 
@@ -560,7 +590,7 @@ cc_library(
     deps = [
         ":network_component_port",
         ":network_connection",
-        "@com_google_absl//absl/status",
+        "@abseil-cpp//absl/status",
     ],
 )
 
@@ -569,11 +599,14 @@ cc_test(
     srcs = ["network_connection_utils_test.cc"],
     deps = [
         ":fake_network_component",
+        ":network_component",
+        ":network_component_port",
         ":network_connection_utils",
         ":network_view",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@googletest//:gtest",
     ],
 )
 
@@ -585,8 +618,8 @@ cc_library(
         ":network_component_utils",
         ":network_connection_utils",
         ":network_view",
-        "@com_google_absl//absl/status",
         "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/status",
     ],
 )
 
@@ -598,7 +631,7 @@ cc_test(
         ":network_view_utils",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -607,9 +640,9 @@ cc_library(
     srcs = ["arbitrary_base_number.cc"],
     hdrs = ["arbitrary_base_number.h"],
     deps = [
-        "@com_google_absl//absl/status:statusor",
-        "//xls/common/logging",
         "//xls/ir:bits",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
     ],
 )
 
@@ -620,7 +653,9 @@ cc_test(
         ":arbitrary_base_number",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@googletest//:gtest",
     ],
 )
 
@@ -629,8 +664,9 @@ cc_library(
     srcs = ["dimension_bounds.cc"],
     hdrs = ["dimension_bounds.h"],
     deps = [
-        "@com_google_absl//absl/types:span",
         "//xls/ir:bits",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -640,7 +676,7 @@ cc_test(
     deps = [
         ":dimension_bounds",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -650,12 +686,10 @@ cc_library(
     hdrs = ["coordinate.h"],
     deps = [
         ":dimension_bounds",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/types:span",
-        "//xls/common/status:status_macros",
         "//xls/data_structures:inline_bitmap",
         "//xls/ir:bits",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -664,8 +698,10 @@ cc_test(
     srcs = ["coordinate_test.cc"],
     deps = [
         ":coordinate",
+        ":dimension_bounds",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "//xls/data_structures:inline_bitmap",
+        "@googletest//:gtest",
     ],
 )
 
@@ -677,8 +713,9 @@ cc_library(
     deps = [
         ":coordinate",
         ":dimension_bounds",
-        "@com_google_absl//absl/container:inlined_vector",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/container:inlined_vector",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -686,9 +723,11 @@ cc_test(
     name = "flattened_multi_dimensional_array_test",
     srcs = ["flattened_multi_dimensional_array_test.cc"],
     deps = [
+        ":coordinate",
+        ":dimension_bounds",
         ":flattened_multi_dimensional_array",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -702,7 +741,7 @@ cc_library(
     deps = [
         ":coordinate",
         ":network_component",
-        "@com_google_absl//absl/status",
+        "@abseil-cpp//absl/status",
     ],
 )
 
@@ -710,10 +749,11 @@ cc_test(
     name = "network_topology_component_test",
     srcs = ["network_topology_component_test.cc"],
     deps = [
+        ":coordinate",
         ":network_topology_component",
         ":network_topology_view",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -722,11 +762,13 @@ cc_library(
     srcs = ["network_topology_view.cc"],
     hdrs = ["network_topology_view.h"],
     deps = [
+        ":network_component",
+        ":network_component_port",
         ":network_topology_component",
         ":network_view",
-        ":network_view_utils",
-        "@com_google_absl//absl/status:statusor",
         "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
     ],
 )
 
@@ -734,9 +776,10 @@ cc_test(
     name = "network_topology_view_test",
     srcs = ["network_topology_view_test.cc"],
     deps = [
+        ":network_component",
         ":network_topology_view",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )

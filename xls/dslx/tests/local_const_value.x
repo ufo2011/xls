@@ -12,12 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-fn f() -> u32[4] {
-  const FOO = u32:4;
-  u32[FOO]:[0, ...]
+fn main() -> u32[4] {
+    const FOO = u32:4;
+    u32[FOO]:[0, ...]
 }
 
-#![test]
-fn f_test() {
-  assert_eq(u32[4]:[0, ...], f())
-}
+#[test]
+fn main_test() { assert_eq(u32[4]:[0, ...], main()) }

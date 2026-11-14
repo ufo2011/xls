@@ -14,9 +14,19 @@
 
 #include "xls/noc/config/network_config_proto_builder.h"
 
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "xls/common/status/matchers.h"
+#include "xls/noc/config/link_config_proto_builder.h"
+#include "xls/noc/config/network_config.pb.h"
+#include "xls/noc/config/router_config_proto_builder.h"
+#include "xls/noc/config/virtual_channel_config_proto_builder.h"
 
 namespace xls::noc {
 
@@ -35,7 +45,7 @@ TEST(NetworkConfigBuilderTest, FieldValuesEmptyNetwork) {
 
 // Test the field values of a network.
 TEST(NetworkConfigBuilderTest, FieldValues) {
-  constexpr absl::string_view kName = "Test";
+  constexpr std::string_view kName = "Test";
   NetworkConfigProtoBuilder builder(kName);
   builder.WithDescription(kName);
   builder.WithPort(kName);
@@ -68,7 +78,7 @@ TEST(NetworkConfigBuilderTest, LinkDefaultPhitBitWidthField) {
   link_builder0.WithPhitBitWidth(kNonDefault);
   builder.SetDefaultLinkPhitBitWidth(kDefault);
   builder.WithLink("Link1");
-  builder.SetDefaultLinkPhitBitWidth(absl::nullopt);
+  builder.SetDefaultLinkPhitBitWidth(std::nullopt);
   LinkConfigProtoBuilder link_builder2 = builder.WithLink("Link2");
   link_builder2.WithPhitBitWidth(kNonDefault);
 
@@ -90,7 +100,7 @@ TEST(NetworkConfigBuilderTest, LinkDefaultSourceSinkPipelineStageField) {
   link_builder0.WithSourceSinkPipelineStage(kNonDefault);
   builder.SetDefaultLinkSourceSinkPipelineStage(kDefault);
   builder.WithLink("Link1");
-  builder.SetDefaultLinkPhitBitWidth(absl::nullopt);
+  builder.SetDefaultLinkPhitBitWidth(std::nullopt);
   LinkConfigProtoBuilder link_builder2 = builder.WithLink("Link2");
   link_builder2.WithSourceSinkPipelineStage(kNonDefault);
 
@@ -112,7 +122,7 @@ TEST(NetworkConfigBuilderTest, LinkDefaultSinkSourcePipelineStageField) {
   link_builder0.WithSinkSourcePipelineStage(kNonDefault);
   builder.SetDefaultLinkSinkSourcePipelineStage(kDefault);
   builder.WithLink("Link1");
-  builder.SetDefaultLinkPhitBitWidth(absl::nullopt);
+  builder.SetDefaultLinkPhitBitWidth(std::nullopt);
   LinkConfigProtoBuilder link_builder2 = builder.WithLink("Link2");
   link_builder2.WithSinkSourcePipelineStage(kNonDefault);
 
@@ -135,7 +145,7 @@ TEST(NetworkConfigBuilderTest, VirtualChannelFlitBitWidthDefaultFields) {
   virtual_channel_builder0.WithFlitBitWidth(kNonDefault);
   builder.SetDefaultVirtualChannelFlitBitWidth(kDefault);
   builder.WithVirtualChannel("VC1");
-  builder.SetDefaultVirtualChannelFlitBitWidth(absl::nullopt);
+  builder.SetDefaultVirtualChannelFlitBitWidth(std::nullopt);
   VirtualChannelConfigProtoBuilder virtual_channel_builder2 =
       builder.WithVirtualChannel("VC2");
   virtual_channel_builder2.WithFlitBitWidth(kNonDefault);
@@ -159,7 +169,7 @@ TEST(NetworkConfigBuilderTest, VirtualChannelDepthDefaultFields) {
   virtual_channel_builder0.WithDepth(kNonDefault);
   builder.SetDefaultVirtualChannelDepth(kDefault);
   builder.WithVirtualChannel("VC1");
-  builder.SetDefaultVirtualChannelDepth(absl::nullopt);
+  builder.SetDefaultVirtualChannelDepth(std::nullopt);
   VirtualChannelConfigProtoBuilder virtual_channel_builder2 =
       builder.WithVirtualChannel("VC2");
   virtual_channel_builder2.WithDepth(kNonDefault);
@@ -189,7 +199,7 @@ TEST(NetworkConfigBuilderTest, SimpleNetwork) {
 
 // Test the default virtual channels for an input port.
 TEST(NetworkConfigBuilderTest, VirtualChannelsInputPortDefaultFields) {
-  constexpr absl::string_view kDefault = "Default";
+  constexpr std::string_view kDefault = "Default";
   const std::vector<std::string> kVirtualChannels = {std::string(kDefault)};
   NetworkConfigProtoBuilder builder("Test");
   RouterConfigProtoBuilder router_builder = builder.WithRouter("Test");
@@ -210,7 +220,7 @@ TEST(NetworkConfigBuilderTest, VirtualChannelsInputPortDefaultFields) {
 
 // Test the default virtual channels for an output port.
 TEST(NetworkConfigBuilderTest, VirtualChannelsOutputPortDefaultFields) {
-  constexpr absl::string_view kDefault = "Default";
+  constexpr std::string_view kDefault = "Default";
   const std::vector<std::string> kVirtualChannels = {std::string(kDefault)};
   NetworkConfigProtoBuilder builder("Test");
   RouterConfigProtoBuilder router_builder = builder.WithRouter("Test");

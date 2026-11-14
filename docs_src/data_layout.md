@@ -14,13 +14,13 @@ the ultimate container of actual data for any XLS IR type: tuples and arrays may
 be contain any number of tuple, array, or bits types, but whatever the layout of
 the type tree, all leaf nodes are Bits. When accessing the underlying storage of
 a `Bits` via the `ToBytes()` member function, the results are returned in a
-big-endian layout, i.e, with the most-significant data elements stored in the
-lowest addressible location. For example, the 32-bit value 12,345,678
+little-endian layout, i.e, with the least-significant data elements stored in
+the lowest addressable location. For example, the 32-bit value 12,345,678
 (0xBC614E), would be returned as:
 
 ```
 High  <--  Low
-0x 4E 61 BC 00
+0x 00 BC 61 4E
 ```
 
 ## Host data layout
@@ -39,21 +39,22 @@ will need to be byte-swapped before ingestion.
 
 For Value or unpacked view input, this swapping is handled automatically, in
 `LlvmIrRuntime::PackArgs()` (via `LlvmIrRuntime::BlitValueToBuffer()`) - and the
-__un__swapping is also automatically performed in `LlvmIrRuntime::UnpackBuffer()`.
-Thus, for these uses, no special action is required of the user.
+**un**swapping is also automatically performed in
+`LlvmIrRuntime::UnpackBuffer()`. Thus, for these uses, no special action is
+required of the user.
 
 ## Packed views
 
 *However*, this is not the case for use of packed views. The motivating use case
 for packed views is to allow users to map native types directly into JIT-usable
-values - for example, to use an IEEE float32 (e.g., a C `float`) _directly_,
+values - for example, to use an IEEE float32 (e.g., a C `float`) *directly*,
 without needing to be exploded into a `bits[1]` for the sign, a `bits[8]` for
-the exponent, and a `bits[23]` for the significand.
+the exponent, and a `bits[23]` for the fractional part.
 
 When creating a packed view from a C `float`, no special action is needed - that
 `float` is in native host layout, which is the layout used by the JIT. If,
 however, data is coming from XLS (perhaps a `float` converted into a Value,
-manipulated in some way, then passed into the JIT), then the _user_ must un-swap
+manipulated in some way, then passed into the JIT), then the *user* must un-swap
 the bits back to native layout. This is because the JIT has no way of knowing
 the provenance of that data (if it's from a native type or XLS), so it's up to
 the provider of that data to ensure proper layout.
@@ -81,7 +82,7 @@ doesn't directly correspond to in-memory data layout.)
 
 Be aware of this layout when accessing elements in a PackedTupleView. In the
 float32 above, accessing element 0 yields the sign bit (the most significant bit
-in memory), and accessing element 2 yields the significand (the least
+in memory), and accessing element 2 yields the fractional part (the least
 significant 23 bits in memory), as one would expect given the tuple type
 declaration order.
 
@@ -89,7 +90,8 @@ While this may initially seem confusing, it suffices to remember that
 PackedTupleView element declaration order is the "reverse" of the in-memory
 order; refer to
 [value_view_test.cc](https://github.com/google/xls/tree/main/xls/ir/value_view_test.cc)
-and [ir_jit_test.cc](https://github.com/google/xls/tree/main/xls/jit/ir_jit_test.cc) for
-test examples, or the [generated] fpadd_2x32_jit_wrapper.h/cc and
-[fpadd_2x32_test.cc](https://github.com/google/xls/tree/main/xls/modules/fpadd_2x32_test.cc)
+and
+[function_jit_test.cc](https://github.com/google/xls/tree/main/xls/jit/function_jit_test.cc)
+for test examples, or the [generated] float32_add_jit_wrapper.h/cc and
+[float32_add_test.cc](https://github.com/google/xls/tree/main/xls/dslx/stdlib/test/float32_add_test.cc)
 for practical usage.

@@ -1,0 +1,1942 @@
+// Copyright 2022 The XLS Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+#include "xls/dslx/frontend/ast_cloner.h"
+
+#include <memory>
+#include <optional>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "absl/base/casts.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/functional/any_invocable.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "absl/types/span.h"
+#include "absl/types/variant.h"
+#include "xls/common/status/ret_check.h"
+#include "xls/common/status/status_macros.h"
+#include "xls/common/visitor.h"
+#include "xls/dslx/frontend/ast.h"
+#include "xls/dslx/frontend/ast_utils.h"
+#include "xls/dslx/frontend/module.h"
+#include "xls/dslx/frontend/pos.h"
+#include "xls/dslx/frontend/proc.h"
+#include "xls/ir/format_strings.h"
+
+namespace xls::dslx {
+namespace {
+
+class AstCloner : public AstNodeVisitor {
+ public:
+  explicit AstCloner(std::optional<Module*> module, CloneReplacer replacer)
+      : module_(module), replacer_(std::move(replacer)) {}
+
+  Module* module(const AstNode* n) const {
+    return module_.has_value() ? *module_ : n->owner();
+  }
+
+  PatternTree ClonePattern(const PatternTree& pattern) const {
+    return absl::visit(
+        [&](auto* node) -> PatternTree {
+          return absl::down_cast<decltype(node)>(old_to_new_.at(node));
+        },
+        pattern);
+  }
+
+  absl::Status HandleArray(const Array* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::vector<Expr*> new_members;
+    new_members.reserve(n->members().size());
+    for (const Expr* old_member : n->members()) {
+      new_members.push_back(absl::down_cast<Expr*>(old_to_new_.at(old_member)));
+    }
+
+    Array* new_array = module(n)->Make<Array>(
+        n->span(), new_members, n->has_ellipsis(), n->in_parens());
+    if (n->type_annotation() != nullptr) {
+      new_array->set_type_annotation(absl::down_cast<TypeAnnotation*>(
+          old_to_new_.at(n->type_annotation())));
+    }
+    old_to_new_[n] = new_array;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleArrayTypeAnnotation(
+      const ArrayTypeAnnotation* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    old_to_new_[n] = module(n)->Make<ArrayTypeAnnotation>(
+        n->span(),
+        absl::down_cast<TypeAnnotation*>(old_to_new_.at(n->element_type())),
+        absl::down_cast<Expr*>(old_to_new_.at(n->dim())), n->dim_is_min());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleAttribute(const Attribute* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    old_to_new_[n] = module(n)->Make<Attribute>(*n->GetSpan(), n->GetArgSpan(),
+                                                n->attribute_data());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleSelfTypeAnnotation(const SelfTypeAnnotation* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    if (n->struct_ref() && !old_to_new_.contains(n->struct_ref())) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->struct_ref()));
+    }
+    TypeAnnotation* new_struct_ref =
+        n->struct_ref()
+            ? absl::down_cast<TypeAnnotation*>(old_to_new_.at(n->struct_ref()))
+            : nullptr;
+    old_to_new_[n] = module(n)->Make<SelfTypeAnnotation>(
+        n->span(), n->explicit_type(), new_struct_ref);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleAttr(const Attr* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    // We must've seen the NameDef here, so we don't need to visit it.
+    old_to_new_[n] = module(n)->Make<Attr>(
+        n->span(), absl::down_cast<Expr*>(old_to_new_.at(n->lhs())),
+        std::string{n->attr()}, n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleBinop(const Binop* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    old_to_new_[n] =
+        module(n)->Make<Binop>(n->span(), n->binop_kind(),
+                               absl::down_cast<Expr*>(old_to_new_.at(n->lhs())),
+                               absl::down_cast<Expr*>(old_to_new_.at(n->rhs())),
+                               n->op_span(), n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleStatementBlock(const StatementBlock* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    std::vector<Statement*> new_statements;
+    new_statements.reserve(n->statements().size());
+    for (Statement* old : n->statements()) {
+      if (!old_to_new_.contains(old)) {
+        return absl::InternalError(absl::StrCat(
+            "Statement not found in old_to_new_: ", old->ToString()));
+      }
+      auto new_stmt = old_to_new_.at(old);
+      if (new_stmt->kind() == AstNodeKind::kVerbatimNode) {
+        auto* verbatim = absl::down_cast<VerbatimNode*>(new_stmt);
+        if (verbatim->IsEmpty()) {
+          // Intentionally skip empty verbatim nodes.
+          continue;
+        }
+        new_statements.push_back(module(n)->Make<Statement>(verbatim));
+      } else {
+        new_statements.push_back(absl::down_cast<Statement*>(new_stmt));
+      }
+    }
+    old_to_new_[n] =
+        module(n)->Make<StatementBlock>(n->span(), std::move(new_statements),
+                                        n->trailing_semi(), n->has_braces());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleConstAssert(const ConstAssert* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    old_to_new_[n] = module(n)->Make<ConstAssert>(
+        n->span(), absl::down_cast<Expr*>(old_to_new_.at(n->arg())));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleStatement(const Statement* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    XLS_ASSIGN_OR_RETURN(
+        auto new_wrapped,
+        Statement::NodeToWrapped(old_to_new_.at(ToAstNode(n->wrapped()))));
+    old_to_new_[n] = module(n)->Make<Statement>(new_wrapped);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleBuiltinNameDef(const BuiltinNameDef* n) override {
+    if (!old_to_new_.contains(n)) {
+      old_to_new_[n] = module(n)->GetOrCreateBuiltinNameDef(n->identifier());
+    }
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleBuiltinTypeAnnotation(
+      const BuiltinTypeAnnotation* n) override {
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->builtin_name_def()));
+    old_to_new_[n] = module(n)->Make<BuiltinTypeAnnotation>(
+        n->span(), n->builtin_type(),
+        absl::down_cast<BuiltinNameDef*>(
+            old_to_new_.at(n->builtin_name_def())));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleCast(const Cast* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    old_to_new_[n] = module(n)->Make<Cast>(
+        n->span(), absl::down_cast<Expr*>(old_to_new_.at(n->expr())),
+        absl::down_cast<TypeAnnotation*>(old_to_new_.at(n->type_annotation())),
+        n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleChannelDecl(const ChannelDecl* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::optional<std::vector<Expr*>> new_dims;
+    if (n->dims().has_value()) {
+      std::vector<Expr*> old_dims_vector = n->dims().value();
+      std::vector<Expr*> new_dims_vector;
+      new_dims_vector.reserve(old_dims_vector.size());
+      for (const Expr* expr : old_dims_vector) {
+        XLS_RETURN_IF_ERROR(ReplaceOrVisit(expr));
+        AstNode* val = old_to_new_.at(expr);
+        new_dims_vector.push_back(absl::down_cast<Expr*>(val));
+      }
+      new_dims = std::move(new_dims_vector);
+    }
+
+    ChannelDeclMetadata new_metadata = n->metadata();
+    if (n->fifo_depth().has_value()) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->fifo_depth().value()));
+      new_metadata =
+          absl::down_cast<Expr*>(old_to_new_.at(n->fifo_depth().value()));
+    }
+
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->type()));
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(&n->channel_name_expr()));
+    old_to_new_[n] = module(n)->Make<ChannelDecl>(
+        n->span(), absl::down_cast<TypeAnnotation*>(old_to_new_.at(n->type())),
+        new_dims, new_metadata,
+        *absl::down_cast<Expr*>(old_to_new_.at(&n->channel_name_expr())),
+        n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleChannelTypeAnnotation(
+      const ChannelTypeAnnotation* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::optional<std::vector<Expr*>> new_dims;
+    if (n->dims().has_value()) {
+      std::vector<Expr*> old_dims_vector = n->dims().value();
+      std::vector<Expr*> new_dims_vector;
+      new_dims_vector.reserve(old_dims_vector.size());
+      for (const Expr* expr : old_dims_vector) {
+        new_dims_vector.push_back(absl::down_cast<Expr*>(old_to_new_.at(expr)));
+      }
+      new_dims = new_dims_vector;
+    }
+
+    old_to_new_[n] = module(n)->Make<ChannelTypeAnnotation>(
+        n->span(), n->direction(),
+        absl::down_cast<TypeAnnotation*>(old_to_new_.at(n->payload())),
+        new_dims);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleColonRef(const ColonRef* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    ColonRef::Subject new_subject = absl::visit(
+        Visitor{[&](NameRef* name_ref) -> ColonRef::Subject {
+                  AstNode* new_node = old_to_new_.at(name_ref);
+                  // Do an integrity check that the NameRef variant indeed is
+                  // holding a NameRef node.
+                  CHECK_EQ(new_node->kind(), AstNodeKind::kNameRef);
+                  return absl::down_cast<NameRef*>(new_node);
+                },
+                [&](ColonRef* colon_ref) -> ColonRef::Subject {
+                  return absl::down_cast<ColonRef*>(old_to_new_.at(colon_ref));
+                },
+                [&](TypeVariableTypeAnnotation* tvta) -> ColonRef::Subject {
+                  TypeAnnotation* new_node =
+                      absl::down_cast<TypeAnnotation*>(old_to_new_.at(tvta));
+                  if (new_node->IsAnnotation<TypeRefTypeAnnotation>()) {
+                    return absl::down_cast<TypeRefTypeAnnotation*>(new_node);
+                  }
+                  return absl::down_cast<TypeVariableTypeAnnotation*>(new_node);
+                },
+                [&](TypeRefTypeAnnotation* type_ref) -> ColonRef::Subject {
+                  return absl::down_cast<TypeRefTypeAnnotation*>(
+                      old_to_new_.at(type_ref));
+                },
+                [&](SelfTypeAnnotation* self_type) -> ColonRef::Subject {
+                  TypeAnnotation* new_node = absl::down_cast<TypeAnnotation*>(
+                      old_to_new_.at(self_type));
+                  if (new_node->IsAnnotation<TypeRefTypeAnnotation>()) {
+                    return absl::down_cast<TypeRefTypeAnnotation*>(new_node);
+                  }
+                  return absl::down_cast<SelfTypeAnnotation*>(new_node);
+                }},
+        n->subject());
+
+    old_to_new_[n] = module(n)->Make<ColonRef>(n->span(), new_subject,
+                                               n->attr(), n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleConstantDef(const ConstantDef* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    TypeAnnotation* new_type_annotation = nullptr;
+    if (n->type_annotation() != nullptr) {
+      new_type_annotation = absl::down_cast<TypeAnnotation*>(
+          old_to_new_.at(n->type_annotation()));
+    }
+    NameDef* new_name_def =
+        absl::down_cast<NameDef*>(old_to_new_.at(n->name_def()));
+    ConstantDef* new_constant = module(n)->Make<ConstantDef>(
+        n->span(), new_name_def, new_type_annotation,
+        absl::down_cast<Expr*>(old_to_new_.at(n->value())), n->is_public());
+    new_name_def->set_definer(new_constant);
+    old_to_new_[n] = new_constant;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleConstMatchTypeAnnotation(
+      const ConstMatchTypeAnnotation* n) override {
+    std::vector<TypeAnnotation*> members;
+    for (const AstNode* member : n->GetChildren(/*want_types=*/false)) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(member));
+      members.push_back(absl::down_cast<TypeAnnotation*>(old_to_new_[member]));
+    }
+
+    old_to_new_[n] = module(n)->Make<ConstMatchTypeAnnotation>(
+        n->span(), std::move(members));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleSumVariantPayloadPattern(
+      const SumVariantPayloadPattern* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    old_to_new_[n] = module(n)->Make<SumVariantPayloadPattern>(
+        n->span(),
+        absl::down_cast<ColonRef*>(old_to_new_.at(n->constructor_ref())),
+        ClonePattern(n->payload()));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleEnumDef(const EnumDef* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    NameDef* new_name_def =
+        absl::down_cast<NameDef*>(old_to_new_.at(n->name_def()));
+    TypeAnnotation* new_type_annotation = nullptr;
+    if (n->type_annotation() != nullptr) {
+      new_type_annotation = absl::down_cast<TypeAnnotation*>(
+          old_to_new_.at(n->type_annotation()));
+    }
+    std::vector<EnumMember> new_values;
+    for (const auto& member : n->values()) {
+      new_values.push_back(EnumMember{
+          .name_def =
+              absl::down_cast<NameDef*>(old_to_new_.at(member.name_def)),
+          .value = absl::down_cast<Expr*>(old_to_new_.at(member.value))});
+    }
+
+    EnumDef* new_enum_def =
+        module(n)->Make<EnumDef>(n->span(), new_name_def, new_type_annotation,
+                                 new_values, n->is_public());
+    new_name_def->set_definer(new_enum_def);
+    if (n->extern_type_name().has_value()) {
+      new_enum_def->set_extern_type_name(*n->extern_type_name());
+    }
+
+    old_to_new_[n] = new_enum_def;
+
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleSumVariant(const SumVariant* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    SumVariant::Payload payload;
+    if (n->is_tuple()) {
+      payload = absl::down_cast<TupleTypeAnnotation*>(
+          old_to_new_.at(n->tuple_payload()));
+    } else if (n->is_struct()) {
+      std::vector<StructMemberNode*> members;
+      members.reserve(n->struct_members().size());
+      for (const StructMemberNode* member : n->struct_members()) {
+        members.push_back(
+            absl::down_cast<StructMemberNode*>(old_to_new_.at(member)));
+      }
+      payload = NamedFields(std::move(members));
+    }
+
+    std::optional<Expr*> discriminant;
+    if (n->discriminant().has_value()) {
+      discriminant = absl::down_cast<Expr*>(old_to_new_.at(*n->discriminant()));
+    }
+
+    old_to_new_[n] = module(n)->Make<SumVariant>(
+        n->span(), absl::down_cast<NameDef*>(old_to_new_.at(n->name_def())),
+        std::move(payload), discriminant, n->payload_span(),
+        n->discriminant_equals_span());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleSumDef(const SumDef* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::vector<ParametricBinding*> new_parametric_bindings;
+    new_parametric_bindings.reserve(n->parametric_bindings().size());
+    for (const ParametricBinding* binding : n->parametric_bindings()) {
+      new_parametric_bindings.push_back(
+          absl::down_cast<ParametricBinding*>(old_to_new_.at(binding)));
+    }
+
+    std::vector<SumVariant*> new_variants;
+    new_variants.reserve(n->variants().size());
+    for (const SumVariant* variant : n->variants()) {
+      new_variants.push_back(
+          absl::down_cast<SumVariant*>(old_to_new_.at(variant)));
+    }
+
+    auto* new_name_def =
+        absl::down_cast<NameDef*>(old_to_new_.at(n->name_def()));
+    auto* new_sum_def = module(n)->Make<SumDef>(
+        n->span(), new_name_def, std::move(new_parametric_bindings),
+        std::move(new_variants), n->is_public(),
+        n->tag_type_annotation() == nullptr
+            ? nullptr
+            : absl::down_cast<TypeAnnotation*>(
+                  old_to_new_.at(n->tag_type_annotation())));
+    if (n->extern_type_name().has_value()) {
+      new_sum_def->set_extern_type_name(*n->extern_type_name());
+    }
+    new_name_def->set_definer(new_sum_def);
+    old_to_new_[n] = new_sum_def;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleFor(const For* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(ToAstNode(n->pattern())));
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->type_annotation()));
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->iterable()));
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->body()));
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->init()));
+
+    auto new_type_annotation = n->type_annotation() == nullptr
+                                   ? nullptr
+                                   : absl::down_cast<TypeAnnotation*>(
+                                         old_to_new_.at(n->type_annotation()));
+
+    old_to_new_[n] = module(n)->Make<For>(
+        n->span(), ClonePattern(n->pattern()), new_type_annotation,
+        absl::down_cast<Expr*>(old_to_new_.at(n->iterable())),
+        absl::down_cast<StatementBlock*>(old_to_new_.at(n->body())),
+        absl::down_cast<Expr*>(old_to_new_.at(n->init())));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleFormatMacro(const FormatMacro* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::vector<Expr*> new_args;
+    new_args.reserve(n->args().size());
+    for (const Expr* arg : n->args()) {
+      new_args.push_back(absl::down_cast<Expr*>(old_to_new_.at(arg)));
+    }
+
+    std::optional<Expr*> new_verbosity;
+    if (n->verbosity().has_value()) {
+      new_verbosity = absl::down_cast<Expr*>(old_to_new_.at(*n->verbosity()));
+    }
+    std::optional<Expr*> new_condition;
+    if (n->condition().has_value()) {
+      new_condition = absl::down_cast<Expr*>(old_to_new_.at(*n->condition()));
+    }
+
+    old_to_new_[n] = module(n)->Make<FormatMacro>(
+        n->span(), n->macro(),
+        std::vector<FormatStep>(n->format().begin(), n->format().end()),
+        new_args, new_condition, new_verbosity);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleFunctionRef(const FunctionRef* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    old_to_new_[n] = module(n)->Make<FunctionRef>(
+        n->span(), absl::down_cast<Expr*>(old_to_new_.at(n->callee())),
+        CloneParametrics(n->explicit_parametrics()));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleZeroMacro(const ZeroMacro* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    ExprOrType new_eot = ToExprOrType(old_to_new_.at(ToAstNode(n->type())));
+    old_to_new_[n] =
+        module(n)->Make<ZeroMacro>(n->span(), new_eot, n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleAllOnesMacro(const AllOnesMacro* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    ExprOrType new_eot = ToExprOrType(old_to_new_.at(ToAstNode(n->type())));
+    old_to_new_[n] =
+        module(n)->Make<AllOnesMacro>(n->span(), new_eot, n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleFunction(const Function* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    XLS_ASSIGN_OR_RETURN(
+        NameDef * new_name_def,
+        CastIfNotVerbatim<NameDef*>(old_to_new_.at(n->name_def())));
+
+    std::vector<ParametricBinding*> new_parametric_bindings;
+    new_parametric_bindings.reserve(n->parametric_bindings().size());
+    for (const ParametricBinding* pb : n->parametric_bindings()) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(pb));
+      new_parametric_bindings.push_back(
+          absl::down_cast<ParametricBinding*>(old_to_new_.at(pb)));
+    }
+
+    std::vector<Param*> new_params;
+    new_params.reserve(n->params().size());
+    for (const auto* param : n->params()) {
+      new_params.push_back(absl::down_cast<Param*>(old_to_new_.at(param)));
+    }
+
+    TypeAnnotation* new_return_type = nullptr;
+    if (n->return_type() != nullptr) {
+      new_return_type =
+          absl::down_cast<TypeAnnotation*>(old_to_new_.at(n->return_type()));
+    }
+    XLS_ASSIGN_OR_RETURN(
+        StatementBlock * new_body,
+        CastIfNotVerbatim<StatementBlock*>(old_to_new_.at(n->body())));
+    auto new_function = module(n)->Make<Function>(
+        n->span(), new_name_def, new_parametric_bindings, new_params,
+        new_return_type, new_body, n->tag(), n->is_public(), n->IsStub());
+    new_function->set_test_utility(n->is_test_utility());
+    if (n->extern_verilog_module().has_value()) {
+      new_function->set_extern_verilog_module(*n->extern_verilog_module());
+    }
+    new_function->set_disable_format(n->disable_format());
+    new_function->set_compiler_derived(n->IsCompilerDerived());
+    if (n->tabulate_domains().has_value()) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(*n->tabulate_domains()));
+      new_function->set_tabulate_domains(
+          absl::down_cast<XlsTuple*>(old_to_new_.at(*n->tabulate_domains())));
+    }
+    old_to_new_[n] = new_function;
+    new_name_def->set_definer(old_to_new_.at(n));
+    if (n->impl().has_value()) {
+      Impl* new_impl = absl::down_cast<Impl*>(old_to_new_.at(*n->impl()));
+      new_function->set_impl(new_impl);
+    }
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleImport(const Import* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    NameDef* name_def = &n->name_def();
+    NameDef* new_name_def = absl::down_cast<NameDef*>(old_to_new_.at(name_def));
+    old_to_new_[n] = module(n)->Make<Import>(n->span(), n->subject(),
+                                             *new_name_def, n->alias());
+    new_name_def->set_definer(old_to_new_.at(name_def->definer()));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleUse(const Use* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    const UseTreeEntry* old_root = &n->root();
+    UseTreeEntry& new_root =
+        *absl::down_cast<UseTreeEntry*>(old_to_new_.at(old_root));
+    old_to_new_[n] = module(n)->Make<Use>(n->span(), new_root);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleUseTreeEntry(const UseTreeEntry* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    using PayloadT = std::variant<UseInteriorEntry, NameDef*>;
+    PayloadT new_payload = absl::visit(
+        Visitor{[&](const NameDef* name_def) -> PayloadT {
+                  return absl::down_cast<NameDef*>(old_to_new_.at(name_def));
+                },
+                [&](const UseInteriorEntry& interior) -> PayloadT {
+                  std::vector<UseTreeEntry*> new_subtrees;
+                  new_subtrees.reserve(interior.subtrees().size());
+                  for (UseTreeEntry* subtree : interior.subtrees()) {
+                    new_subtrees.push_back(absl::down_cast<UseTreeEntry*>(
+                        old_to_new_.at(subtree)));
+                  }
+                  return UseInteriorEntry{std::string{interior.identifier()},
+                                          std::move(new_subtrees)};
+                }},
+        n->payload());
+
+    UseTreeEntry* new_use_tree_entry =
+        module(n)->Make<UseTreeEntry>(std::move(new_payload), n->span());
+    old_to_new_[n] = new_use_tree_entry;
+    if (std::holds_alternative<NameDef*>(new_use_tree_entry->payload())) {
+      NameDef* leaf = std::get<NameDef*>(new_use_tree_entry->payload());
+      XLS_RET_CHECK(std::holds_alternative<NameDef*>(n->payload()));
+      NameDef* old_leaf = std::get<NameDef*>(n->payload());
+      leaf->set_definer(old_to_new_.at(old_leaf->definer()));
+    }
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleIndex(const Index* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    IndexRhs new_rhs = absl::visit(
+        Visitor{[&](auto* expr) -> IndexRhs {
+          return absl::down_cast<decltype(expr)>(old_to_new_.at(expr));
+        }},
+        n->rhs());
+
+    old_to_new_[n] = module(n)->Make<Index>(
+        n->span(), absl::down_cast<Expr*>(old_to_new_.at(n->lhs())), new_rhs,
+        n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleInvocation(const Invocation* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::vector<Expr*> new_args;
+    new_args.reserve(n->args().size());
+    for (const Expr* arg : n->args()) {
+      new_args.push_back(absl::down_cast<Expr*>(old_to_new_.at(arg)));
+    }
+    std::optional<Invocation*> new_originator = std::nullopt;
+    if (n->originating_invocation().has_value()) {
+      if (!old_to_new_.contains(*n->originating_invocation())) {
+        XLS_RETURN_IF_ERROR(ReplaceOrVisit(*n->originating_invocation()));
+      }
+      new_originator = absl::down_cast<Invocation*>(
+          old_to_new_.at(*n->originating_invocation()));
+    }
+
+    old_to_new_[n] = module(n)->Make<Invocation>(
+        n->span(), absl::down_cast<Expr*>(old_to_new_.at(n->callee())),
+        new_args, CloneParametrics(n->explicit_parametrics()), n->in_parens(),
+        new_originator);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleLambda(const Lambda* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    auto new_lambda = module(n)->Make<Lambda>(
+        n->span(), absl::down_cast<Function*>(old_to_new_.at(n->function())),
+        n->in_parens());
+    old_to_new_[n] = new_lambda;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleLet(const Let* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    TypeAnnotation* new_type = nullptr;
+    if (n->type_annotation() != nullptr) {
+      new_type = absl::down_cast<TypeAnnotation*>(
+          old_to_new_.at(n->type_annotation()));
+    }
+
+    old_to_new_[n] = module(n)->Make<Let>(
+        n->span(), ClonePattern(n->pattern()), new_type,
+        absl::down_cast<Expr*>(old_to_new_.at(n->rhs())), n->is_const());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleMatch(const Match* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::vector<MatchArm*> new_arms;
+    new_arms.reserve(n->arms().size());
+    for (const MatchArm* arm : n->arms()) {
+      new_arms.push_back(absl::down_cast<MatchArm*>(old_to_new_.at(arm)));
+    }
+
+    old_to_new_[n] = module(n)->Make<Match>(
+        n->span(), absl::down_cast<Expr*>(old_to_new_.at(n->matched())),
+        new_arms, n->in_parens(), n->IsConst());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleMatchArm(const MatchArm* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::vector<PatternTree> new_patterns;
+    new_patterns.reserve(n->patterns().size());
+    for (const PatternTree& pattern : n->patterns()) {
+      new_patterns.push_back(ClonePattern(pattern));
+    }
+
+    MatchArm* new_arm = module(n)->Make<MatchArm>(
+        n->span(), new_patterns,
+        absl::down_cast<Expr*>(old_to_new_.at(n->expr())));
+    for (const PatternTree& pattern : new_arm->patterns()) {
+      for (NameDef* name_def : GetPatternNameDefs(pattern)) {
+        name_def->set_definer(new_arm);
+      }
+    }
+    old_to_new_[n] = new_arm;
+
+    return absl::OkStatus();
+  }
+
+  // If `replacement` is a `VerbatimNode`, return it. Otherwise, return the
+  // `replacement` cast to the given type.
+  template <typename T>
+  static ModuleMember CastOrVerbatim(AstNode* replacement) {
+    if (replacement->kind() == AstNodeKind::kVerbatimNode) {
+      return absl::down_cast<VerbatimNode*>(replacement);
+    }
+    return absl::down_cast<T>(replacement);
+  }
+
+  absl::Status HandleModule(const Module* n) override {
+    source_module_ = n;
+    for (const ModuleMember member : n->top()) {
+      ModuleMember new_member;
+      XLS_RETURN_IF_ERROR(absl::visit(
+          Visitor{
+              [&](Function* old_member) -> absl::Status {
+                if (old_member->proc().has_value()) {
+                  XLS_RETURN_IF_ERROR(ReplaceOrVisit(*old_member->proc()));
+                }
+                XLS_RETURN_IF_ERROR(ReplaceOrVisit(old_member));
+                new_member =
+                    CastOrVerbatim<Function*>(old_to_new().at(old_member));
+                return absl::OkStatus();
+              },
+              [&](auto* old_member) -> absl::Status {
+                XLS_RETURN_IF_ERROR(ReplaceOrVisit(old_member));
+                new_member = CastOrVerbatim<decltype(old_member)>(
+                    old_to_new().at(old_member));
+                return absl::OkStatus();
+              },
+          },
+          member));
+      XLS_RETURN_IF_ERROR(
+          module(n)->AddTop(new_member, /*make_collision_error=*/nullptr));
+    }
+
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleNameDef(const NameDef* n) override {
+    // If the definer is a type annotation, ensure it has been cloned so
+    // we can set as the definer. Other definers should be skipped to avoid
+    // infinite loops (e.g. Function -> NameDef -> Function -> NameDef -> ...).
+    if (n->definer() != nullptr &&
+        n->definer()->kind() == AstNodeKind::kTypeAnnotation) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->definer()));
+    }
+    if (!old_to_new_.contains(n)) {
+      old_to_new_[n] = module(n)->Make<NameDef>(
+          n->span(), n->identifier(),
+          old_to_new_.contains(n->definer()) ? old_to_new_.at(n->definer())
+                                             : nullptr);
+    }
+
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleTuplePattern(const TuplePattern* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::vector<PatternTree> members;
+    members.reserve(n->members().size());
+    for (const PatternTree& member : n->members()) {
+      members.push_back(ClonePattern(member));
+    }
+    old_to_new_[n] =
+        module(n)->Make<TuplePattern>(n->span(), std::move(members));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleStructPattern(const StructPattern* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::vector<StructPattern::Field> fields;
+    fields.reserve(n->fields().size());
+    for (const auto& [name, pattern] : n->fields()) {
+      fields.push_back(std::make_pair(name, ClonePattern(pattern)));
+    }
+    old_to_new_[n] =
+        module(n)->Make<StructPattern>(n->span(), std::move(fields));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleNameRef(const NameRef* n) override {
+    AnyNameDef new_name_def;
+    if (std::holds_alternative<const NameDef*>(n->name_def())) {
+      const NameDef* old_def = std::get<const NameDef*>(n->name_def());
+      // A whole-module clone owns local definitions even when traversal reaches
+      // a reference first, e.g. a proc member used by its next function.
+      if (source_module_ != nullptr && old_def->owner() == source_module_ &&
+          !old_to_new_.contains(old_def)) {
+        XLS_RETURN_IF_ERROR(ReplaceOrVisit(old_def));
+      }
+      const auto it = old_to_new_.find(old_def);
+      if (it != old_to_new_.end()) {
+        new_name_def = absl::down_cast<NameDef*>(it->second);
+      } else {
+        new_name_def = old_def;
+      }
+    } else {
+      const BuiltinNameDef* old_def = std::get<BuiltinNameDef*>(n->name_def());
+      new_name_def =
+          module(n)->GetOrCreateBuiltinNameDef(old_def->identifier());
+    }
+    old_to_new_[n] = module(n)->Make<NameRef>(n->span(), n->identifier(),
+                                              new_name_def, n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleNumber(const Number* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    TypeAnnotation* new_type = nullptr;
+    if (n->type_annotation() != nullptr) {
+      new_type = absl::down_cast<TypeAnnotation*>(
+          old_to_new_.at(n->type_annotation()));
+    }
+    old_to_new_[n] = module(n)->Make<Number>(
+        n->span(), n->text(), n->number_kind(), new_type, n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleParam(const Param* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    NameDef* new_name_def =
+        absl::down_cast<NameDef*>(old_to_new_.at(n->name_def()));
+    Param* new_param = module(n)->Make<Param>(
+        new_name_def,
+        absl::down_cast<TypeAnnotation*>(old_to_new_.at(n->type_annotation())));
+    new_name_def->set_definer(new_param);
+    old_to_new_[n] = new_param;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleProcMember(const ProcMember* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    NameDef* new_name_def =
+        absl::down_cast<NameDef*>(old_to_new_.at(n->name_def()));
+    ProcMember* new_proc_member = module(n)->Make<ProcMember>(
+        new_name_def,
+        absl::down_cast<TypeAnnotation*>(old_to_new_.at(n->type_annotation())),
+        n->strictness(), n->flow_control());
+    new_name_def->set_definer(new_proc_member);
+    old_to_new_[n] = new_proc_member;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleParametricBinding(const ParametricBinding* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::optional<ExprOrType> new_default_expr_or_type;
+    if (n->default_expr_or_type().has_value()) {
+      AstNode* old_node = ToAstNode(*n->default_expr_or_type());
+      AstNode* new_node = old_to_new_.at(old_node);
+      new_default_expr_or_type = ToExprOrType(new_node);
+    }
+    old_to_new_[n] = module(n)->Make<ParametricBinding>(
+        absl::down_cast<NameDef*>(old_to_new_.at(n->name_def())),
+        absl::down_cast<TypeAnnotation*>(old_to_new_.at(n->type_annotation())),
+        new_default_expr_or_type);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleProc(const Proc* n) override {
+    if (old_to_new_.contains(n)) {
+      // If we've already cloned this proc, just return it.
+      return absl::OkStatus();
+    }
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->name_def()));
+
+    std::vector<ParametricBinding*> new_parametric_bindings;
+    new_parametric_bindings.reserve(n->parametric_bindings().size());
+    for (const ParametricBinding* pb : n->parametric_bindings()) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(pb));
+      new_parametric_bindings.push_back(
+          absl::down_cast<ParametricBinding*>(old_to_new_.at(pb)));
+    }
+
+    for (const ProcStmt* stmt : n->GetNonFunctionStmts()) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(ToAstNode(*stmt)));
+    }
+
+    std::vector<ProcMember*> new_members;
+    new_members.reserve(n->members().size());
+    for (const ProcMember* member : n->members()) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(member));
+      new_members.push_back(
+          absl::down_cast<ProcMember*>(old_to_new_.at(member)));
+    }
+
+    std::vector<ProcStmt> new_stmts;
+    new_stmts.reserve(n->stmts().size());
+    for (const ProcStmt& stmt : n->stmts()) {
+      AstNode* old_stmt_node = ToAstNode(stmt);
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(old_stmt_node));
+      XLS_ASSIGN_OR_RETURN(ProcStmt new_stmt,
+                           ToProcStmt(old_to_new_.at(old_stmt_node)));
+      new_stmts.push_back(new_stmt);
+    }
+
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(&n->config()));
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(&n->next()));
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(&n->init()));
+
+    NameDef* new_name_def =
+        absl::down_cast<NameDef*>(old_to_new_.at(n->name_def()));
+    ProcLikeBody new_body = {
+        .stmts = new_stmts,
+        .config = absl::down_cast<Function*>(old_to_new_.at(&n->config())),
+        .next = absl::down_cast<Function*>(old_to_new_.at(&n->next())),
+        .init = absl::down_cast<Function*>(old_to_new_.at(&n->init())),
+        .members = new_members,
+    };
+    Proc* p = module(n)->Make<Proc>(n->span(), n->body_span(), new_name_def,
+                                    new_parametric_bindings, new_body,
+                                    n->is_public());
+    new_name_def->set_definer(p);
+
+    // Set up the reverse links for the proc body. NOTE: this will change the
+    // behavior of ToString (for the better). Now, ToString will no longer
+    // include proc functions as top-level functions.
+    new_body.config->set_proc(p);
+    new_body.next->set_proc(p);
+    new_body.init->set_proc(p);
+
+    old_to_new_[n] = p;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleQuickCheck(const QuickCheck* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    old_to_new_[n] = module(n)->Make<QuickCheck>(
+        n->GetSpan().value(),
+        absl::down_cast<Function*>(old_to_new_.at(n->fn())), n->test_cases());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleRange(const Range* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    old_to_new_[n] = module(n)->Make<Range>(
+        n->span(), absl::down_cast<Expr*>(old_to_new_.at(n->start())),
+        n->inclusive_end(), absl::down_cast<Expr*>(old_to_new_.at(n->end())),
+        n->in_parens(), n->has_pattern_semantics());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleSlice(const Slice* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    Expr* new_start = n->start() == nullptr
+                          ? nullptr
+                          : absl::down_cast<Expr*>(old_to_new_.at(n->start()));
+    Expr* new_limit = n->limit() == nullptr
+                          ? nullptr
+                          : absl::down_cast<Expr*>(old_to_new_.at(n->limit()));
+
+    old_to_new_[n] =
+        module(n)->Make<Slice>(n->GetSpan().value(), new_start, new_limit);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleSpawn(const Spawn* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->callee()));
+    old_to_new_[n] = module(n)->Make<Spawn>(
+        n->span(), absl::down_cast<Expr*>(old_to_new_.at(n->callee())),
+        absl::down_cast<Invocation*>(old_to_new_.at(n->config())),
+        absl::down_cast<Invocation*>(old_to_new_.at(n->next())),
+        CloneParametrics(n->explicit_parametrics()));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleSplatStructInstance(
+      const SplatStructInstance* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    // Have to explicitly visit struct ref, since it's not a child.
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->struct_ref()));
+    TypeAnnotation* new_struct_ref =
+        absl::down_cast<TypeAnnotation*>(old_to_new_.at(n->struct_ref()));
+
+    const std::vector<std::pair<std::string, Expr*>>& old_members =
+        n->members();
+    std::vector<std::pair<std::string, Expr*>> new_members;
+    new_members.reserve(old_members.size());
+    for (const auto& member : old_members) {
+      new_members.push_back(std::make_pair(
+          member.first, absl::down_cast<Expr*>(old_to_new_.at(member.second))));
+    }
+
+    old_to_new_[n] = module(n)->Make<SplatStructInstance>(
+        n->span(), new_struct_ref, new_members,
+        absl::down_cast<Expr*>(old_to_new_.at(n->splatted())));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleString(const String* n) override {
+    old_to_new_[n] =
+        module(n)->Make<String>(n->span(), n->text(), n->in_parens());
+    return absl::OkStatus();
+  }
+
+  // If the node is a VerbatimNode, returns an error; otherwise, casts to the
+  // template type.
+  template <typename T>
+  static absl::StatusOr<T> CastIfNotVerbatim(AstNode* node) {
+    if (node->kind() == AstNodeKind::kVerbatimNode) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Cannot disable formatting here yet: ",
+                       absl::down_cast<VerbatimNode*>(node)->text()));
+    }
+    return absl::down_cast<T>(node);
+  }
+
+  // Helper function to clone a node of type `T` where `T` is a concrete
+  // subclass of `StructDefBase`.
+  template <typename T>
+  absl::Status HandleStructDefBaseInternal(const T* n) {
+    Module* m = module(n);
+
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->name_def()));
+    auto* new_name_def =
+        absl::down_cast<NameDef*>(old_to_new_.at(n->name_def()));
+
+    std::vector<ParametricBinding*> new_parametric_bindings;
+    new_parametric_bindings.reserve(n->parametric_bindings().size());
+    for (const auto* pb : n->parametric_bindings()) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(pb));
+      XLS_ASSIGN_OR_RETURN(
+          ParametricBinding * new_pb,
+          CastIfNotVerbatim<ParametricBinding*>(old_to_new_.at(pb)));
+      new_parametric_bindings.push_back(new_pb);
+    }
+
+    // Register the new `StructDef` before adding the members, in case it has
+    // members whose type contains a `SelfTypeAnnotation`. The cloning of the
+    // latter will require finding the new `StructDef`.
+    auto* new_struct_def =
+        m->Make<T>(n->span(), new_name_def, new_parametric_bindings,
+                   std::vector<StructMemberNode*>{}, n->is_public());
+    old_to_new_[n] = new_struct_def;
+
+    for (const StructMemberNode* member : n->members()) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(member->name_def()));
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(member->type()));
+      XLS_ASSIGN_OR_RETURN(
+          TypeAnnotation * new_type,
+          CastIfNotVerbatim<TypeAnnotation*>(old_to_new_.at(member->type())));
+      XLS_ASSIGN_OR_RETURN(
+          NameDef * new_name,
+          CastIfNotVerbatim<NameDef*>(old_to_new_.at(member->name_def())));
+      auto* new_member = m->Make<StructMemberNode>(
+          member->span(), new_name, member->colon_span(), new_type);
+      if (member->non_state_wrapped_type() != member->type()) {
+        XLS_RETURN_IF_ERROR(ReplaceOrVisit(member->non_state_wrapped_type()));
+        XLS_ASSIGN_OR_RETURN(TypeAnnotation * new_non_state_wrapped_type,
+                             CastIfNotVerbatim<TypeAnnotation*>(old_to_new_.at(
+                                 member->non_state_wrapped_type())));
+        new_member->set_non_state_wrapped_type(new_non_state_wrapped_type);
+      }
+      XLS_ASSIGN_OR_RETURN(std::vector<Attribute*> new_attributes,
+                           CloneAttributes(member->attributes()));
+      new_member->SetAttributes(new_attributes);
+      new_struct_def->AddMember(new_member);
+    }
+    new_struct_def->SetParentage();
+
+    if (n->impl().has_value()) {
+      if (!old_to_new_.contains(n->impl().value())) {
+        XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->impl().value()));
+      }
+      auto* new_impl =
+          absl::down_cast<Impl*>(old_to_new_.at(n->impl().value()));
+      new_struct_def->set_impl(new_impl);
+    }
+    new_name_def->set_definer(new_struct_def);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleStructDef(const StructDef* n) override {
+    absl::Status status = HandleStructDefBaseInternal(n);
+    if (status.ok()) {
+      AstNode* new_node = old_to_new_.at(n);
+      if (new_node->kind() == AstNodeKind::kStructDef) {
+        auto new_struct_def = absl::down_cast<StructDef*>(new_node);
+        if (n->extern_type_name().has_value()) {
+          new_struct_def->set_extern_type_name(*n->extern_type_name());
+        }
+        new_struct_def->set_is_domain_struct(n->is_domain_struct());
+        if (n->is_domain_struct()) {
+          // Generated domains refer back to the struct whose members determine
+          // the domain. It may appear later in the module's member order.
+          XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->name_def()->definer()));
+          new_struct_def->name_def()->set_definer(
+              old_to_new_.at(n->name_def()->definer()));
+        }
+      }
+    }
+    return status;
+  }
+
+  absl::Status HandleProcDef(const ProcDef* n) override {
+    return HandleStructDefBaseInternal(n);
+  }
+
+  absl::Status HandleImpl(const Impl* n) override {
+    // To avoid infinite loops between impl -> function -> struct -> impl, use a
+    // placeholder for children (members and struct def) and add afterward.
+    Impl* new_impl = module(n)->Make<Impl>(
+        n->span(), nullptr, std::vector<ImplMember>{}, n->is_public());
+    old_to_new_[n] = new_impl;
+    if (!old_to_new_.contains(n->struct_ref())) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->struct_ref()));
+    }
+    TypeAnnotation* new_struct_ref =
+        absl::down_cast<TypeAnnotation*>(old_to_new_.at(n->struct_ref()));
+    new_impl->set_struct_ref(new_struct_ref);
+    std::vector<ImplMember> new_members;
+    new_members.reserve(n->members().size());
+    for (const auto& member : n->members()) {
+      AstNode* member_node = ToAstNode(member);
+      if (!old_to_new_.contains(member_node)) {
+        XLS_RETURN_IF_ERROR(ReplaceOrVisit(member_node));
+      }
+      AstNode* new_node = old_to_new_.at(member_node);
+      if (new_node->kind() == AstNodeKind::kConstantDef) {
+        new_members.push_back(absl::down_cast<ConstantDef*>(new_node));
+      } else if (new_node->kind() == AstNodeKind::kFunction) {
+        new_members.push_back(absl::down_cast<Function*>(new_node));
+      } else if (new_node->kind() == AstNodeKind::kTypeAlias) {
+        new_members.push_back(absl::down_cast<TypeAlias*>(new_node));
+      } else {
+        new_members.push_back(absl::down_cast<VerbatimNode*>(new_node));
+      }
+    }
+    new_impl->set_members(new_members);
+    new_impl->SetParentage();
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleTrait(const Trait* n) override {
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->name_def()));
+    NameDef* new_name_def =
+        absl::down_cast<NameDef*>(old_to_new_[n->name_def()]);
+    std::vector<Function*> new_members;
+    new_members.reserve(n->members().size());
+    for (Function* member : n->members()) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(member));
+      new_members.push_back(absl::down_cast<Function*>(old_to_new_[member]));
+    }
+    old_to_new_[n] = module(n)->Make<Trait>(n->span(), new_name_def,
+                                            new_members, n->is_public());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleStructMemberNode(const StructMemberNode* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    StructMemberNode* new_struct_member = module(n)->Make<StructMemberNode>(
+        n->span(), absl::down_cast<NameDef*>(old_to_new_.at(n->name_def())),
+        n->colon_span(),
+        absl::down_cast<TypeAnnotation*>(old_to_new_.at(n->type())));
+    old_to_new_[n] = new_struct_member;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleStructInstance(const StructInstance* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    // Have to explicitly visit struct ref, since it's not a child.
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->struct_ref()));
+    TypeAnnotation* new_struct_ref =
+        absl::down_cast<TypeAnnotation*>(old_to_new_.at(n->struct_ref()));
+
+    absl::Span<const std::pair<std::string, Expr*>> old_members =
+        n->GetUnorderedMembers();
+    std::vector<std::pair<std::string, Expr*>> new_members;
+    new_members.reserve(old_members.size());
+    for (const auto& member : old_members) {
+      new_members.push_back(std::make_pair(
+          member.first, absl::down_cast<Expr*>(old_to_new_.at(member.second))));
+    }
+
+    old_to_new_[n] = module(n)->Make<StructInstance>(
+        n->span(), new_struct_ref, new_members, n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleSumInstance(const SumInstance* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::vector<Expr*> new_tuple_payload_args;
+    new_tuple_payload_args.reserve(n->tuple_payload_args().size());
+    for (const Expr* arg : n->tuple_payload_args()) {
+      new_tuple_payload_args.push_back(
+          absl::down_cast<Expr*>(old_to_new_.at(arg)));
+    }
+
+    std::vector<SumInstance::StructPayloadFieldArg>
+        new_struct_payload_field_args;
+    new_struct_payload_field_args.reserve(
+        n->struct_payload_field_args().size());
+    for (const auto& [name, arg] : n->struct_payload_field_args()) {
+      new_struct_payload_field_args.push_back(
+          std::make_pair(name, absl::down_cast<Expr*>(old_to_new_.at(arg))));
+    }
+
+    old_to_new_[n] = module(n)->Make<SumInstance>(
+        n->span(),
+        absl::down_cast<ColonRef*>(old_to_new_.at(n->constructor_ref())),
+        n->payload_shape(), std::move(new_tuple_payload_args),
+        std::move(new_struct_payload_field_args), n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleConditional(const Conditional* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::variant<StatementBlock*, Conditional*> new_alternate;
+    AstNode* new_alternate_node = old_to_new_.at(ToAstNode(n->alternate()));
+    if (new_alternate_node->kind() == AstNodeKind::kStatementBlock) {
+      new_alternate = absl::down_cast<StatementBlock*>(new_alternate_node);
+    } else if (new_alternate_node->kind() == AstNodeKind::kConditional) {
+      new_alternate = absl::down_cast<Conditional*>(new_alternate_node);
+    } else {
+      return absl::InternalError("Unexpected Conditional alternate node type.");
+    }
+
+    old_to_new_[n] = module(n)->Make<Conditional>(
+        n->span(), absl::down_cast<Expr*>(old_to_new_.at(n->test())),
+        absl::down_cast<StatementBlock*>(old_to_new_.at(n->consequent())),
+        new_alternate, n->in_parens(), n->HasElse(), n->IsConst());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleTestFunction(const TestFunction* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(&n->fn()));
+    XLS_ASSIGN_OR_RETURN(Function * new_fn, CastIfNotVerbatim<Function*>(
+                                                old_to_new_.at(&n->fn())));
+    old_to_new_[n] = module(n)->Make<TestFunction>(n->span(), *new_fn);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleFuzzTestFunction(const FuzzTestFunction* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(&n->fn()));
+    XLS_ASSIGN_OR_RETURN(Function * new_fn, CastIfNotVerbatim<Function*>(
+                                                old_to_new_.at(&n->fn())));
+    std::optional<XlsTuple*> new_domains =
+        n->domains().has_value()
+            ? std::make_optional(absl::down_cast<XlsTuple*>(
+                  old_to_new_.at(n->domains().value())))
+            : std::nullopt;
+    old_to_new_[n] =
+        module(n)->Make<FuzzTestFunction>(n->span(), *new_fn, new_domains);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleTestProc(const TestProc* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    XLS_ASSIGN_OR_RETURN(Proc * new_proc,
+                         CastIfNotVerbatim<Proc*>(old_to_new_.at(n->proc())));
+
+    TestProc* new_tp = module(n)->Make<TestProc>(new_proc);
+    new_tp->set_expected_fail_label(n->expected_fail_label());
+    old_to_new_[n] = new_tp;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleTupleIndex(const TupleIndex* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    old_to_new_[n] = module(n)->Make<TupleIndex>(
+        n->span(), absl::down_cast<Expr*>(old_to_new_.at(n->lhs())),
+        absl::down_cast<Number*>(old_to_new_.at(n->index())), n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleTupleTypeAnnotation(
+      const TupleTypeAnnotation* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::vector<TypeAnnotation*> new_members;
+    new_members.reserve(n->members().size());
+    for (const auto* member : n->members()) {
+      new_members.push_back(
+          absl::down_cast<TypeAnnotation*>(old_to_new_.at(member)));
+    }
+    old_to_new_[n] =
+        module(n)->Make<TupleTypeAnnotation>(n->span(), new_members);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleTypeAlias(const TypeAlias* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    NameDef* new_name_def =
+        absl::down_cast<NameDef*>(old_to_new_.at(&n->name_def()));
+    TypeAlias* new_ta =
+        module(n)->Make<TypeAlias>(n->span(), *new_name_def,
+                                   *absl::down_cast<TypeAnnotation*>(
+                                       old_to_new_.at(&n->type_annotation())),
+                                   n->is_public());
+    if (n->extern_type_name().has_value()) {
+      new_ta->set_extern_type_name(*n->extern_type_name());
+    }
+    new_name_def->set_definer(new_ta);
+    old_to_new_[n] = new_ta;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleProcAlias(const ProcAlias* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    NameDef* new_name_def =
+        absl::down_cast<NameDef*>(old_to_new_.at(n->name_def()));
+    AstNode* new_target_node = old_to_new_.at(ToAstNode(n->target()));
+    ProcAlias::Target new_target;
+    if (new_target_node->kind() == AstNodeKind::kNameRef) {
+      new_target = absl::down_cast<NameRef*>(new_target_node);
+    } else {
+      new_target = absl::down_cast<ColonRef*>(new_target_node);
+    }
+    ProcAlias* new_pa = module(n)->Make<ProcAlias>(
+        n->span(), new_name_def, new_target, n->is_public(),
+        CloneParametrics(n->parametrics()));
+    new_name_def->set_definer(new_pa);
+    old_to_new_[n] = new_pa;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleTypeRef(const TypeRef* n) override {
+    TypeDefinition new_type_definition = n->type_definition();
+
+    // A TypeRef doesn't own its referenced type definition, so we have to
+    // explicitly visit it.
+    XLS_RETURN_IF_ERROR(absl::visit(Visitor{[&](auto* ref) -> absl::Status {
+                                      if (ref->owner() != n->owner()) {
+                                        return absl::OkStatus();
+                                      }
+                                      XLS_RETURN_IF_ERROR(ReplaceOrVisit(ref));
+                                      new_type_definition =
+                                          absl::down_cast<decltype(ref)>(
+                                              old_to_new_.at(ref));
+                                      return absl::OkStatus();
+                                    }},
+                                    n->type_definition()));
+
+    old_to_new_[n] = module(n)->Make<TypeRef>(n->span(), new_type_definition);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleTypeRefTypeAnnotation(
+      const TypeRefTypeAnnotation* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    // Don't clone the instantiator here because it may not be in the hierarchy
+    // currently being cloned and, if it is,  we can't guarantee that it has
+    // already been visited by the cloner.
+    // TODO: Reliably handle the instantiator, updating the cloned version if
+    // the instantiator is cloned.
+    old_to_new_[n] = module(n)->Make<TypeRefTypeAnnotation>(
+        n->span(), absl::down_cast<TypeRef*>(old_to_new_.at(n->type_ref())),
+        CloneParametrics(n->parametrics()), n->instantiator());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleTypeVariableTypeAnnotation(
+      const TypeVariableTypeAnnotation* n) override {
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->type_variable()));
+    old_to_new_[n] = module(n)->Make<TypeVariableTypeAnnotation>(
+        absl::down_cast<const NameRef*>(old_to_new_[n->type_variable()]));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleMemberTypeAnnotation(
+      const MemberTypeAnnotation* n) override {
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->struct_type()));
+    old_to_new_[n] = module(n)->Make<MemberTypeAnnotation>(
+        n->span(),
+        absl::down_cast<const TypeAnnotation*>(old_to_new_[n->struct_type()]),
+        n->member_name(), n->use_wrapped_type_if_proc_state());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleConstConditionalTypeAnnotation(
+      const ConstConditionalTypeAnnotation* n) override {
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->consequent_type()));
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->alternate_type()));
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->test()));
+    old_to_new_[n] = module(n)->Make<ConstConditionalTypeAnnotation>(
+        n->span(), absl::down_cast<Expr*>(old_to_new_[n->test()]),
+        absl::down_cast<TypeAnnotation*>(old_to_new_[n->consequent_type()]),
+        absl::down_cast<TypeAnnotation*>(old_to_new_[n->alternate_type()]));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleElementTypeAnnotation(
+      const ElementTypeAnnotation* n) override {
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->container_type()));
+    if (n->tuple_index().has_value()) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(*n->tuple_index()));
+    }
+    old_to_new_[n] = module(n)->Make<ElementTypeAnnotation>(
+        absl::down_cast<const TypeAnnotation*>(
+            old_to_new_[n->container_type()]),
+        n->tuple_index().has_value()
+            ? std::make_optional(absl::down_cast<const Number*>(
+                  old_to_new_[*n->tuple_index()]))
+            : std::nullopt);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleSliceTypeAnnotation(
+      const SliceTypeAnnotation* n) override {
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->source_type()));
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(ToAstNode(n->slice())));
+    AstNode* new_slice_node = old_to_new_[ToAstNode(n->slice())];
+    std::variant<Slice*, WidthSlice*> new_slice;
+    if (new_slice_node->kind() == AstNodeKind::kSlice) {
+      new_slice = absl::down_cast<Slice*>(new_slice_node);
+    } else {
+      new_slice = absl::down_cast<WidthSlice*>(new_slice_node);
+    }
+    old_to_new_[n] = module(n)->Make<SliceTypeAnnotation>(
+        n->span(),
+        absl::down_cast<TypeAnnotation*>(old_to_new_[n->source_type()]),
+        new_slice);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleFunctionTypeAnnotation(
+      const FunctionTypeAnnotation* n) override {
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->return_type()));
+    std::vector<const TypeAnnotation*> param_types;
+    param_types.reserve(n->param_types().size());
+    for (const TypeAnnotation* argument : n->param_types()) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(argument));
+      param_types.push_back(
+          absl::down_cast<const TypeAnnotation*>(old_to_new_[argument]));
+    }
+    old_to_new_[n] = module(n)->Make<FunctionTypeAnnotation>(
+        n->span(), std::move(param_types),
+        absl::down_cast<TypeAnnotation*>(old_to_new_[n->return_type()]));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleReturnTypeAnnotation(
+      const ReturnTypeAnnotation* n) override {
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->function_type()));
+    old_to_new_[n] = module(n)->Make<ReturnTypeAnnotation>(
+        absl::down_cast<TypeAnnotation*>(old_to_new_[n->function_type()]));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleParamTypeAnnotation(
+      const ParamTypeAnnotation* n) override {
+    XLS_RETURN_IF_ERROR(ReplaceOrVisit(n->function_type()));
+    old_to_new_[n] = module(n)->Make<ParamTypeAnnotation>(
+        absl::down_cast<TypeAnnotation*>(old_to_new_[n->function_type()]),
+        n->param_index());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleAnyTypeAnnotation(const AnyTypeAnnotation* n) override {
+    old_to_new_[n] = module(n)->Make<AnyTypeAnnotation>(n->multiple());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleUnop(const Unop* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    old_to_new_[n] = module(n)->Make<Unop>(
+        n->span(), n->unop_kind(),
+        absl::down_cast<Expr*>(old_to_new_.at(n->operand())), n->op_span(),
+        n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleConstFor(const ConstFor* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    auto new_type_annotation = n->type_annotation() == nullptr
+                                   ? nullptr
+                                   : absl::down_cast<TypeAnnotation*>(
+                                         old_to_new_.at(n->type_annotation()));
+
+    old_to_new_[n] = module(n)->Make<ConstFor>(
+        n->span(), ClonePattern(n->pattern()), new_type_annotation,
+        absl::down_cast<Expr*>(old_to_new_.at(n->iterable())),
+        absl::down_cast<StatementBlock*>(old_to_new_.at(n->body())),
+        absl::down_cast<Expr*>(old_to_new_.at(n->init())), n->IsUnrollFor(),
+        n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleWidthSlice(const WidthSlice* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+    old_to_new_[n] = module(n)->Make<WidthSlice>(
+        n->GetSpan().value(),
+        absl::down_cast<Expr*>(old_to_new_.at(n->start())),
+        absl::down_cast<TypeAnnotation*>(old_to_new_.at(n->width())));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleWildcardPattern(const WildcardPattern* n) override {
+    old_to_new_[n] = module(n)->Make<WildcardPattern>(n->span());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleRestOfTuple(const RestOfTuple* n) override {
+    old_to_new_[n] = module(n)->Make<RestOfTuple>(n->span());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleXlsTuple(const XlsTuple* n) override {
+    XLS_RETURN_IF_ERROR(VisitChildren(n));
+
+    std::vector<Expr*> members;
+    members.reserve(n->members().size());
+    for (const auto* member : n->members()) {
+      members.push_back(absl::down_cast<Expr*>(old_to_new_.at(member)));
+    }
+
+    old_to_new_[n] = module(n)->Make<XlsTuple>(
+        n->span(), members, n->has_trailing_comma(), n->in_parens());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleVerbatimNode(const VerbatimNode* n) override {
+    old_to_new_[n] = module(n)->Make<VerbatimNode>(n->span(), n->text());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleGenericTypeAnnotation(
+      const GenericTypeAnnotation* n) override {
+    old_to_new_[n] = module(n)->Make<GenericTypeAnnotation>(n->span());
+    return absl::OkStatus();
+  }
+
+  const absl::flat_hash_map<const AstNode*, AstNode*>& old_to_new() {
+    return old_to_new_;
+  }
+
+ private:
+  // Visits all the children of the given node, skipping those that have
+  // already been processed.
+  absl::Status VisitChildren(const AstNode* node) {
+    for (const auto& child : node->GetChildren(/*want_types=*/true)) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(child));
+    }
+    return absl::OkStatus();
+  }
+
+  absl::Status ReplaceOrVisit(const AstNode* node) {
+    if (node == nullptr) {
+      return absl::OkStatus();
+    }
+    if (old_to_new_.contains(node)) {
+      return absl::OkStatus();
+    }
+    XLS_ASSIGN_OR_RETURN(std::optional<AstNode*> replacement,
+                         replacer_(node, module(node), old_to_new_));
+    if (replacement.has_value()) {
+      old_to_new_[node] = *replacement;
+      return absl::OkStatus();
+    }
+
+    XLS_ASSIGN_OR_RETURN(std::vector<Attribute*> new_attributes,
+                         CloneAttributes(node->attributes()));
+    XLS_RETURN_IF_ERROR(node->Accept(this));
+    const auto it = old_to_new_.find(node);
+    if (it != old_to_new_.end()) {
+      it->second->SetAttributes(new_attributes);
+    }
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<std::vector<Attribute*>> CloneAttributes(
+      const std::vector<Attribute*>& old_attributes) {
+    std::vector<Attribute*> new_attributes;
+    new_attributes.reserve(old_attributes.size());
+    for (const Attribute* attribute : old_attributes) {
+      XLS_RETURN_IF_ERROR(ReplaceOrVisit(attribute));
+      new_attributes.push_back(
+          absl::down_cast<Attribute*>(old_to_new_.at(attribute)));
+    }
+    return new_attributes;
+  }
+
+  std::vector<ExprOrType> CloneParametrics(
+      const std::vector<ExprOrType>& parametrics) {
+    std::vector<ExprOrType> new_parametrics;
+    new_parametrics.reserve(parametrics.size());
+    for (const ExprOrType& parametric : parametrics) {
+      AstNode* old_node = ToAstNode(parametric);
+      if (ReplaceOrVisit(old_node).ok()) {
+        AstNode* new_node = old_to_new_.at(old_node);
+        if (std::holds_alternative<Expr*>(parametric)) {
+          new_parametrics.push_back(absl::down_cast<Expr*>(new_node));
+        } else {
+          new_parametrics.push_back(absl::down_cast<TypeAnnotation*>(new_node));
+        }
+      }
+    }
+    return new_parametrics;
+  }
+
+  std::optional<Module*> const module_;
+  // Set only for whole-module clones; narrow clones can borrow captured names.
+  const Module* source_module_ = nullptr;
+  CloneReplacer replacer_;
+  absl::flat_hash_map<const AstNode*, AstNode*> old_to_new_;
+};
+
+absl::StatusOr<ModuleMember> MakeClonedModuleMember(
+    const ModuleMember& original,
+    const absl::flat_hash_map<const AstNode*, AstNode*>& old_to_new) {
+  ModuleMember new_member;
+  XLS_RETURN_IF_ERROR(absl::visit(
+      Visitor{
+          [&](auto* node) -> absl::Status {
+            auto it = old_to_new.find(node);
+            if (it == old_to_new.end()) {
+              return absl::InternalError("Cloned node missing from map.");
+            }
+            AstNode* replacement = it->second;
+            if (replacement->kind() == AstNodeKind::kVerbatimNode) {
+              new_member = absl::down_cast<VerbatimNode*>(replacement);
+              return absl::OkStatus();
+            }
+            using NodeT = std::remove_pointer_t<decltype(node)>;
+            new_member = absl::down_cast<NodeT*>(replacement);
+            return absl::OkStatus();
+          },
+      },
+      original));
+  return new_member;
+}
+
+bool ShouldRemoveMember(
+    const ModuleMember& member,
+    const absl::flat_hash_set<const AstNode*>& nodes_to_remove) {
+  if (nodes_to_remove.empty()) {
+    return false;
+  }
+  const AstNode* member_node = ToAstNode(member);
+  if (nodes_to_remove.contains(member_node)) {
+    return true;
+  }
+  for (NameDef* name_def : ModuleMemberGetNameDefs(member)) {
+    if (nodes_to_remove.contains(static_cast<const AstNode*>(name_def))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void CollectUseTreeEntries(const UseTreeEntry& entry,
+                           absl::flat_hash_set<const AstNode*>& removed_nodes) {
+  removed_nodes.insert(&entry);
+  for (AstNode* child : entry.GetChildren(/*want_types=*/false)) {
+    if (child == nullptr || child->kind() != AstNodeKind::kUseTreeEntry) {
+      continue;
+    }
+    CollectUseTreeEntries(*absl::down_cast<UseTreeEntry*>(child),
+                          removed_nodes);
+  }
+}
+
+absl::StatusOr<std::unique_ptr<Module>> CloneModuleMetadata(
+    const Module& module) {
+  auto clone = std::make_unique<Module>(module.name(), module.fs_path(),
+                                        *module.file_table());
+  if (std::optional<Span> span = module.GetSpan(); span.has_value()) {
+    clone->set_span(*span);
+  }
+  for (const ModuleAttribute& attribute : module.attributes()) {
+    clone->AddAttribute(attribute, module.GetAttributeSpan());
+  }
+  clone->SetConfiguredValuesMap(module.configured_values());
+  return clone;
+}
+
+}  // namespace
+
+std::optional<AstNode*> PreserveTypeDefinitionsReplacer(
+    const AstNode* node, Module* module,
+    const absl::flat_hash_map<const AstNode*, AstNode*>&) {
+  if (node->kind() == AstNodeKind::kTypeRef) {
+    const auto* type_ref = absl::down_cast<const TypeRef*>(node);
+    return module->Make<TypeRef>(type_ref->span(), type_ref->type_definition());
+  }
+  return std::nullopt;
+}
+
+CloneReplacer NameRefReplacer(const NameDef* def, Expr* replacement) {
+  return [=](const AstNode* node, Module* new_module,
+             const absl::flat_hash_map<const AstNode*, AstNode*>&)
+             -> std::optional<AstNode*> {
+    if (node->kind() == AstNodeKind::kNameRef) {
+      const auto* name_ref = absl::down_cast<const NameRef*>(node);
+      if (std::holds_alternative<const NameDef*>(name_ref->name_def()) &&
+          std::get<const NameDef*>(name_ref->name_def()) == def) {
+        return replacement;
+      }
+    }
+    return std::nullopt;
+  };
+}
+
+CloneReplacer NameRefReplacer(
+    const absl::flat_hash_map<const NameDef*, NameDef*>* replacement_defs) {
+  return [=](const AstNode* original_node, Module* new_module,
+             const absl::flat_hash_map<const AstNode*, AstNode*>&)
+             -> std::optional<AstNode*> {
+    if (original_node->kind() == AstNodeKind::kNameRef) {
+      const auto* original_ref = absl::down_cast<const NameRef*>(original_node);
+      const AstNode* def = ToAstNode(original_ref->name_def());
+      if (def->kind() == AstNodeKind::kNameDef) {
+        const auto it =
+            replacement_defs->find(absl::down_cast<const NameDef*>(def));
+        if (it != replacement_defs->end()) {
+          return new_module->Make<NameRef>(
+              original_ref->span(), original_ref->identifier(), it->second);
+        }
+      }
+    }
+    return std::nullopt;
+  };
+}
+
+absl::StatusOr<absl::flat_hash_map<const AstNode*, AstNode*>>
+CloneAstAndGetAllPairs(const AstNode* root,
+                       std::optional<Module*> target_module,
+                       CloneReplacer replacer) {
+  if (root->kind() == AstNodeKind::kModule) {
+    return absl::InvalidArgumentError("Clone a module via 'CloneModule'.");
+  }
+  Module* new_module =
+      target_module.has_value() ? *target_module : root->owner();
+  absl::flat_hash_map<const AstNode*, AstNode*> empty_old_to_new;
+  XLS_ASSIGN_OR_RETURN(std::optional<AstNode*> root_replacement,
+                       replacer(root, new_module, empty_old_to_new));
+  if (root_replacement.has_value()) {
+    return absl::flat_hash_map<const AstNode*, AstNode*>{
+        {root, *root_replacement}};
+  }
+  AstCloner cloner(target_module, std::move(replacer));
+  XLS_RETURN_IF_ERROR(root->Accept(&cloner));
+  return cloner.old_to_new();
+}
+
+absl::StatusOr<AstNode*> CloneAst(const AstNode* root, CloneReplacer replacer) {
+  if (root == nullptr) {
+    return nullptr;
+  }
+  absl::flat_hash_map<const AstNode*, AstNode*> all_pairs;
+  XLS_ASSIGN_OR_RETURN(all_pairs, CloneAstAndGetAllPairs(root, root->owner(),
+                                                         std::move(replacer)));
+  return all_pairs.at(root);
+}
+
+absl::StatusOr<std::unique_ptr<Module>> CloneModule(const Module& module,
+                                                    CloneReplacer replacer) {
+  XLS_ASSIGN_OR_RETURN(std::unique_ptr<Module> new_module,
+                       CloneModuleMetadata(module));
+  AstCloner cloner(new_module.get(), std::move(replacer));
+  XLS_RETURN_IF_ERROR(module.Accept(&cloner));
+  return new_module;
+}
+
+absl::StatusOr<std::unique_ptr<Module>> CloneModuleRemovingMembers(
+    const Module& module, absl::Span<const AstNode* const> members_to_remove) {
+  absl::flat_hash_set<const AstNode*> nodes_to_remove_set;
+  nodes_to_remove_set.reserve(members_to_remove.size());
+  for (const AstNode* node : members_to_remove) {
+    if (node == nullptr) {
+      return absl::InvalidArgumentError(
+          "Module member removal list contains a null entry");
+    }
+    nodes_to_remove_set.insert(node);
+  }
+
+  absl::flat_hash_map<const NameDef*, std::string> removed_name_defs;
+  absl::flat_hash_set<const AstNode*> removed_nodes(nodes_to_remove_set.begin(),
+                                                    nodes_to_remove_set.end());
+  for (const ModuleMember& member : module.top()) {
+    if (!ShouldRemoveMember(member, nodes_to_remove_set)) {
+      continue;
+    }
+    const AstNode* member_node = ToAstNode(member);
+    removed_nodes.insert(member_node);
+    for (NameDef* def : ModuleMemberGetNameDefs(member)) {
+      removed_name_defs.emplace(def, def->identifier());
+      removed_nodes.insert(def);
+    }
+    if (auto* use = dynamic_cast<const Use*>(member_node)) {
+      CollectUseTreeEntries(use->root(), removed_nodes);
+    }
+  }
+
+  XLS_ASSIGN_OR_RETURN(std::unique_ptr<Module> new_module,
+                       CloneModuleMetadata(module));
+
+  absl::flat_hash_map<const AstNode*, AstNode*> global_map;
+
+  for (const ModuleMember& member : module.top()) {
+    if (ShouldRemoveMember(member, nodes_to_remove_set)) {
+      continue;
+    }
+
+    const AstNode* original_node = ToAstNode(member);
+    CloneReplacer reuse_existing =
+        [&](const AstNode* node, Module* target,
+            const absl::flat_hash_map<const AstNode*, AstNode*>&)
+        -> absl::StatusOr<std::optional<AstNode*>> {
+      if (auto cached = global_map.find(node); cached != global_map.end()) {
+        return cached->second;
+      }
+
+      if (node->owner() != &module) {
+        // Don't clone nodes that aren't in the original module. (We don't
+        // return std::nullopt here because that would cause the node to be
+        // cloned, instead of being replaced by itself.)
+        return const_cast<AstNode*>(node);
+      }
+
+      if (node->kind() == AstNodeKind::kNameRef) {
+        const auto* name_ref = absl::down_cast<const NameRef*>(node);
+        if (std::holds_alternative<const NameDef*>(name_ref->name_def())) {
+          const NameDef* def = std::get<const NameDef*>(name_ref->name_def());
+          if (auto removed_it = removed_name_defs.find(def);
+              removed_it != removed_name_defs.end()) {
+            return absl::InvalidArgumentError(absl::StrFormat(
+                "Module member references removed definition '%s'",
+                removed_it->second));
+          }
+          if (auto def_it = global_map.find(def); def_it != global_map.end()) {
+            auto* new_def = absl::down_cast<NameDef*>(def_it->second);
+            AstNode* new_ref =
+                target->Make<NameRef>(name_ref->span(), name_ref->identifier(),
+                                      new_def, name_ref->in_parens());
+            global_map[node] = new_ref;
+            return new_ref;
+          }
+        }
+      } else if (node->kind() == AstNodeKind::kTypeRef) {
+        const auto* type_ref = absl::down_cast<const TypeRef*>(node);
+        const bool references_removed =
+            absl::visit(Visitor{[&](auto* ref) {
+                          return ref != nullptr && removed_nodes.contains(ref);
+                        }},
+                        type_ref->type_definition());
+        if (references_removed) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Module member references removed definition '%s'",
+              type_ref->ToString()));
+        }
+      }
+
+      return std::optional<AstNode*>{std::nullopt};
+    };
+
+    XLS_ASSIGN_OR_RETURN(auto old_to_new,
+                         CloneAstAndGetAllPairs(original_node, new_module.get(),
+                                                std::move(reuse_existing)));
+    global_map.insert(old_to_new.begin(), old_to_new.end());
+    XLS_ASSIGN_OR_RETURN(ModuleMember cloned_member,
+                         MakeClonedModuleMember(member, old_to_new));
+    XLS_RETURN_IF_ERROR(new_module->AddTop(cloned_member,
+                                           /*make_collision_error=*/nullptr));
+  }
+
+  return new_module;
+}
+
+CloneReplacer ChainCloneReplacers(CloneReplacer first, CloneReplacer second) {
+  return
+      [first = std::move(first), second = std::move(second)](
+          const AstNode* node, Module* module,
+          const absl::flat_hash_map<const AstNode*, AstNode*>&
+              old_to_new) mutable -> absl::StatusOr<std::optional<AstNode*>> {
+        XLS_ASSIGN_OR_RETURN(std::optional<AstNode*> first_result,
+                             first(node, module, old_to_new));
+        XLS_ASSIGN_OR_RETURN(
+            std::optional<AstNode*> second_result,
+            second(first_result.has_value() ? *first_result : node, module,
+                   old_to_new));
+        return second_result.has_value() ? second_result : first_result;
+      };
+}
+
+// Verifies that `node` consists solely of "new" AST nodes and none that are
+// in the "old" set.
+absl::Status VerifyClone(const AstNode* old_root, const AstNode* new_root,
+                         const FileTable& file_table) {
+  absl::flat_hash_set<const AstNode*> old_nodes = FlattenToSet(old_root);
+  absl::flat_hash_set<const AstNode*> new_nodes = FlattenToSet(new_root);
+  for (const AstNode* new_node : new_nodes) {
+    if (old_nodes.contains(new_node)) {
+      std::optional<Span> span = new_node->GetSpan();
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Node \"%s\" (%s; %s) was found in both the old set and "
+          "new translation!",
+          new_node->ToString(),
+          span.has_value() ? span.value().ToString(file_table) : "<no span>",
+          new_node->GetNodeTypeName()));
+    }
+    if (new_node->kind() == AstNodeKind::kNameRef) {
+      const auto* name_ref = absl::down_cast<const NameRef*>(new_node);
+      if (std::holds_alternative<const NameDef*>(name_ref->name_def()) &&
+          old_nodes.contains(std::get<const NameDef*>(name_ref->name_def()))) {
+        std::optional<Span> span = new_node->GetSpan();
+        return absl::InvalidArgumentError(absl::StrFormat(
+            "NameRef \"%s\" (%s) in new clone refers to NameDef in original.",
+            new_node->ToString(),
+            span.has_value() ? span.value().ToString(file_table)
+                             : "<no span>"));
+      }
+    }
+  }
+  return absl::OkStatus();
+}
+
+}  // namespace xls::dslx

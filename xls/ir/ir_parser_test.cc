@@ -14,24 +14,56 @@
 
 #include "xls/ir/ir_parser.h"
 
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <variant>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/base/casts.h"
 #include "absl/status/status.h"
+#include "absl/strings/ascii.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/substitute.h"
+#include "absl/types/span.h"
+#include "google/protobuf/text_format.h"
+#include "xls/common/attribute_data.h"
 #include "xls/common/source_location.h"
 #include "xls/common/status/matchers.h"
+#include "xls/ir/bits.h"
 #include "xls/ir/bits_ops.h"
-#include "xls/ir/number_parser.h"
+#include "xls/ir/block.h"
+#include "xls/ir/channel.h"
+#include "xls/ir/channel_ops.h"
+#include "xls/ir/fileno.h"
+#include "xls/ir/instantiation.h"
+#include "xls/ir/nodes.h"
+#include "xls/ir/op.h"
+#include "xls/ir/package.h"
+#include "xls/ir/register.h"
+#include "xls/ir/source_location.h"
+#include "xls/ir/state_element.h"
+#include "xls/ir/type.h"
+#include "xls/ir/value.h"
+#include "xls/ir/xls_ir_interface.pb.h"
 
 namespace xls {
 
-using status_testing::StatusIs;
+using ::absl_testing::StatusIs;
 using ::testing::ElementsAre;
+using ::testing::Eq;
 using ::testing::HasSubstr;
+using ::testing::IsEmpty;
+using ::testing::Not;
+using ::testing::Optional;
 
 // EXPECTS that the two given strings are similar modulo extra whitespace.
-void ExpectStringsSimilar(
-    absl::string_view a, absl::string_view b,
+static void ExpectStringsSimilar(
+    std::string_view a, std::string_view b,
     xabsl::SourceLocation loc = xabsl::SourceLocation::current()) {
   std::string a_string(a);
   std::string b_string(b);
@@ -44,41 +76,6 @@ void ExpectStringsSimilar(
   absl::RemoveExtraAsciiWhitespace(&b_string);
 
   EXPECT_EQ(a_string, b_string);
-}
-
-// Parses the given string as a function, dumps the IR and compares that the
-// dumped string and input string are the same modulo whitespace.
-void ParseFunctionAndCheckDump(
-    absl::string_view in,
-    xabsl::SourceLocation loc = xabsl::SourceLocation::current()) {
-  testing::ScopedTrace trace(loc.file_name(), loc.line(),
-                             "ParseFunctionAndCheckDump failed");
-  Package p("my_package");
-  XLS_ASSERT_OK_AND_ASSIGN(auto function, Parser::ParseFunction(in, &p));
-  ExpectStringsSimilar(function->DumpIr(), in, loc);
-}
-
-// Parses the given string as a package, dumps the IR and compares that the
-// dumped string and input string are the same modulo whitespace.
-void ParsePackageAndCheckDump(
-    absl::string_view in,
-    xabsl::SourceLocation loc = xabsl::SourceLocation::current()) {
-  testing::ScopedTrace trace(loc.file_name(), loc.line(),
-                             "ParsePackageAndCheckDump failed");
-  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(in));
-  ExpectStringsSimilar(package->DumpIr(), in, loc);
-}
-
-TEST(IrParserTest, ParseBitsLiteral) {
-  ParseFunctionAndCheckDump(R"(fn f() -> bits[37] {
-  ret literal.1: bits[37] = literal(value=42, id=1)
-})");
-}
-
-TEST(IrParserTest, ParseWideLiteral) {
-  ParseFunctionAndCheckDump(R"(fn f() -> bits[96] {
-  ret literal.1: bits[96] = literal(value=0xaaaa_bbbb_1234_5678_90ab_cdef, id=1)
-})");
 }
 
 TEST(IrParserTest, ParseVariousBitsLiterals) {
@@ -141,191 +138,6 @@ TEST(IrParserTest, ParseVariousLiteralsTooFewBits) {
   }
 }
 
-TEST(IrParserTest, DuplicateKeywordArgs) {
-  Package p("my_package");
-  const std::string input =
-      R"(fn f() -> bits[37] {
-  ret literal.1: bits[37] = literal(value=42, value=123)
-})";
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Duplicate keyword argument 'value'")));
-}
-
-TEST(IrParserTest, WrongDeclaredNodeType) {
-  Package p("my_package");
-  const std::string input =
-      R"(
-fn less_than(a: bits[32], b: bits[32]) -> bits[1] {
-  ret ult.3: bits[32] = ult(a, b)
-})";
-  EXPECT_THAT(
-      Parser::ParseFunction(input, &p).status(),
-      StatusIs(
-          absl::StatusCode::kInvalidArgument,
-          HasSubstr(
-              "Declared type bits[32] does not match expected type bits[1]")));
-}
-
-TEST(IrParserTest, WrongFunctionReturnType) {
-  Package p("my_package");
-  const std::string input =
-      R"(
-fn less_than(a: bits[32], b: bits[32]) -> bits[32] {
-  ret ult.3: bits[1] = ult(a, b)
-})";
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Type of return value bits[1] does not match "
-                                 "declared function return type bits[32]")));
-}
-
-TEST(IrParserTest, MissingMandatoryKeyword) {
-  Package p("my_package");
-  const std::string input =
-      R"(fn f() -> bits[37] {
-  ret literal.1: bits[37] = literal()
-})";
-  EXPECT_THAT(
-      Parser::ParseFunction(input, &p).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("Mandatory keyword argument 'value' not found")));
-}
-
-TEST(IrParserTest, ParsePosition) {
-  ParseFunctionAndCheckDump(
-      R"(
-fn f(x: bits[42], y: bits[42]) -> bits[42] {
-  ret and.1: bits[42] = and(x, y, id=1, pos=0,1,3)
-}
-)");
-}
-
-TEST(IrParserTest, UndefinedOperand) {
-  Package p("my_package");
-  std::string input =
-      R"(
-fn f(x: bits[42]) -> bits[42] {
-  ret and.1: bits[42] = and(x, z)
-}
-)";
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("was not previously defined: \"z\"")));
-}
-
-TEST(IrParserTest, InvalidOp) {
-  Package p("my_package");
-  std::string input =
-      R"(
-fn f(x: bits[42]) -> bits[42] {
-  ret foo_op.1: bits[42] = foo_op(x, z)
-}
-)";
-  EXPECT_THAT(
-      Parser::ParseFunction(input, &p).status(),
-      StatusIs(
-          absl::StatusCode::kInvalidArgument,
-          HasSubstr("Unknown operation for string-to-op conversion: foo_op")));
-}
-
-TEST(IrParserTest, PositionalArgumentAfterKeywordArgument) {
-  Package p("my_package");
-  std::string input =
-      R"(
-fn f(x: bits[42], y: bits[42]) -> bits[42] {
-  ret and.1: bits[42] = and(x, pos=0,1,3, y)
-}
-)";
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected token of type \"=\"")));
-}
-
-TEST(IrParserTest, ExtraOperands) {
-  Package p("my_package");
-  const std::string input =
-      R"(
-fn f(x: bits[42], y: bits[42], z: bits[42]) -> bits[42] {
-  ret add.1: bits[42] = add(x, y, z)
-}
-})";
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected 2 operands, got 3")));
-}
-
-TEST(IrParserTest, TooFewOperands) {
-  Package p("my_package");
-  const std::string input =
-      R"(
-fn f(x: bits[42]) -> bits[42] {
-  ret add.1: bits[42] = add(x, id=1)
-}
-})";
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected 2 operands, got 1")));
-}
-
-TEST(IrParserTest, DuplicateName) {
-  Package p("my_package");
-  const std::string input =
-      R"(
-fn f(x: bits[42]) -> bits[42] {
- and.1: bits[42] = and(x, x, id=1)
- ret and.1: bits[42] = and(and.1, and.1)
-}
-})";
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Name 'and.1' has already been defined")));
-}
-
-TEST(IrParserTest, ParseNode) {
-  ParseFunctionAndCheckDump(
-      R"(
-fn f() -> bits[32] {
-  literal.1: bits[32] = literal(value=3, id=1, pos=0,3,11)
-  ret sub.2: bits[32] = sub(literal.1, literal.1, id=2)
-})");
-}
-
-TEST(IrParserTest, ParseFunction) {
-  ParseFunctionAndCheckDump(
-      R"(
-fn simple_arith(a: bits[32], b: bits[32]) -> bits[32] {
-  ret sub.3: bits[32] = sub(a, b, id=3)
-})");
-}
-
-TEST(IrParserTest, ParseULessThan) {
-  ParseFunctionAndCheckDump(
-      R"(
-fn less_than(a: bits[32], b: bits[32]) -> bits[1] {
-  ret ult.3: bits[1] = ult(a, b, id=3)
-})");
-}
-
-TEST(IrParserTest, ParseSLessThan) {
-  ParseFunctionAndCheckDump(
-      R"(
-fn less_than(a: bits[32], b: bits[32]) -> bits[1] {
-  ret slt.3: bits[1] = slt(a, b, id=3)
-})");
-}
-
-TEST(IrParserTest, ParseTwoPlusTwo) {
-  std::string program = R"(
-fn two_plus_two() -> bits[32] {
-  literal.1: bits[32] = literal(value=2, id=1)
-  literal.2: bits[32] = literal(value=2, id=2)
-  ret add.3: bits[32] = add(literal.1, literal.2, id=3)
-}
-)";
-  ParseFunctionAndCheckDump(program);
-}
-
 TEST(IrParserTest, ParseTwoPlusThreeCustomIdentifiers) {
   std::string program = R"(
 fn two_plus_two() -> bits[32] {
@@ -346,539 +158,48 @@ fn two_plus_two() -> bits[32] {
 })");
 }
 
-TEST(IrParserTest, CountedFor) {
-  std::string program = R"(
-package CountedFor
-
-fn body(x: bits[11], y: bits[11]) -> bits[11] {
-  ret add.3: bits[11] = add(x, y, id=3)
-}
-
-fn main() -> bits[11] {
-  literal.4: bits[11] = literal(value=0, id=4)
-  ret counted_for.5: bits[11] = counted_for(literal.4, trip_count=7, stride=1, body=body, id=5)
-}
-)";
-  ParsePackageAndCheckDump(program);
-}
-
-TEST(IrParserTest, CountedForMissingBody) {
-  std::string program = R"(
-package CountedForMissingBody
-
-fn body(i: bits[11], x: bits[11], y: bits[11]) -> bits[11] {
-  ret add.3: bits[11] = add(x, y, id=3)
-}
-
-fn main() -> bits[11] {
-  literal.4: bits[11] = literal(value=0, id=4)
-  ret counted_for.5: bits[11] = counted_for(literal.4, trip_count=7, stride=1)
-}
-)";
-  EXPECT_THAT(
-      Parser::ParsePackage(program).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("Mandatory keyword argument 'body' not found")));
-}
-
-TEST(IrParserTest, CountedForInvariantArgs) {
-  std::string program = R"(
-package CountedFor
-
-fn body(i: bits[11], x: bits[11], y: bits[11]) -> bits[11] {
-  ret add.3: bits[11] = add(x, y, id=3)
-}
-
-fn main() -> bits[11] {
-  literal.4: bits[11] = literal(value=0, id=4)
-  literal.5: bits[11] = literal(value=1, id=5)
-  ret counted_for.6: bits[11] = counted_for(literal.4, trip_count=7, stride=1, body=body, invariant_args=[literal.5], id=6)
-}
-)";
-  ParsePackageAndCheckDump(program);
-}
-TEST(IrParserTest, CountedForBodyParamCountTooMany0) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: bits[4], data: bits[16], x: bits[16], y: bits[16]) -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[16] = literal(value=2, id=2)
-  literal.3: bits[16] = literal(value=3)
-
-  ret counted_for.100: bits[16] = counted_for(x, trip_count=2, body=loop_fn,
-      invariant_args=[literal.2])
-}
-)";
-
-  EXPECT_THAT(Parser::ParsePackage(program).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("counted_for body should have 3 parameters, "
-                                 "got 4 instead")));
-}
-
-TEST(IrParserTest, CountedForBodyParamCountTooMany1) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: bits[4], data: bits[16], x: bits[16]) -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[16] = literal(value=2)
-
-  ret counted_for.100: bits[16] = counted_for(x, trip_count=2, body=loop_fn)
-}
-)";
-
-  EXPECT_THAT(Parser::ParsePackage(program).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("counted_for body should have 2 parameters, "
-                                 "got 3 instead")));
-}
-
-TEST(IrParserTest, CountedForBodyParamCountTooFew0) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: bits[4], data: bits[16], x: bits[16], y: bits[16]) -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[16] = literal(value=2, id=2)
-  literal.3: bits[16] = literal(value=3, id=3)
-  literal.4: bits[16] = literal(value=4)
-
-  ret counted_for.100: bits[16] = counted_for(x, trip_count=2, body=loop_fn,
-      invariant_args=[literal.2, literal.3, literal.4])
-}
-)";
-
-  EXPECT_THAT(Parser::ParsePackage(program).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("counted_for body should have 5 parameters, "
-                                 "got 4 instead")));
-}
-
-TEST(IrParserTest, CountedForBodyParamCountTooFew1) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: bits[4], data: bits[16]) -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[16] = literal(value=2)
-
-  ret counted_for.100: bits[16] = counted_for(x, trip_count=2, body=loop_fn,
-      invariant_args=[literal.2])
-}
-)";
-
-  EXPECT_THAT(Parser::ParsePackage(program).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("counted_for body should have 3 parameters, "
-                                 "got 2 instead")));
-}
-
-TEST(IrParserTest, CountedForBodyParamCountTooFew2) {
-  std::string program = R"(
-package test
-
-fn loop_fn() -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[16] = literal(value=2)
-
-  ret counted_for.100: bits[16] = counted_for(x, trip_count=2, body=loop_fn)
-}
-)";
-
-  EXPECT_THAT(Parser::ParsePackage(program).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("counted_for body should have 2 parameters, "
-                                 "got 0 instead")));
-}
-
-TEST(IrParserTest, CountedForBodyBitWidthSufficient0) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: bits[4], data: bits[16]) -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0, id=10)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[16] = literal(value=2, id=2)
-
-  ret counted_for.100: bits[16] = counted_for(x, trip_count=16, stride=1,
-                                              body=loop_fn, id=100)
-}
-)";
-
-  ParsePackageAndCheckDump(program);
-}
-
-TEST(IrParserTest, CountedForBodyBitWidthZeroIteration) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: bits[1], data: bits[16]) -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0, id=10)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[16] = literal(value=2, id=2)
-
-  ret counted_for.100: bits[16] = counted_for(x, trip_count=0, stride=1,
-                                              body=loop_fn, id=100)
-}
-)";
-
-  ParsePackageAndCheckDump(program);
-}
-
-TEST(IrParserTest, CountedForBodyBitWidthOneIteration) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: bits[1], data: bits[16]) -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0, id=10)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[16] = literal(value=2, id=2)
-
-  ret counted_for.100: bits[16] = counted_for(x, trip_count=1, stride=1,
-                                              body=loop_fn, id=100)
-}
-)";
-
-  ParsePackageAndCheckDump(program);
-}
-
-TEST(IrParserTest, CountedForBodyBitWidthInsufficient) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: bits[4], data: bits[16]) -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[16] = literal(value=2, id=2)
-
-  ret counted_for.100: bits[16] = counted_for(x, trip_count=17, body=loop_fn, id=100)
-}
-)";
-
-  EXPECT_THAT(
-      Parser::ParsePackage(program).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("counted_for body should have bits[N] type, where "
-                         "N >= 5, got bits[4]")));
-}
-
-TEST(IrParserTest, CountedForBodyBitWidthInsufficientWithStride) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: bits[4], data: bits[16]) -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0, id=10)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[16] = literal(value=2, id=2)
-
-  ret counted_for.100: bits[16] = counted_for(x, trip_count=16, stride=2,
-                                              body=loop_fn)
-}
-)";
-
-  EXPECT_THAT(
-      Parser::ParsePackage(program).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("counted_for body should have bits[N] type, where "
-                         "N >= 5, got bits[4]")));
-}
-
-TEST(IrParserTest, CountedForBodyBitWidthTypeMismatch0) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: bits[4][1], data: bits[16]) -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0, id=10)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[16] = literal(value=2, id=2)
-
-  ret counted_for.100: bits[16] = counted_for(x, trip_count=0, body=loop_fn, id=100)
-}
-)";
-
-  EXPECT_THAT(
-      Parser::ParsePackage(program).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("counted_for body should have bits[N] type, where "
-                         "N >= 1, got bits[4][1]")));
-}
-
-TEST(IrParserTest, CountedForBodyBitWidthTypeMismatch1) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: (bits[4]), data: bits[16]) -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0, id=10)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[16] = literal(value=2, id=2)
-
-  ret counted_for.100: bits[16] = counted_for(x, trip_count=1, body=loop_fn, id=100)
-}
-)";
-
-  EXPECT_THAT(
-      Parser::ParsePackage(program).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("counted_for body should have bits[N] type, where "
-                         "N >= 1, got (bits[4])")));
-}
-
-TEST(IrParserTest, CountedForBodyDataTypeMismatch) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: bits[4], data: bits[13]) -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0, id=10)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[16] = literal(value=2, id=2)
-
-  ret counted_for.100: bits[16] = counted_for(x, trip_count=1, body=loop_fn, id=100)
-}
-)";
-
-  EXPECT_THAT(
-      Parser::ParsePackage(program).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("should have bits[16] type, got bits[13] instead")));
-}
-
-TEST(IrParserTest, CountedForReturnTypeMismatch) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: bits[4], data: bits[16]) -> bits[15] {
-  ret literal.10: bits[15] = literal(value=0, id=10)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[16] = literal(value=2, id=2)
-
-  ret counted_for.100: bits[16] = counted_for(x, trip_count=1, body=loop_fn, id=100)
-}
-)";
-
-  EXPECT_THAT(
-      Parser::ParsePackage(program).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("should have bits[16] type, got bits[15] instead")));
-}
-
-TEST(IrParserTest, CountedForBodyInvariantArgTypeMismatch0) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: bits[4], data: bits[16],
-           x: bits[4], y: (bits[4], bits[4]), z: bits[4][1]) -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0, id=10)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[4] = literal(value=2, id=2)
-  literal.3: bits[4] = literal(value=3, id=3)
-  literal.4: bits[4] = literal(value=4, id=4)
-
-  literal.112: bits[4] = literal(value=1, id=112)
-  tuple.113: (bits[4], bits[4]) = tuple(literal.2, literal.3, id=113)
-  array.114: bits[4][1] = array(literal.4, id=114)
-
-  ret counted_for.200: bits[16] = counted_for(x, trip_count=2, body=loop_fn,
-      invariant_args=[literal.112, array.114, array.114])
-}
-)";
-
-  EXPECT_THAT(
-      Parser::ParsePackage(program).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("Parameter 3 (y) of function loop_fn used as "
-                         "counted_for body should have bits[4][1] type")));
-}
-
-TEST(IrParserTest, CountedForBodyInvariantArgTypeMismatch1) {
-  std::string program = R"(
-package test
-
-fn loop_fn(i: bits[4], data: bits[16],
-           x: bits[4], y: (bits[4], bits[4]), z: bits[4][1]) -> bits[16] {
-  ret literal.10: bits[16] = literal(value=0)
-}
-
-fn f(x: bits[16]) -> bits[16] {
-  literal.2: bits[4] = literal(value=2, id=2)
-  literal.3: bits[4] = literal(value=3, id=3)
-  literal.4: bits[4] = literal(value=4)
-
-  literal.112: bits[4] = literal(value=1, id=112)
-  tuple.113: (bits[4], bits[4]) = tuple(literal.2, literal.3, id=113)
-  array.114: bits[4][1] = array(literal.4)
-
-  ret counted_for.200: bits[16] = counted_for(x, trip_count=2, body=loop_fn,
-      invariant_args=[literal.112, tuple.113, literal.112])
-}
-)";
-
-  EXPECT_THAT(Parser::ParsePackage(program).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Parameter 4 (z) of function loop_fn used as "
-                                 "counted_for body should have bits[4] type")));
-}
-
-TEST(IrParserTest, ParseBitSlice) {
-  std::string input = R"(
-fn bitslice(x: bits[32]) -> bits[14] {
-  ret bit_slice.1: bits[14] = bit_slice(x, start=7, width=14, id=1)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseDynamicBitSlice) {
-  std::string input = R"(
-fn dynamicbitslice(x: bits[32], y: bits[32]) -> bits[14] {
-  ret dynamic_bit_slice.1: bits[14] = dynamic_bit_slice(x, y, width=14, id=1)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseAfterAllEmpty) {
-  std::string input = R"(
-fn after_all_func() -> token {
-  ret after_all.1: token = after_all(id=1)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseAfterAllMany) {
-  std::string input = R"(
-fn after_all_func() -> token {
-  after_all.1: token = after_all(id=1)
-  after_all.2: token = after_all(id=2)
-  ret after_all.3: token = after_all(after_all.1, after_all.2, id=3)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseAfterAllNonToken) {
-  Package p("my_package");
-  std::string input = R"(
-fn after_all_func() -> token {
-  after_all.1: token = after_all(id=1)
-  after_all.2: token = after_all(id=2)
-  ret after_all.3: bits[2] = after_all(after_all.1, after_all.2, id=3)
-}
-)";
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected token type @")));
-}
-
-TEST(IrParserTest, ParseArray) {
-  std::string input = R"(
-fn array_and_array(x: bits[32], y: bits[32], z: bits[32]) -> bits[32][3] {
-  ret array.1: bits[32][3] = array(x, y, z, id=1)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseReverse) {
-  std::string input = R"(
-fn reverse(x: bits[32]) -> bits[32] {
-  ret reverse.1: bits[32] = reverse(x, id=1)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseArrayOfTuples) {
-  std::string input = R"(
-fn array_and_array(x: (bits[32], bits[1]), y: (bits[32], bits[1])) -> (bits[32], bits[1])[3] {
-  ret array.1: (bits[32], bits[1])[3] = array(x, y, x, id=1)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseNestedBitsArrayIndex) {
-  std::string input = R"(
-fn array_and_array(p: bits[2][5][4][42], q: bits[32], r: bits[2]) -> bits[2][5] {
-  ret array_index.1: bits[2][5] = array_index(p, indices=[q, r], id=1)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseNestedBitsArrayUpdate) {
-  std::string input = R"(
-fn array_and_array(p: bits[2][5][4][42], q: bits[32], v: bits[2][5][4]) -> bits[2][5][4][42] {
-  ret array_update.1: bits[2][5][4][42] = array_update(p, v, indices=[q], id=1)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, DifferentWidthMultiplies) {
-  std::string input = R"(
-fn multiply(x: bits[32], y: bits[7]) -> bits[42] {
-  ret umul.1: bits[42] = umul(x, y, id=1)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, EmptyBitsBounds) {
-  Package p("my_package");
-  std::string input = R"(fn f() -> bits[] {
-  ret literal.1: bits[] = literal(value=0, id=1)
-})";
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected token of type \"literal\"")));
-}
-
 TEST(IrParserTest, ParseSingleEmptyPackage) {
   std::string input = R"(package EmptyPackage)";
   XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> package,
                            Parser::ParsePackage(input));
   EXPECT_EQ(package->name(), "EmptyPackage");
   EXPECT_EQ(0, package->functions().size());
+}
 
-  ParsePackageAndCheckDump(input);
+TEST(IrParserTest, ParseSingleEmptyPackageNamedKeywords) {
+  for (const std::string_view name :
+       {"top", "fn", "proc", "block", "chan", "file_number", "token", "bits",
+        "package", "instantiation"}) {
+    std::string input = absl::StrCat("package ", name);
+    XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> package,
+                             Parser::ParsePackage(input));
+    EXPECT_EQ(package->name(), name);
+    EXPECT_EQ(0, package->functions().size());
+  }
+}
+
+TEST(IrParserTest, ProcWithMultipleReadsOfSameStateElement) {
+  std::string program = R"(
+package test_module
+
+proc foo(__state: bits[32], __cond: bits[1], init={0, 1}) {
+  cond: bits[1] = state_read(state_element=__cond)
+  not_cond: bits[1] = not(cond)
+  __state_1: bits[32] = state_read(state_element=__state, predicate=cond)
+  __state_2: bits[32] = state_read(state_element=__state, predicate=not_cond)
+  next_value.1: () = next_value(state_element=__state, value=__state_1, predicate=cond)
+  next_value.2: () = next_value(state_element=__state, value=__state_2, predicate=not_cond)
+  next_value.3: () = next_value(state_element=__cond, value=not_cond)
+}
+
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, package->GetProc("foo"));
+  EXPECT_EQ(proc->GetStateElementCount(), 2);
+  XLS_ASSERT_OK_AND_ASSIGN(StateElement * state,
+                           proc->GetStateElementByName("__state"));
+  absl::Span<StateRead* const> reads = proc->GetStateReadsByStateElement(state);
+  EXPECT_EQ(reads.size(), 2);
 }
 
 TEST(IrParserTest, ParseSingleFunctionPackage) {
@@ -896,8 +217,6 @@ fn two_plus_two() -> bits[32] {
   EXPECT_EQ(1, package->functions().size());
   Function* func = package->functions().front().get();
   EXPECT_EQ(func->name(), "two_plus_two");
-
-  ParsePackageAndCheckDump(input);
 }
 
 TEST(IrParserTest, ParseMultiFunctionPackage) {
@@ -922,37 +241,6 @@ fn seven_and_five() -> bits[32] {
   EXPECT_EQ(2, package->functions().size());
   EXPECT_EQ(package->functions()[0]->name(), "two_plus_two");
   EXPECT_EQ(package->functions()[1]->name(), "seven_and_five");
-
-  ParsePackageAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParsePackageWithError) {
-  std::string input = R"(package MultiFunctionPackage
-
-Garbage
-)";
-  EXPECT_THAT(Parser::ParsePackage(input).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected fn, proc, or chan definition")));
-}
-
-TEST(IrParserTest, ParseEmptyStringAsPackage) {
-  EXPECT_THAT(Parser::ParsePackage("").status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected token, but found EOF")));
-}
-
-TEST(IrParserTest, ParsePackageWithMissingPackageLine) {
-  std::string input = R"(fn two_plus_two() -> bits[32] {
-  literal.1: bits[32] = literal(value=2, id=1)
-  literal.2: bits[32] = literal(value=2, id=2)
-  ret add.3: bits[32] = add(literal.1, literal.2, id=3)
-}
-)";
-  absl::Status status = Parser::ParsePackage(input).status();
-  EXPECT_THAT(Parser::ParsePackage(input).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected 'package' keyword")));
 }
 
 TEST(IrParserTest, ParseBinaryConcat) {
@@ -986,22 +274,6 @@ fn concat_wrapper(x: bits[31], y: bits[1]) -> bits[95] {
   EXPECT_EQ(p->GetBitsType(95), f->return_value()->GetType());
 }
 
-TEST(IrParserTest, ParseMap) {
-  std::string input = R"(
-package SimpleMap
-
-fn to_apply(element: bits[42]) -> bits[1] {
-  literal.2: bits[42] = literal(value=10, id=2)
-  ret ult.3: bits[1] = ult(element, literal.2, id=3)
-}
-
-fn top(input: bits[42][123]) -> bits[1][123] {
-  ret map.5: bits[1][123] = map(input, to_apply=to_apply, id=5)
-}
-)";
-  ParsePackageAndCheckDump(input);
-}
-
 TEST(IrParserTest, ParseBinarySel) {
   const std::string input = R"(
 package ParseSel
@@ -1018,8 +290,6 @@ fn sel_wrapper(x: bits[1], y: bits[32], z: bits[32]) -> bits[32] {
   EXPECT_FALSE(f.return_value()->Is<BinOp>());
   EXPECT_TRUE(f.return_value()->Is<Select>());
   EXPECT_EQ(f.return_value()->GetType(), pkg->GetBitsType(32));
-
-  ParsePackageAndCheckDump(input);
 }
 
 TEST(IrParserTest, ParseTernarySelectWithDefault) {
@@ -1039,304 +309,6 @@ fn sel_wrapper(p: bits[2], x: bits[32], y: bits[32], z: bits[32]) -> bits[32] {
   EXPECT_FALSE(f.return_value()->Is<BinOp>());
   EXPECT_TRUE(f.return_value()->Is<Select>());
   EXPECT_EQ(f.return_value()->GetType(), pkg->GetBitsType(32));
-
-  ParsePackageAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseOneHotLsbPriority) {
-  const std::string input = R"(
-package ParseOneHot
-
-fn sel_wrapper(x: bits[42]) -> bits[43] {
-  ret one_hot.1: bits[43] = one_hot(x, lsb_prio=true, id=1)
-}
-  )";
-  ParsePackageAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseOneHotMsbPriority) {
-  const std::string input = R"(
-package ParseOneHot
-
-fn sel_wrapper(x: bits[42]) -> bits[43] {
-  ret one_hot.1: bits[43] = one_hot(x, lsb_prio=false, id=1)
-}
-  )";
-  ParsePackageAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseOneHotSelect) {
-  const std::string input = R"(
-package ParseOneHotSel
-
-fn sel_wrapper(p: bits[3], x: bits[32], y: bits[32], z: bits[32]) -> bits[32] {
-  ret one_hot_sel.1: bits[32] = one_hot_sel(p, cases=[x, y, z], id=1)
-}
-  )";
-  ParsePackageAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseParamReturn) {
-  std::string input = R"(
-package ParseParamReturn
-
-fn simple_neg(x: bits[2]) -> bits[2] {
-  ret x: bits[2] = param(name=x)
-}
-)";
-  ParsePackageAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseInvoke) {
-  const std::string input = R"(package foobar
-
-fn bar(x: bits[32], y: bits[32]) -> bits[32] {
-  ret add.1: bits[32] = add(x, y, id=1)
-}
-
-fn foo(x: bits[32]) -> bits[32] {
-  literal.2: bits[32] = literal(value=5, id=2)
-  ret invoke.3: bits[32] = invoke(x, literal.2, to_apply=bar, id=3)
-}
-)";
-  ParsePackageAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseAssert) {
-  const std::string input = R"(package foobar
-
-fn bar(tkn: token, cond: bits[1]) -> token {
-  ret assert.1: token = assert(tkn, cond, message="The foo is bar", id=1)
-}
-)";
-  ParsePackageAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseAssertWithLabel) {
-  const std::string input = R"(package foobar
-
-fn bar(tkn: token, cond: bits[1]) -> token {
-  ret assert.1: token = assert(tkn, cond, message="The foo is bar", label="assert_label", id=1)
-}
-)";
-  ParsePackageAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseBitSliceUpdate) {
-  const std::string input = R"(package foobar
-
-fn bar(to_update: bits[123], start: bits[8], value: bits[23]) -> bits[123] {
-  ret bit_slice_update.1: bits[123] = bit_slice_update(to_update, start, value, id=1)
-}
-)";
-  ParsePackageAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseSimpleProc) {
-  const std::string input = R"(package test
-
-chan ch(bits[32], id=0, kind=streaming, ops=send_receive, metadata="""""")
-
-proc my_proc(my_token: token, my_state: bits[32], init=42) {
-  send.1: token = send(my_token, my_state, channel_id=0, id=1)
-  receive.2: (token, bits[32]) = receive(send.1, channel_id=0, id=2)
-  tuple_index.3: token = tuple_index(receive.2, index=0, id=3)
-  next (tuple_index.3, my_state)
-}
-)";
-  ParsePackageAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseArrayIndex) {
-  const std::string input = R"(
-fn foo(x: bits[32][6]) -> bits[32] {
-  literal.1: bits[32] = literal(value=5, id=1)
-  ret array_index.2: bits[32] = array_index(x, indices=[literal.1], id=2)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseArraySlice) {
-  const std::string input = R"(
-fn foo(arr: bits[32][6]) -> bits[32][2] {
-  literal.1: bits[32] = literal(value=5, id=1)
-  ret array_slice.2: bits[32][2] = array_slice(arr, literal.1, width=2, id=2)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseArrayUpdate) {
-  const std::string input = R"(
-fn foo(array: bits[32][3], idx: bits[32], newval: bits[32]) -> bits[32][3] {
-  ret array_update.4: bits[32][3] = array_update(array, newval, indices=[idx], id=4)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseArrayUpdateNonArary) {
-  const std::string input = R"(
-fn foo(array: bits[32], idx: bits[32], newval: bits[32]) -> bits[32][3] {
-  ret array_update.4: bits[32][3] = array_update(array, newval, indices=[idx],  id=4)
-}
-)";
-  Package p("my_package");
-  EXPECT_THAT(
-      Parser::ParseFunction(input, &p).status(),
-      StatusIs(
-          absl::StatusCode::kInvalidArgument,
-          HasSubstr(
-              "Too many indices (1) to index into array of type bits[32]")));
-}
-
-TEST(IrParserTest, ParseArrayUpdateIncompatibleTypes) {
-  const std::string input = R"(
-fn foo(array: bits[32][3], idx: bits[32], newval: bits[64]) -> bits[32][3] {
-  ret array_update.4: bits[32][3] = array_update(array, newval, indices=[idx], id=4)
-}
-)";
-  Package p("my_package");
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected update value to have type bits[32]; "
-                                 "has type bits[64]")));
-}
-
-TEST(IrParserTest, ParseArrayConcat0) {
-  const std::string input = R"(
-fn foo(a0: bits[32][3], a1: bits[32][1]) -> bits[32][4] {
-  ret array_concat.3: bits[32][4] = array_concat(a0, a1, id=3)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseArrayConcat1) {
-  const std::string input = R"(
-fn foo(a0: bits[32][0], a1: bits[32][1]) -> bits[32][1] {
-  ret array_concat.3: bits[32][1] = array_concat(a0, a1, id=3)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseArrayConcatMixedOperands) {
-  const std::string input = R"(
-fn f(a0: bits[32][2], a1: bits[32][3], a2: bits[32][1]) -> bits[32][7] {
-  array_concat.4: bits[32][1] = array_concat(a2, id=4)
-  array_concat.5: bits[32][2] = array_concat(array_concat.4, array_concat.4, id=5)
-  array_concat.6: bits[32][7] = array_concat(a0, array_concat.5, a1, id=6)
-  ret array_concat.7: bits[32][7] = array_concat(array_concat.6, id=7)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseArrayConcatNonArrayType) {
-  const std::string input = R"(
-fn foo(a0: bits[16], a1: bits[16][1]) -> bits[16][2] {
-  ret array_concat.3: bits[16][2] = array_concat(a0, a1, id=3)
-}
-)";
-  Package p("my_package");
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Cannot array-concat node a0 because it has "
-                                 "non-array type bits[16]")));
-}
-
-TEST(IrParserTest, ParseArrayIncompatibleElementType) {
-  const std::string input = R"(
-fn foo(a0: bits[16][1], a1: bits[32][1]) -> bits[16][2] {
-  ret array_concat.3: bits[16][2] = array_concat(a0, a1, id=3)
-}
-)";
-  Package p("my_package");
-  EXPECT_THAT(
-      Parser::ParseFunction(input, &p).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("Cannot array-concat node a1 because it has element "
-                         "type bits[32] but expected bits[16]")));
-}
-
-TEST(IrParserTest, ParseArrayIncompatibleReturnType) {
-  const std::string input = R"(
-fn foo(a0: bits[16][1], a1: bits[16][1]) -> bits[16][3] {
-  ret array_concat.3: bits[16][3] = array_concat(a0, a1, id=3)
-}
-)";
-  Package p("my_package");
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Declared type bits[16][3] does not match "
-                                 "expected type bits[16][2]")));
-}
-
-TEST(IrParserTest, ParseTupleIndex) {
-  const std::string input = R"(
-fn foo(x: bits[42]) -> bits[33] {
-  literal.1: bits[32] = literal(value=5, id=1)
-  literal.2: bits[33] = literal(value=123, id=2)
-  tuple.3: (bits[42], bits[32], bits[33]) = tuple(x, literal.1, literal.2, id=3)
-  ret tuple_index.4: bits[33] = tuple_index(tuple.3, index=2, id=4)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseIdentity) {
-  const std::string input = R"(
-fn foo(x: bits[32]) -> bits[32] {
-  ret identity.2: bits[32] = identity(x, id=2)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseUnsignedInequalities) {
-  std::string program = R"(
-fn parse_inequalities() -> bits[1] {
-  literal.1: bits[32] = literal(value=2, id=1)
-  literal.2: bits[32] = literal(value=2, id=2)
-  uge.3: bits[1] = uge(literal.1, literal.2, id=3)
-  ugt.4: bits[1] = ugt(literal.1, literal.2, id=4)
-  ule.5: bits[1] = ule(literal.1, literal.2, id=5)
-  ult.6: bits[1] = ult(literal.1, literal.2, id=6)
-  ret eq.7: bits[1] = eq(literal.1, literal.2, id=7)
-}
-)";
-  ParseFunctionAndCheckDump(program);
-}
-
-TEST(IrParserTest, ParseSignedInequalities) {
-  std::string program = R"(
-fn parse_inequalities() -> bits[1] {
-  literal.1: bits[32] = literal(value=2, id=1)
-  literal.2: bits[32] = literal(value=2, id=2)
-  sge.3: bits[1] = sge(literal.1, literal.2, id=3)
-  sgt.4: bits[1] = sgt(literal.1, literal.2, id=4)
-  sle.5: bits[1] = sle(literal.1, literal.2, id=5)
-  slt.6: bits[1] = slt(literal.1, literal.2, id=6)
-  ret eq.7: bits[1] = eq(literal.1, literal.2, id=7)
-}
-)";
-  ParseFunctionAndCheckDump(program);
-}
-
-TEST(IrParserTest, StandAloneRet) {
-  const std::string input = R"(package foobar
-
-fn foo(x: bits[32]) -> bits[32] {
-  identity.2: bits[32] = identity(x, id=2)
-  ret identity.2
-}
-)";
-
-  EXPECT_THAT(Parser::ParsePackage(input).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected token of type \":\"")));
 }
 
 TEST(IrParserTest, ParseEndOfLineComment) {
@@ -1410,39 +382,6 @@ TEST(IrParserTest, ParseNestedTuple) {
   EXPECT_TRUE(t->AsTupleOrDie()->element_type(1)->IsBits());
 }
 
-TEST(IrParserTest, ParseArrayLiterals) {
-  const std::string input = R"(
-fn foo(x: bits[32]) -> bits[32] {
-  literal.1: bits[32][2] = literal(value=[0, 1], id=1)
-  literal.2: bits[3] = literal(value=1, id=2)
-  ret array_index.3: bits[32] = array_index(literal.1, indices=[literal.2], id=3)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseNestedArrayLiterals) {
-  const std::string input = R"(
-fn foo() -> bits[32][2][3][1] {
-  ret literal.1: bits[32][2][3][1] = literal(value=[[[0, 1], [2, 3], [4, 5]]], id=1)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseArrayLiteralWithInsufficientBits) {
-  Package p("my_package");
-  const std::string input = R"(
-fn foo() -> bits[7][2] {
-  ret literal.1: bits[7][2] = literal(value=[0, 12345], id=1)
-}
-)";
-  EXPECT_THAT(
-      Parser::ParseFunction(input, &p).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("Value 12345 is not representable in 7 bits")));
-}
-
 TEST(IrParserTest, ReturnArrayLiteral) {
   const std::string input = R"(
 package foobar
@@ -1471,138 +410,6 @@ fn foo() -> (bits[32], bits[3])[2] {
   ASSERT_EQ(pkg->functions().size(), 1);
   Type* t = pkg->functions()[0]->return_value()->GetType();
   EXPECT_TRUE(t->IsArray());
-}
-
-TEST(IrParserTest, ArrayValueInBitsLiteral) {
-  Package p("my_package");
-  const std::string input = R"(
-fn foo() -> bits[42] {
-  ret literal.1: bits[42] = literal(value=[0, 123], id=1)
-}
-)";
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected token of type \"literal\"")));
-}
-
-TEST(IrParserTest, BitsValueInArrayLiteral) {
-  Package p("my_package");
-  const std::string input = R"(
-fn foo() -> bits[7][42] {
-  ret literal.1: bits[7][42] = literal(value=123], id=1)
-}
-)";
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected token of type \"[\"")));
-}
-
-TEST(IrParserTest, ParseTupleLiteral) {
-  const std::string input = R"(
-fn foo() -> (bits[32][2], bits[1]) {
-  ret literal.1: (bits[32][2], bits[1]) = literal(value=([123, 456], 0), id=1)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseNestedTupleLiteral) {
-  const std::string input = R"(
-fn foo() -> (bits[32][2], bits[1], (), (bits[44])) {
-  ret literal.1: (bits[32][2], bits[1], (), (bits[44])) = literal(value=([123, 456], 0, (), (10)), id=1)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseNaryXor) {
-  const std::string input = R"(
-fn foo(x: bits[8]) -> bits[8] {
-  ret xor.2: bits[8] = xor(x, x, x, x, id=2)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseExtendOps) {
-  const std::string input = R"(
-fn foo(x: bits[8]) -> bits[32] {
-  zero_ext.1: bits[32] = zero_ext(x, new_bit_count=32, id=1)
-  sign_ext.2: bits[32] = sign_ext(x, new_bit_count=32, id=2)
-  ret xor.3: bits[32] = xor(zero_ext.1, sign_ext.2, id=3)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseInconsistentExtendOp) {
-  const std::string input = R"(
-fn foo(x: bits[8]) -> bits[32] {
-  ret zero_ext.1: bits[33] = zero_ext(x, new_bit_count=32, id=1)
-}
-)";
-  Package p("my_package");
-  EXPECT_THAT(
-      Parser::ParseFunction(input, &p).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("differs from its new_bit_count annotation 32")));
-}
-
-TEST(IrParserTest, ParseDecode) {
-  const std::string input = R"(
-fn foo(x: bits[8]) -> bits[256] {
-  decode.1: bits[42] = decode(x, width=42, id=1)
-  ret decode.2: bits[256] = decode(x, width=256, id=2)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ParseEncode) {
-  const std::string input = R"(
-fn foo(x: bits[16]) -> bits[4] {
-  ret encode.1: bits[4] = encode(x, id=1)
-}
-)";
-  ParseFunctionAndCheckDump(input);
-}
-
-TEST(IrParserTest, ArrayIndexOfTuple) {
-  const std::string input = R"(
-fn foo(x: (bits[8])) -> bits[32] {
-  literal.1: bits[32] = literal(value=0, id=1)
-  ret array_index.2: bits[8] = array_index(x, indices=[literal.1], id=2)
-}
-)";
-  Package p("my_package");
-  EXPECT_THAT(
-      Parser::ParseFunction(input, &p).status(),
-      StatusIs(
-          absl::StatusCode::kInvalidArgument,
-          HasSubstr(
-              "Too many indices (1) to index into array of type (bits[8])")));
-}
-
-TEST(IrParserTest, TupleIndexOfArray) {
-  const std::string input = R"(
-fn foo(x: bits[8][5]) -> bits[8] {
-  ret tuple_index.1: bits[8] = tuple_index(x, index=0, id=1)
-}
-)";
-  Package p("my_package");
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("tuple_index operand is not a tuple")));
-}
-
-TEST(IrParserTest, NicerErrorOnEmptyString) {
-  const std::string input = "";
-  EXPECT_THAT(
-      Parser::ParsePackage(input).status(),
-      StatusIs(
-          absl::StatusCode::kInvalidArgument,
-          HasSubstr(
-              "Expected keyword 'package': Expected token, but found EOF.")));
 }
 
 TEST(IrParserTest, ParsesComplexValue) {
@@ -1694,7 +501,7 @@ TEST(IrParserTest, TrivialProc) {
   std::string program = R"(
 package test
 
-proc foo(my_token: token, my_state: bits[32], init=42) {
+proc foo(my_token: token, my_state: bits[32], init={token, 42}) {
   next (my_token, my_state)
 }
 )";
@@ -1702,12 +509,43 @@ proc foo(my_token: token, my_state: bits[32], init=42) {
   EXPECT_EQ(package->functions().size(), 0);
   EXPECT_EQ(package->procs().size(), 1);
   XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, package->GetProc("foo"));
-  EXPECT_EQ(proc->node_count(), 2);
-  EXPECT_EQ(proc->params().size(), 2);
-  EXPECT_EQ(proc->InitValue().ToString(), "bits[32]:42");
-  EXPECT_EQ(proc->StateType()->ToString(), "bits[32]");
-  EXPECT_EQ(proc->TokenParam()->GetName(), "my_token");
-  EXPECT_EQ(proc->StateParam()->GetName(), "my_state");
+  EXPECT_EQ(proc->node_count(), 4);
+  EXPECT_EQ(proc->StateElements().size(), 2);
+  EXPECT_EQ(proc->GetStateElement(0)->initial_value().ToString(), "token");
+  EXPECT_EQ(proc->GetStateElement(0)->type()->ToString(), "token");
+  EXPECT_EQ(proc->GetStateElement(1)->initial_value().ToString(),
+            "bits[32]:42");
+  EXPECT_EQ(proc->GetStateElement(1)->type()->ToString(), "bits[32]");
+  EXPECT_EQ(proc->GetStateElement(0)->name(), "my_token");
+  EXPECT_EQ(proc->GetStateElement(1)->name(), "my_state");
+}
+
+TEST(IrParserTest, StatelessProcWithInitAndNext) {
+  std::string program = R"(
+package test
+
+proc foo(init={}) {
+  next ()
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, package->GetProc("foo"));
+  EXPECT_EQ(proc->node_count(), 0);
+  EXPECT_THAT(proc->StateElements(), IsEmpty());
+}
+
+TEST(IrParserTest, StatelessProcWithNextButNotInit) {
+  std::string program = R"(
+package test
+
+proc foo() {
+  next ()
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, package->GetProc("foo"));
+  EXPECT_EQ(proc->node_count(), 0);
+  EXPECT_THAT(proc->StateElements(), IsEmpty());
 }
 
 TEST(IrParserTest, FunctionAndProc) {
@@ -1718,7 +556,7 @@ fn my_function() -> bits[1] {
   ret literal.1: bits[1] = literal(value=0, id=1)
 }
 
-proc my_proc(my_token: token, my_state: bits[32], init=42) {
+proc my_proc(my_token: token, my_state: bits[32], init={token, 42}) {
   next (my_token, my_state)
 }
 )";
@@ -1732,136 +570,151 @@ proc my_proc(my_token: token, my_state: bits[32], init=42) {
   EXPECT_EQ(proc->name(), "my_proc");
 }
 
-TEST(IrParserTest, ProcWrongParameterCount) {
+TEST(IrParserTest, ProcWithMultipleStateElements) {
   std::string program = R"(
 package test
 
-proc foo(my_token: token, my_state: bits[32], total_garbage: bits[1], init=42) {
-  ret tuple.1: (token, bits[32]) = tuple(my_token, my_state, id=1)
+proc foo( x: bits[32], y: (), z: bits[32], init={42, (), 123}) {
+  sum: bits[32] = add(x, z)
+  next (x, y, sum)
 }
 )";
-  EXPECT_THAT(Parser::ParsePackage(program).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected 'init' attribute")));
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, package->GetProc("foo"));
+  EXPECT_EQ(proc->GetStateElementCount(), 3);
 }
 
-TEST(IrParserTest, ProcWrongTokenType) {
+TEST(IrParserTest, ProcWithTokenAfterStateElements) {
   std::string program = R"(
 package test
 
-proc foo(my_token: bits[1], my_state: bits[32], init=42) {
-  ret tuple.1: (token, bits[32]) = tuple(my_token, my_state, id=1)
+proc foo(x: bits[32], y: (), z: bits[32], my_token: token, init={42, (), 123, token}) {
+  sum: bits[32] = add(x, z)
+  next (x, y, sum, my_token)
 }
 )";
-  EXPECT_THAT(
-      Parser::ParsePackage(program).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("Expected second argument of proc to be token type")));
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, package->GetProc("foo"));
+  EXPECT_EQ(proc->GetStateElementCount(), 4);
 }
 
-TEST(IrParserTest, ProcWrongInitValueType) {
+TEST(IrParserTest, ProcWithTokenBetweenStateElements) {
   std::string program = R"(
 package test
 
-proc foo(my_token: token, my_state: bits[32], init=(1, 2, 3)) {
-  ret tuple.1: (token, bits[32]) = tuple(my_token, my_state, id=1)
+proc foo(x: bits[32], my_token: token, y: (), z: bits[32], init={42, token, (), 123}) {
+  sum: bits[32] = add(x, z)
+  next (x, my_token, y, sum)
 }
 )";
-  EXPECT_THAT(Parser::ParsePackage(program).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected token of type \"literal\"")));
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, package->GetProc("foo"));
+  EXPECT_EQ(proc->GetStateElementCount(), 4);
 }
 
-TEST(IrParserTest, ProcWrongReturnType) {
+TEST(IrParserTest, ProcWithMultipleTokens) {
   std::string program = R"(
 package test
 
-proc foo(my_token: token, my_state: bits[32], init=42) {
-  literal.1: bits[32] = literal(value=123, id=1)
-  next (literal.1, my_state)
+proc foo(tok1: token, x: bits[32], tok2: token, y: (), z: bits[32], init={token, 42, token, (), 123}) {
+  sum: bits[32] = add(x, z)
+  next (tok2, x, tok1, y, sum)
 }
 )";
-  EXPECT_THAT(
-      Parser::ParsePackage(program).status(),
-      StatusIs(
-          absl::StatusCode::kInvalidArgument,
-          HasSubstr(
-              "Recurrent token of proc must be token type, is: bits[32]")));
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, package->GetProc("foo"));
+  EXPECT_EQ(proc->GetStateElementCount(), 5);
 }
 
-TEST(IrParserTest, ProcWithRet) {
+TEST(IrParserTest, ProcWithExplicitStateRead) {
   std::string program = R"(
 package test
 
-proc foo(my_token: token, my_state: bits[32], init=42) {
-  ret literal.1: bits[32] = literal(value=123, id=1)
+proc foo( x: bits[32], y: (), z: bits[32], init={42, (), 123}) {
+  x: bits[32] = state_read(state_element=x)
+  sum: bits[32] = add(x, z)
+  next (x, y, sum)
 }
 )";
-  EXPECT_THAT(Parser::ParsePackage(program).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("ret keyword only supported in functions")));
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, package->GetProc("foo"));
+  EXPECT_EQ(proc->GetStateElementCount(), 3);
+  XLS_ASSERT_OK_AND_ASSIGN(StateElement * x, proc->GetStateElementByName("x"));
+  absl::Span<StateRead* const> reads = proc->GetStateReadsByStateElement(x);
+  ASSERT_EQ(reads.size(), 1);
+  EXPECT_THAT(reads.front()->predicate(), std::nullopt);
 }
 
-TEST(IrParserTest, FunctionWithNext) {
+TEST(IrParserTest, DecoupledNextProc) {
   std::string program = R"(
 package test
 
-fn foo(x: bits[32]) -> bits[32] {
-  next (x, x)
+proc decoupled_proc(__state: bits[32], init={0}) {
+  sr: bits[32] = state_read(state_element=__state)
+  one: bits[32] = literal(value=1)
+  add: bits[32] = add(sr, one)
+  next_state: () = next_value(state_element=__state, value=add)
 }
 )";
-  EXPECT_THAT(Parser::ParsePackage(program).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("next keyword only supported in procs")));
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, package->GetProc("decoupled_proc"));
+  EXPECT_EQ(proc->GetStateElementCount(), 1);
+  XLS_ASSERT_OK_AND_ASSIGN(StateElement * state,
+                           proc->GetStateElementByName("__state"));
+  absl::Span<StateRead* const> reads = proc->GetStateReadsByStateElement(state);
+  ASSERT_EQ(reads.size(), 1);
+  EXPECT_THAT(reads.front()->predicate(), std::nullopt);
 }
 
-TEST(IrParserTest, ProcWithBogusNextToken) {
+TEST(IrParserTest, ProcWithPredicatedStateRead) {
   std::string program = R"(
 package test
 
-proc foo(my_token: token, my_state: bits[32], init=42) {
-  next (foobar, my_state)
+proc foo( x: bits[32], y: bits[1], z: bits[32], init={42, 1, 123}) {
+  x: bits[32] = state_read(state_element=x, predicate=y)
+  z: bits[32] = state_read(state_element=z)
+  sum: bits[32] = add(x, z)
+  next (x, y, sum)
 }
 )";
-  EXPECT_THAT(
-      Parser::ParsePackage(program).status(),
-      StatusIs(
-          absl::StatusCode::kInvalidArgument,
-          HasSubstr("Proc next token name @ 5:9  was not previously defined")));
-}
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, package->GetProc("foo"));
+  EXPECT_EQ(proc->GetStateElementCount(), 3);
 
-TEST(IrParserTest, ProcWithBogusNextState) {
-  std::string program = R"(
-package test
+  XLS_ASSERT_OK_AND_ASSIGN(StateElement * x, proc->GetStateElementByName("x"));
+  absl::Span<StateRead* const> reads_x = proc->GetStateReadsByStateElement(x);
+  ASSERT_EQ(reads_x.size(), 1);
+  std::optional<Node*> x_predicate = reads_x.front()->predicate();
+  ASSERT_TRUE(x_predicate.has_value());
+  ASSERT_EQ((*x_predicate)->op(), Op::kStateRead);
+  EXPECT_EQ((*x_predicate)->As<StateRead>()->state_element()->name(), "y");
 
-proc foo(my_token: token, my_state: bits[32], init=42) {
-  next (my_token, sfsdfsfd)
-}
-)";
-  EXPECT_THAT(
-      Parser::ParsePackage(program).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr(
-                   "Proc next state name @ 5:19  was not previously defined")));
+  XLS_ASSERT_OK_AND_ASSIGN(StateElement * y, proc->GetStateElementByName("y"));
+  absl::Span<StateRead* const> reads_y = proc->GetStateReadsByStateElement(y);
+  ASSERT_EQ(reads_y.size(), 1);
+  ASSERT_FALSE(reads_y.front()->predicate().has_value());
+
+  XLS_ASSERT_OK_AND_ASSIGN(StateElement * z, proc->GetStateElementByName("z"));
+  absl::Span<StateRead* const> reads_z = proc->GetStateReadsByStateElement(z);
+  ASSERT_EQ(reads_z.size(), 1);
+  ASSERT_FALSE(reads_z.front()->predicate().has_value());
 }
 
 TEST(IrParserTest, ParseSendReceiveChannel) {
   Package p("my_package");
   XLS_ASSERT_OK_AND_ASSIGN(Channel * ch,
                            Parser::ParseChannel(
-                               R"(chan foo(bits[32], id=42, kind=port,
-                      ops=send_receive,
-                      metadata="module_port { flopped: true }"))",
+                               R"(chan foo(bits[32], id=42, kind=single_value,
+                      ops=send_receive))",
                                &p));
   EXPECT_EQ(ch->name(), "foo");
   EXPECT_EQ(ch->id(), 42);
   EXPECT_EQ(ch->supported_ops(), ChannelOps::kSendReceive);
-  EXPECT_TRUE(ch->IsPort());
+  EXPECT_EQ(ch->kind(), ChannelKind::kSingleValue);
   EXPECT_EQ(ch->type(), p.GetBitsType(32));
   EXPECT_TRUE(ch->initial_values().empty());
-  EXPECT_EQ(ch->metadata().channel_oneof_case(),
-            ChannelMetadataProto::kModulePort);
-  EXPECT_TRUE(ch->metadata().module_port().flopped());
+
+  EXPECT_FALSE(p.ChannelsAreProcScoped());
 }
 
 TEST(IrParserTest, ParseSendReceiveChannelWithInitialValues) {
@@ -1869,34 +722,17 @@ TEST(IrParserTest, ParseSendReceiveChannelWithInitialValues) {
   XLS_ASSERT_OK_AND_ASSIGN(
       Channel * ch,
       Parser::ParseChannel(
-          R"(chan foo(bits[32], initial_values={2, 4, 5}, id=42, kind=streaming, ops=send_receive,
-                         metadata="module_port { flopped: true }"))",
+          R"(chan foo(bits[32], initial_values={2, 4, 5}, id=42, kind=streaming,
+                         flow_control=none, ops=send_receive))",
           &p));
   EXPECT_EQ(ch->name(), "foo");
   EXPECT_EQ(ch->id(), 42);
   EXPECT_EQ(ch->supported_ops(), ChannelOps::kSendReceive);
-  EXPECT_TRUE(ch->IsStreaming());
+  EXPECT_EQ(ch->kind(), ChannelKind::kStreaming);
   EXPECT_EQ(ch->type(), p.GetBitsType(32));
   EXPECT_THAT(ch->initial_values(),
               ElementsAre(Value(UBits(2, 32)), Value(UBits(4, 32)),
                           Value(UBits(5, 32))));
-  EXPECT_EQ(ch->metadata().channel_oneof_case(),
-            ChannelMetadataProto::kModulePort);
-  EXPECT_TRUE(ch->metadata().module_port().flopped());
-}
-
-TEST(IrParserTest, ParseSendReceiveChannelWithEmptyInitialValues) {
-  Package p("my_package");
-  XLS_ASSERT_OK_AND_ASSIGN(
-      Channel * ch,
-      Parser::ParseChannel(
-          R"(chan foo(bits[32], initial_values={}, id=42, kind=register,
-                      ops=send_receive,
-                      metadata="module_port { flopped: true }"))",
-          &p));
-  EXPECT_EQ(ch->name(), "foo");
-  EXPECT_TRUE(ch->IsRegister());
-  EXPECT_TRUE(ch->initial_values().empty());
 }
 
 TEST(IrParserTest, ParseSendReceiveChannelWithTupleType) {
@@ -1904,8 +740,8 @@ TEST(IrParserTest, ParseSendReceiveChannelWithTupleType) {
   XLS_ASSERT_OK_AND_ASSIGN(Channel * ch, Parser::ParseChannel(
                                              R"(chan foo((bits[32], bits[1]),
                       initial_values={(123, 1), (42, 0)},
-                      id=42, kind=streaming,  ops=send_receive,
-                      metadata="module_port { flopped: true }"))",
+                      id=42, kind=streaming, flow_control=ready_valid,
+                      ops=send_receive))",
                                              &p));
   EXPECT_EQ(ch->name(), "foo");
   EXPECT_THAT(
@@ -1918,140 +754,127 @@ TEST(IrParserTest, ParseSendOnlyChannel) {
   Package p("my_package");
   XLS_ASSERT_OK_AND_ASSIGN(Channel * ch, Parser::ParseChannel(
                                              R"(chan bar((bits[32], bits[1]),
-                         id=7, kind=port, ops=send_only,
-                         metadata="module_port { flopped: false }"))",
+                         id=7, kind=single_value, ops=send_only))",
                                              &p));
   EXPECT_EQ(ch->name(), "bar");
   EXPECT_EQ(ch->id(), 7);
   EXPECT_EQ(ch->supported_ops(), ChannelOps::kSendOnly);
   EXPECT_EQ(ch->type(), p.GetTupleType({p.GetBitsType(32), p.GetBitsType(1)}));
-  EXPECT_EQ(ch->metadata().channel_oneof_case(),
-            ChannelMetadataProto::kModulePort);
-  EXPECT_FALSE(ch->metadata().module_port().flopped());
 }
 
 TEST(IrParserTest, ParseReceiveOnlyChannel) {
   Package p("my_package");
   XLS_ASSERT_OK_AND_ASSIGN(Channel * ch, Parser::ParseChannel(
                                              R"(chan meh(bits[32][4], id=0,
-                         kind=port, ops=receive_only,
-                         metadata="module_port { flopped: true }"))",
+                         kind=single_value, ops=receive_only))",
                                              &p));
   EXPECT_EQ(ch->name(), "meh");
   EXPECT_EQ(ch->id(), 0);
   EXPECT_EQ(ch->supported_ops(), ChannelOps::kReceiveOnly);
   EXPECT_EQ(ch->type(), p.GetArrayType(4, p.GetBitsType(32)));
-  EXPECT_EQ(ch->metadata().channel_oneof_case(),
-            ChannelMetadataProto::kModulePort);
-  EXPECT_TRUE(ch->metadata().module_port().flopped());
 }
 
-TEST(IrParserTest, ChannelParsingErrors) {
+TEST(IrParserTest, ParseStreamingChannelWithStrictness) {
   Package p("my_package");
-  EXPECT_THAT(Parser::ParseChannel(
-                  R"(chan meh(bits[32][4], kind=port,
-                         ops=receive_only,
-                         metadata="module_port { flopped: true }"))",
-                  &p)
-                  .status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Missing channel id")));
+  XLS_ASSERT_OK_AND_ASSIGN(Channel * ch,
+                           Parser::ParseChannel(
+                               R"(chan foo(bits[32], id=42, kind=streaming,
+                         flow_control=none, ops=send_receive,
+                         strictness=arbitrary_static_order))",
+                               &p));
+  EXPECT_EQ(ch->name(), "foo");
+  EXPECT_EQ(ch->id(), 42);
+  EXPECT_EQ(ch->supported_ops(), ChannelOps::kSendReceive);
+  EXPECT_EQ(ch->kind(), ChannelKind::kStreaming);
+  EXPECT_EQ(ch->type(), p.GetBitsType(32));
+  EXPECT_EQ(absl::down_cast<StreamingChannel*>(ch)->strictness(),
+            ChannelStrictness::kArbitraryStaticOrder);
+}
 
-  EXPECT_THAT(Parser::ParseChannel(
-                  R"(chan meh(bits[32][4], id=42, ops=receive_only,
-                         metadata="module_port { flopped: true }"))",
-                  &p)
-                  .status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Missing channel kind")));
+TEST(IrParserTest, ParseStreamingChannelWithExtraFifoMetadataNoFlops) {
+  Package p("my_package");
+  XLS_ASSERT_OK_AND_ASSIGN(Channel * ch,
+                           Parser::ParseChannel(
+                               R"(chan foo(bits[32], id=42, kind=streaming,
+                         flow_control=none, ops=send_receive, fifo_depth=3,
+                         bypass=false, fifo_wrapper=custom_fifo))",
+                               &p));
+  EXPECT_EQ(ch->name(), "foo");
+  EXPECT_EQ(ch->id(), 42);
+  EXPECT_EQ(ch->supported_ops(), ChannelOps::kSendReceive);
+  ASSERT_EQ(ch->kind(), ChannelKind::kStreaming);
+  EXPECT_EQ(ch->type(), p.GetBitsType(32));
+  ASSERT_THAT(
+      absl::down_cast<StreamingChannel*>(ch)->channel_config().fifo_config(),
+      Not(Eq(std::nullopt)));
+  EXPECT_EQ(absl::down_cast<StreamingChannel*>(ch)
+                ->channel_config()
+                .fifo_config()
+                ->depth(),
+            3);
+  EXPECT_EQ(absl::down_cast<StreamingChannel*>(ch)
+                ->channel_config()
+                .fifo_config()
+                ->bypass(),
+            false);
+  EXPECT_EQ(absl::down_cast<StreamingChannel*>(ch)
+                ->channel_config()
+                .fifo_config()
+                ->fifo_wrapper(),
+            "custom_fifo");
+}
 
-  EXPECT_THAT(Parser::ParseChannel(
-                  R"(chan meh(bits[32][4], id=42, kind=bogus,
-                         ops=receive_only,
-                         metadata="module_port { flopped: true }"))",
-                  &p)
-                  .status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Invalid channel kind \"bogus\"")));
-
-  EXPECT_THAT(Parser::ParseChannel(
-                  R"(chan meh(bits[32][4], id=7, kind=streaming,
-                         metadata="module_port { flopped: true }"))",
-                  &p)
-                  .status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Missing channel ops")));
-
-  // Unrepresentable initial value.
-  EXPECT_THAT(Parser::ParseChannel(
-                  R"(chan meh(bits[4], initial_values={128}, kind=streaming,
-                         ops=send_receive, id=7,
-                         metadata="module_port { flopped: true }"))",
-                  &p)
-                  .status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Value 128 is not representable in 4 bits")));
-
-  // Wrong initial value type.
-  EXPECT_THAT(Parser::ParseChannel(
-                  R"(chan meh(bits[4], initial_values={(1, 2)}, kind=streaming,
-                         ops=send_receive, id=7
-                         metadata="module_port { flopped: true }"))",
-                  &p)
-                  .status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected token of type \"literal\"")));
-
-  EXPECT_THAT(Parser::ParseChannel(
-                  R"(chan meh(bits[32][4], id=7, kind=streaming,
-                     ops=receive_only))",
-                  &p)
-                  .status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Missing channel metadata")));
-
-  EXPECT_THAT(Parser::ParseChannel(
-                  R"(chan meh(id=44, kind=streaming, ops=receive_only,
-                         metadata="module_port { flopped: true }"))",
-                  &p)
-                  .status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected 'bits' keyword")));
-
-  EXPECT_THAT(Parser::ParseChannel(
-                  R"(chan meh(bits[32], id=44, kind=streaming,
-                         ops=receive_only, bogus="totally!",
-                         metadata="module_port { flopped: true }"))",
-                  &p)
-                  .status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Invalid channel attribute \"bogus\"")));
-
-  // Bad channel name.
-  EXPECT_THAT(Parser::ParseChannel(
-                  R"(chan 444meh(foo: bits[32], id=7, kind=streaming,
-                         ops=receive_only, metadata=""))",
-                  &p)
-                  .status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Expected token of type \"ident\"")));
+TEST(IrParserTest, ParseStreamingChannelWithExtraFifoMetadata) {
+  Package p("my_package");
+  XLS_ASSERT_OK_AND_ASSIGN(Channel * ch,
+                           Parser::ParseChannel(
+                               R"(chan foo(bits[32], id=42, kind=streaming,
+                         flow_control=none, ops=send_receive, fifo_depth=3,
+                         input_flop_kind=skid, output_flop_kind=zero_latency,
+                         bypass=false))",
+                               &p));
+  EXPECT_EQ(ch->name(), "foo");
+  EXPECT_EQ(ch->id(), 42);
+  EXPECT_EQ(ch->supported_ops(), ChannelOps::kSendReceive);
+  ASSERT_EQ(ch->kind(), ChannelKind::kStreaming);
+  EXPECT_EQ(ch->type(), p.GetBitsType(32));
+  ASSERT_THAT(
+      absl::down_cast<StreamingChannel*>(ch)->channel_config().fifo_config(),
+      Not(Eq(std::nullopt)));
+  EXPECT_EQ(absl::down_cast<StreamingChannel*>(ch)
+                ->channel_config()
+                .fifo_config()
+                ->depth(),
+            3);
+  EXPECT_EQ(absl::down_cast<StreamingChannel*>(ch)
+                ->channel_config()
+                .fifo_config()
+                ->bypass(),
+            false);
+  EXPECT_EQ(absl::down_cast<StreamingChannel*>(ch)
+                ->channel_config()
+                .input_flop_kind(),
+            FlopKind::kSkid);
+  EXPECT_EQ(absl::down_cast<StreamingChannel*>(ch)
+                ->channel_config()
+                .output_flop_kind(),
+            FlopKind::kZeroLatency);
 }
 
 TEST(IrParserTest, PackageWithSingleDataElementChannels) {
   std::string program = R"(
 package test
 
-chan hbo(bits[32], id=0, kind=streaming, ops=receive_only,
-            metadata="module_port { flopped: true }")
-chan mtv(bits[32], id=1, kind=streaming, ops=send_only,
-            metadata="module_port { flopped: true }")
+chan hbo(bits[32], id=0, kind=streaming, flow_control=none, ops=receive_only,
+            fifo_depth=42)
+chan mtv(bits[32], id=1, kind=streaming, flow_control=none, ops=send_only)
 
-proc my_proc(my_token: token, my_state: bits[32], init=42) {
-  receive.1: (token, bits[32]) = receive(my_token, channel_id=0)
+proc my_proc(my_token: token, my_state: bits[32], init={token, 42}) {
+  receive.1: (token, bits[32]) = receive(my_token, channel=hbo)
   tuple_index.2: token = tuple_index(receive.1, index=0, id=2)
   tuple_index.3: bits[32] = tuple_index(receive.1, index=1, id=3)
   add.4: bits[32] = add(my_state, tuple_index.3, id=4)
-  send.5: token = send(tuple_index.2, add.4, channel_id=1)
+  send.5: token = send(tuple_index.2, add.4, channel=mtv)
   next (send.5, add.4)
 }
 )";
@@ -2059,26 +882,18 @@ proc my_proc(my_token: token, my_state: bits[32], init=42) {
   EXPECT_EQ(package->procs().size(), 1);
   XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, package->GetProc("my_proc"));
   EXPECT_EQ(proc->name(), "my_proc");
-}
-
-TEST(IrParserTest, ParseTupleIndexWithInvalidBValue) {
-  const std::string input = R"(
-fn f(x: bits[4], y: bits[4][1]) -> bits[4] {
-  onehot.10: bits[16] = decode(y, width=16, id=10)
-  ret ind.20: bits[4] = tuple_index(onehot.10, index=0, id=20)
-}
-)";
-
-  Package p("my_package");
-  EXPECT_THAT(Parser::ParseFunction(input, &p).status(),
-              StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Decode argument must be of Bits type")));
+  XLS_ASSERT_OK_AND_ASSIGN(Channel * hbo, package->GetChannel("hbo"));
+  EXPECT_THAT(absl::down_cast<StreamingChannel*>(hbo)->GetFifoDepth(),
+              Optional(42));
+  XLS_ASSERT_OK_AND_ASSIGN(Channel * mtv, package->GetChannel("mtv"));
+  EXPECT_EQ(absl::down_cast<StreamingChannel*>(mtv)->GetFifoDepth(),
+            std::nullopt);
 }
 
 TEST(IrParserTest, NodeNames) {
   std::string program = R"(package test
 
-fn foo(x: bits[32], foobar: bits[32]) -> bits[32] {
+fn foo(x: bits[32] id=2, foobar: bits[32] id=3) -> bits[32] {
   add.1: bits[32] = add(x, foobar, id=1)
   ret qux: bits[32] = not(add.1, id=123)
 }
@@ -2090,12 +905,12 @@ fn foo(x: bits[32], foobar: bits[32]) -> bits[32] {
   Node* x = f->param(0);
   EXPECT_TRUE(x->HasAssignedName());
   EXPECT_EQ(x->GetName(), "x");
-  EXPECT_EQ(x->id(), 1);
+  EXPECT_EQ(x->id(), 2);
 
   Node* foobar = f->param(1);
   EXPECT_TRUE(foobar->HasAssignedName());
   EXPECT_EQ(foobar->GetName(), "foobar");
-  EXPECT_EQ(foobar->id(), 2);
+  EXPECT_EQ(foobar->id(), 3);
 
   Node* add = f->return_value()->operand(0);
   EXPECT_FALSE(add->HasAssignedName());
@@ -2105,20 +920,6 @@ fn foo(x: bits[32], foobar: bits[32]) -> bits[32] {
   Node* qux = f->return_value();
   EXPECT_TRUE(qux->HasAssignedName());
   EXPECT_EQ(qux->GetName(), "qux");
-}
-
-TEST(IrParserTest, InvalidName) {
-  const std::string input = R"(
-fn f(x: bits[4]) -> bits[4] {
-  ret blahblah.30: bits[4] = add(x, x, id=30)
-}
-)";
-  Package p("my_package");
-  EXPECT_THAT(
-      Parser::ParseFunction(input, &p).status(),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("The substring 'blahblah' in node name blahblah.30 "
-                         "does not match the node op 'add")));
 }
 
 TEST(IrParserTest, IdAttributes) {
@@ -2135,21 +936,574 @@ fn f(x: bits[4]) -> bits[4] {
   EXPECT_EQ(f->return_value()->id(), 333);
   EXPECT_EQ(f->return_value()->operand(0)->id(), 123);
   EXPECT_EQ(f->return_value()->operand(0)->operand(0)->id(), 42);
-  EXPECT_EQ(f->return_value()->operand(0)->operand(0)->operand(0)->id(), 2);
 }
 
-TEST(IrParserTest, MismatchedId) {
-  const std::string input = R"(
-fn f(x: bits[4]) -> bits[4] {
-  ret add.30: bits[4] = add(x, x, id=42)
+TEST(IrParserTest, ParseTopFunction) {
+  const std::string input = R"(package test
+
+top fn my_function(x: bits[32], y: bits[32]) -> bits[32] {
+  ret add: bits[32] = add(x, y)
+}
+
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  XLS_ASSERT_OK_AND_ASSIGN(FunctionBase * my_function,
+                           pkg->GetFunction("my_function"));
+  EXPECT_TRUE(pkg->GetTop().has_value());
+  EXPECT_EQ(pkg->GetTop().value(), my_function);
+}
+
+TEST(IrParserTest, ParseTopProc) {
+  const std::string input = R"(package test
+
+top proc my_proc(tkn: token, st: bits[32], init={token, 42}) {
+  literal: bits[32] = literal(value=1)
+  add: bits[32] = add(literal, st)
+  next (tkn, add)
+}
+
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  XLS_ASSERT_OK_AND_ASSIGN(FunctionBase * my_proc, pkg->GetProc("my_proc"));
+  EXPECT_TRUE(pkg->GetTop().has_value());
+  EXPECT_EQ(pkg->GetTop().value(), my_proc);
+
+  EXPECT_FALSE(pkg->ChannelsAreProcScoped());
+}
+
+TEST(IrParserTest, ParseTopBlock) {
+  const std::string input = R"(package test
+
+top block my_block(a: bits[32], b: bits[32], out: bits[32]) {
+  a: bits[32] = input_port(name=a)
+  b: bits[32] = input_port(name=b)
+  add: bits[32] = add(a, b)
+  out: () = output_port(add, name=out)
+}
+
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  XLS_ASSERT_OK_AND_ASSIGN(FunctionBase * my_block, pkg->GetBlock("my_block"));
+  EXPECT_TRUE(pkg->GetTop().has_value());
+  EXPECT_EQ(pkg->GetTop().value(), my_block);
+}
+
+TEST(IrParserTest, ParseIIFunction) {
+  std::string input = R"(package test
+
+#[initiation_interval(12)]
+top fn example() -> bits[32] {
+  ret literal.1: bits[32] = literal(value=2, id=1)
 }
 )";
-  Package p("my_package");
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  XLS_ASSERT_OK_AND_ASSIGN(FunctionBase * f, pkg->GetFunction("example"));
+  EXPECT_EQ(f->GetInitiationInterval(), 12);
+}
+
+TEST(IrParserTest, ParseIIProc) {
+  std::string input = R"(package test
+
+#[initiation_interval(12)]
+top proc example(tkn: token, init={token}) {
+  next (tkn)
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  XLS_ASSERT_OK_AND_ASSIGN(FunctionBase * f, pkg->GetProc("example"));
+  EXPECT_EQ(f->GetInitiationInterval(), 12);
+}
+
+TEST(IrParserTest, ParseFifoInstantiationWithExtraFifoMeta) {
+  constexpr std::string_view ir_text = R"(package test
+
+block my_block(in: bits[32], out: bits[32]) {
+  in: bits[32] = input_port(name=in)
+  instantiation my_inst(data_type=bits[32], depth=3, bypass=true, register_push_outputs=false, register_pop_outputs=false, fifo_wrapper=custom_fifo, kind=fifo)
+  in_inst_input: () = instantiation_input(in, instantiation=my_inst, port_name=push_data)
+  pop_data_inst_output: bits[32] = instantiation_output(instantiation=my_inst, port_name=pop_data)
+  out_output_port: () = output_port(pop_data_inst_output, name=out)
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> p,
+                           Parser::ParsePackage(ir_text));
+  XLS_ASSERT_OK_AND_ASSIGN(Block * b, p->GetBlock("my_block"));
+  XLS_ASSERT_OK_AND_ASSIGN(Instantiation * inst,
+                           b->GetInstantiation("my_inst"));
+  ASSERT_EQ(inst->kind(), InstantiationKind::kFifo);
+  const FifoConfig& fifo_config =
+      inst->AsFifoInstantiation().value()->fifo_config();
+  EXPECT_EQ(fifo_config.depth(), 3);
+  EXPECT_EQ(fifo_config.bypass(), true);
+  EXPECT_EQ(fifo_config.register_push_outputs(), false);
+  EXPECT_EQ(fifo_config.register_pop_outputs(), false);
+  EXPECT_EQ(fifo_config.fifo_wrapper(), "custom_fifo");
+}
+
+TEST(IrParserTest, ParseWithUnspecifiedIds) {
+  std::string input = R"(package test
+
+ top fn example() -> bits[32] {
+   node0: bits[32] = literal(value=2)
+   node1: bits[32] = literal(value=2, id=1)
+   node2: bits[32] = literal(value=2)
+   ret node3: bits[32] = literal(value=2, id=2)
+ }
+)";
+  XLS_ASSERT_OK(Parser::ParsePackage(input).status());
+}
+
+TEST(IrParserTest, TrivialNewStyleProc) {
+  const std::string input = R"(package test
+
+top proc my_proc<>() {
+}
+
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  EXPECT_TRUE(pkg->ChannelsAreProcScoped());
+}
+
+TEST(IrParserTest, FfiAttribute) {
+  const std::string input = R"(
+package some_package
+
+#[ffi_proto("""code_template: "verilog_module {fn} (.a({x}), .b({y}), .out({return}));"
+""")]
+fn ffi_callee(x: bits[32], y: bits[32]) -> bits[32] {
+  ret add.1: bits[32] = add(x, y)
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  XLS_ASSERT_OK_AND_ASSIGN(FunctionBase * f, pkg->GetFunction("ffi_callee"));
+  ASSERT_TRUE(f->ForeignFunctionData().has_value());
+  EXPECT_EQ(f->ForeignFunctionData()->code_template(),
+            "verilog_module {fn} (.a({x}), .b({y}), .out({return}));");
+  EXPECT_FALSE(f->ForeignFunctionData()->has_delay_ps());
+}
+
+TEST(IrParserTest, ParseChannelPortMetadata) {
+  constexpr std::string_view input = R"(package test
+
+block my_block(in: bits[32], in_valid: bits[1], in_ready: bits[1],
+               out: bits[32]) {
+  #![channel_ports(name=foo, type=bits[32], direction=receive, kind=streaming, flop=skid, data_port=in, ready_port=in_ready, valid_port=in_valid, stage=3)]
+  #![channel_ports(name=bar, type=bits[32], direction=send, kind=single_value, data_port=out)]
+  in: bits[32] = input_port(name=in)
+  in_valid: bits[1] = input_port(name=in_valid)
+  data: bits[32] = literal(value=42)
+  one: bits[1] = literal(value=1)
+  out_port: () = output_port(data, name=out)
+  in_ready_port: () = output_port(one, name=in_ready)
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  XLS_ASSERT_OK_AND_ASSIGN(Block * b, pkg->GetBlock("my_block"));
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      ChannelPortMetadata foo_metadata,
+      b->GetChannelPortMetadata("foo", ChannelDirection::kReceive));
+  EXPECT_EQ(foo_metadata.channel_name, "foo");
+  EXPECT_EQ(foo_metadata.type, pkg->GetBitsType(32));
+  EXPECT_EQ(foo_metadata.direction, ChannelDirection::kReceive);
+  EXPECT_EQ(foo_metadata.channel_kind, ChannelKind::kStreaming);
+  EXPECT_EQ(foo_metadata.flop_kind, FlopKind::kSkid);
+  EXPECT_THAT(foo_metadata.data_port, Optional(Eq("in")));
+  EXPECT_THAT(foo_metadata.ready_port, Optional(Eq("in_ready")));
+  EXPECT_THAT(foo_metadata.valid_port, Optional(Eq("in_valid")));
+  EXPECT_THAT(foo_metadata.stage, Optional(3));
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      ChannelPortMetadata bar_metadata,
+      b->GetChannelPortMetadata("bar", ChannelDirection::kSend));
+  EXPECT_EQ(bar_metadata.channel_name, "bar");
+  EXPECT_EQ(bar_metadata.type, pkg->GetBitsType(32));
+  EXPECT_EQ(bar_metadata.direction, ChannelDirection::kSend);
+  EXPECT_EQ(bar_metadata.channel_kind, ChannelKind::kSingleValue);
+  EXPECT_EQ(bar_metadata.flop_kind, FlopKind::kNone);
+  EXPECT_THAT(bar_metadata.data_port, Optional(Eq("out")));
+  EXPECT_EQ(bar_metadata.ready_port, std::nullopt);
+  EXPECT_EQ(bar_metadata.valid_port, std::nullopt);
+}
+
+TEST(IrParserTest, BlockWithResetPort) {
+  constexpr std::string_view input = R"(package test
+
+block my_block(rst: bits[1]) {
+  #![reset(port="rst", asynchronous=true, active_low=false)]
+  rst: bits[1] = input_port(name=rst)
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  XLS_ASSERT_OK_AND_ASSIGN(Block * b, pkg->GetBlock("my_block"));
   EXPECT_THAT(
-      Parser::ParseFunction(input, &p).status(),
+      b->GetResetBehavior(),
+      Optional(ResetBehavior{.asynchronous = true, .active_low = false}));
+}
+
+TEST(IrParserTest, BlockWithProvenance) {
+  constexpr std::string_view input = R"(package test
+
+block my_block(rst: bits[1]) {
+  #![provenance(name="foo", kind="proc")]
+  rst: bits[1] = input_port(name=rst)
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  XLS_ASSERT_OK_AND_ASSIGN(Block * b, pkg->GetBlock("my_block"));
+  EXPECT_THAT(b->GetProvenance(),
+              Optional(BlockProvenance{.name = "foo",
+                                       .kind = BlockProvenanceKind::kProc}));
+}
+
+TEST(IrParserTest, BlockWithSvTypes) {
+  constexpr std::string_view ir_text = R"(package test
+
+block my_block(in0: bits[32], in1: bits[32], out: bits[32]) {
+  in0: bits[32] = input_port(name=in0, sv_type="foo")
+  in1: bits[32] = input_port(name=in1)
+  out_output_port: () = output_port(in0, name=out, sv_type="bar")
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(ir_text));
+  XLS_ASSERT_OK_AND_ASSIGN(Block * b, pkg->GetBlock("my_block"));
+
+  XLS_ASSERT_OK_AND_ASSIGN(InputPort * in0, b->GetInputPort("in0"));
+  EXPECT_EQ(in0->system_verilog_type(), "foo");
+
+  XLS_ASSERT_OK_AND_ASSIGN(InputPort * in1, b->GetInputPort("in1"));
+  EXPECT_EQ(in1->system_verilog_type(), std::nullopt);
+
+  XLS_ASSERT_OK_AND_ASSIGN(OutputPort * out, b->GetOutputPort("out"));
+  EXPECT_EQ(out->system_verilog_type(), "bar");
+}
+
+TEST(IrParserTest, ParseScheduledBlock) {
+  std::string input = R"(package test
+scheduled_block b(x: bits[32], out: bits[32]) {
+  iv0: bits[1] = literal(value=1, id=1)
+  or0: bits[1] = literal(value=1, id=2)
+  controlled_stage(iv0, or0) {
+    x: bits[32] = input_port(name=x, id=3)
+    out: () = output_port(x, name=out, id=4)
+    active_inputs_valid aiv0: bits[1] = literal(value=1, id=5)
+    active_outputs_ready aor0: bits[1] = literal(value=1, id=6)
+    ret ov0: bits[1] = identity(aiv0, id=7)
+  }
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  XLS_ASSERT_OK_AND_ASSIGN(Block * block, pkg->GetBlock("b"));
+  EXPECT_TRUE(block->IsScheduled());
+  ScheduledBlock* sb = absl::down_cast<ScheduledBlock*>(block);
+  ASSERT_EQ(sb->stages().size(), 1);
+  EXPECT_EQ(sb->stages()[0].inputs_valid(), sb->GetNode("iv0").value());
+  EXPECT_EQ(sb->stages()[0].outputs_valid(), sb->GetNode("ov0").value());
+  EXPECT_EQ(sb->stages()[0].active_inputs_valid(), sb->GetNode("aiv0").value());
+  EXPECT_EQ(sb->stages()[0].active_outputs_ready(),
+            sb->GetNode("aor0").value());
+  EXPECT_EQ(sb->stages()[0].outputs_ready(), sb->GetNode("or0").value());
+  EXPECT_TRUE(sb->stages()[0].contains(sb->GetInputPort("x").value()));
+  EXPECT_TRUE(sb->stages()[0].contains(sb->GetOutputPort("out").value()));
+  EXPECT_FALSE(sb->stages()[0].contains(sb->GetNode("iv0").value()));
+  EXPECT_FALSE(sb->stages()[0].contains(sb->GetNode("or0").value()));
+  EXPECT_TRUE(sb->stages()[0].contains(sb->GetNode("ov0").value()));
+  EXPECT_TRUE(sb->stages()[0].contains(sb->GetNode("aiv0").value()));
+  EXPECT_TRUE(sb->stages()[0].contains(sb->GetNode("aor0").value()));
+}
+
+TEST(IrParserTest, MultiStageScheduledBlock) {
+  const std::string input = R"(package test
+scheduled_block b(x: bits[32], out: bits[32]) {
+  iv0: bits[1] = literal(value=1, id=1)
+  or0: bits[1] = literal(value=1, id=2)
+  controlled_stage(iv0, or0) {
+    x: bits[32] = input_port(name=x, id=3)
+    active_inputs_valid aiv0: bits[1] = literal(value=1, id=4)
+    active_outputs_ready aor0: bits[1] = literal(value=1, id=5)
+    ret ov0: bits[1] = identity(aiv0, id=6)
+  }
+  iv1: bits[1] = literal(value=1, id=7)
+  or1: bits[1] = literal(value=1, id=8)
+  controlled_stage(iv1, or1) {
+    out: () = output_port(x, name=out, id=9)
+    active_inputs_valid aiv1: bits[1] = literal(value=1, id=10)
+    active_outputs_ready aor1: bits[1] = literal(value=1, id=11)
+    ret ov1: bits[1] = identity(aiv1, id=12)
+  }
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  XLS_ASSERT_OK_AND_ASSIGN(Block * block, pkg->GetBlock("b"));
+  EXPECT_TRUE(block->IsScheduled());
+  EXPECT_EQ(block->stages().size(), 2);
+}
+
+TEST(IrParserTest, ScheduledBlockWithNoStages) {
+  const std::string input = R"(package test
+scheduled_block b() {
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  XLS_ASSERT_OK_AND_ASSIGN(Block * block, pkg->GetBlock("b"));
+  EXPECT_TRUE(block->IsScheduled());
+  EXPECT_EQ(block->stages().size(), 0);
+}
+
+TEST(IrParserTest, ScheduledBlockWithMultipleStateReads) {
+  const std::string input = R"(package test
+scheduled_block b() {
+  source proc foo(__state: bits[32], init={0}) {
+  }
+  iv0: bits[1] = literal(value=1, id=1)
+  or0: bits[1] = literal(value=1, id=2)
+  controlled_stage(iv0, or0) {
+    active_inputs_valid aiv0: bits[1] = literal(value=1, id=3)
+    active_outputs_ready aor0: bits[1] = literal(value=1, id=4)
+    __state_1: bits[32] = state_read(state_element=__state, id=5)
+    __state_2: bits[32] = state_read(state_element=__state, id=6)
+    sum: bits[32] = add(__state_1, __state_2, id=7)
+    ret ov0: bits[1] = identity(aiv0, id=8)
+  }
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  XLS_ASSERT_OK_AND_ASSIGN(Block * block, pkg->GetBlock("b"));
+  EXPECT_TRUE(block->IsScheduled());
+}
+
+TEST(IrParserTest, ScheduledBlockWithEmptyStage) {
+  const std::string input = R"(package test
+scheduled_block b() {
+  iv0: bits[1] = literal(value=1, id=1)
+  or0: bits[1] = literal(value=1, id=2)
+  controlled_stage(iv0, or0) {
+    active_inputs_valid aiv0: bits[1] = literal(value=1, id=3)
+    active_outputs_ready aor0: bits[1] = literal(value=1, id=4)
+    ret ov0: bits[1] = identity(aiv0, id=5)
+  }
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> pkg,
+                           Parser::ParsePackage(input));
+  XLS_ASSERT_OK_AND_ASSIGN(Block * block, pkg->GetBlock("b"));
+  EXPECT_TRUE(block->IsScheduled());
+  EXPECT_EQ(block->stages().size(), 1);
+}
+
+TEST(IrParserTest, ParseAttributeWithArguments) {
+  std::string program = R"(
+package test
+
+#[fuzz_test(domains = `parameter_domains { arbitrary: true }`)]
+fn main(x: bits[32]) -> bits[32] {
+  ret x: bits[32] = param(name=x)
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  EXPECT_EQ(package->functions().size(), 1);
+  Function* func = package->functions().front().get();
+  EXPECT_TRUE(func->HasAttribute(AttributeKind::kFuzzTest));
+  absl::Span<const AttributeData> attributes = func->attributes();
+  ASSERT_EQ(attributes.size(), 1);
+  const AttributeData& attr = attributes[0];
+  EXPECT_EQ(attr.kind(), AttributeKind::kFuzzTest);
+  ASSERT_EQ(attr.args().size(), 1);
+  const AttributeData::Argument& arg = attr.args()[0];
+  ASSERT_TRUE(
+      std::holds_alternative<AttributeData::StringKeyValueArgument>(arg));
+  const auto& skv = std::get<AttributeData::StringKeyValueArgument>(arg);
+  EXPECT_EQ(skv.first, "domains");
+  EXPECT_EQ(skv.second, "parameter_domains { arbitrary: true }");
+  EXPECT_TRUE(skv.is_backticked);
+}
+
+TEST(IrParserTest, ParseAttributeWithRangeDomain) {
+  xls::PackageInterfaceProto::Function function_proto;
+  PackageInterfaceProto::FuzzTestDomain* domain =
+      function_proto.add_parameter_domains();
+  PackageInterfaceProto::FuzzTestDomain::Range* range = domain->mutable_range();
+  range->mutable_min()->mutable_bits()->set_bit_count(8);
+  range->mutable_min()->mutable_bits()->set_data("\000", 1);
+  range->mutable_max()->mutable_bits()->set_bit_count(8);
+  range->mutable_max()->mutable_bits()->set_data("\144", 1);
+
+  google::protobuf::TextFormat::Printer printer;
+  printer.SetSingleLineMode(true);
+  std::string proto_str;
+  ASSERT_TRUE(printer.PrintToString(function_proto, &proto_str));
+
+  std::string program = absl::StrFormat(R"(
+package test
+
+#[fuzz_test(domains = `%s`)]
+fn main(x: bits[8]) -> bits[8] {
+  ret x: bits[8] = param(name=x)
+}
+)",
+                                        proto_str);
+
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  EXPECT_EQ(package->functions().size(), 1);
+  Function* func = package->functions().front().get();
+  EXPECT_TRUE(func->HasAttribute(AttributeKind::kFuzzTest));
+  absl::Span<const AttributeData> attributes = func->attributes();
+  ASSERT_EQ(attributes.size(), 1);
+  const AttributeData& attr = attributes[0];
+  EXPECT_EQ(attr.kind(), AttributeKind::kFuzzTest);
+  ASSERT_EQ(attr.args().size(), 1);
+  const AttributeData::Argument& arg = attr.args()[0];
+  ASSERT_TRUE(
+      std::holds_alternative<AttributeData::StringKeyValueArgument>(arg));
+  const auto& skv = std::get<AttributeData::StringKeyValueArgument>(arg);
+  EXPECT_EQ(skv.first, "domains");
+  EXPECT_EQ(skv.second, proto_str);
+  EXPECT_TRUE(skv.is_backticked);
+}
+
+TEST(IrParserTest, ParseAttributeWithBrokenBacktick) {
+  std::string program = R"(
+package test
+
+#[fuzz_test(domains = `u32:0..100)]
+fn main(x: bits[32]) -> bits[32] {
+  ret x: bits[32] = param(name=x)
+}
+)";
+  EXPECT_THAT(Parser::ParsePackage(program).status(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Unterminated quoted string")));
+}
+
+TEST(IrParserTest, ParseAttributeEmptyFuzzTest) {
+  std::string program = R"ir(
+package test
+
+#[fuzz_test]
+fn main(x: bits[32]) -> bits[32] {
+  ret x: bits[32] = param(name=x)
+}
+)ir";
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  EXPECT_EQ(package->functions().size(), 1);
+  Function* func = package->functions().front().get();
+  EXPECT_TRUE(func->HasAttribute(AttributeKind::kFuzzTest));
+  absl::Span<const AttributeData> attributes = func->attributes();
+  ASSERT_EQ(attributes.size(), 1);
+  const AttributeData& attr = attributes[0];
+  EXPECT_EQ(attr.kind(), AttributeKind::kFuzzTest);
+  EXPECT_TRUE(attr.args().empty());
+}
+
+TEST(IrParserTest, ParseAttributeExtraArgument) {
+  std::string program = R"ir(
+package test
+
+#[fuzz_test(domains = `u32:0..100`, extra = 42)]
+fn main(x: bits[32]) -> bits[32] {
+  ret x: bits[32] = param(name=x)
+}
+)ir";
+  EXPECT_THAT(Parser::ParsePackage(program).status(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Invalid keyword argument")));
+}
+
+TEST(IrParserTest, ParseAttributeInvalidDomainType) {
+  std::string program = R"ir(
+package test
+
+#[fuzz_test(domains = "u32:0..100")]
+fn main(x: bits[32]) -> bits[32] {
+  ret x: bits[32] = param(name=x)
+}
+)ir";
+  EXPECT_THAT(
+      Parser::ParsePackage(program).status(),
       StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("The id '30' in node name add.30 does not match the "
-                         "id '42' specified as an attribute")));
+               HasSubstr("Expected token of type \"backticked string\"")));
+}
+
+TEST(IrParserTest, FunctionParamWithSourceInfo) {
+  std::string program = R"(package test
+file_number 1 "path/to/source.x"
+
+fn foo(x: bits[32] pos=[(1, 20, 5)]) -> bits[32] {
+  ret x: bits[32] = param(name=x, pos=[(1, 20, 5)])
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func, package->GetFunction("foo"));
+  ASSERT_EQ(func->params().size(), 1);
+  Param* param = func->params().front();
+  EXPECT_FALSE(param->loc().Empty());
+  EXPECT_EQ(param->loc().ToString(), "[(1,20,5)]");
+}
+
+TEST(IrParserTest, ProcStateWithSourceInfoAndRoundTrip) {
+  std::string program = R"(package test
+file_number 1 "path/to/source.x"
+
+proc foo(x: bits[32] pos=[(1, 10, 2)], init={42}) {
+  next (x)
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, package->GetProc("foo"));
+  ASSERT_EQ(proc->GetStateElementCount(), 1);
+  StateElement* state = proc->GetStateElement(0);
+  EXPECT_FALSE(state->loc().Empty());
+  EXPECT_EQ(state->loc().ToString(), "[(1,10,2)]");
+
+  std::string dumped = proc->DumpIr();
+  EXPECT_THAT(dumped, HasSubstr("x: bits[32] pos=[(1,10,2)]"));
+
+  Package p2("p2");
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc2, Parser::ParseProc(dumped, &p2));
+  ASSERT_EQ(proc2->GetStateElementCount(), 1);
+  EXPECT_EQ(proc2->GetStateElement(0)->loc().ToString(), "[(1,10,2)]");
+}
+
+TEST(IrParserTest, ProcStateWithIdAndPosInAnyOrder) {
+  std::string program = R"(package test
+file_number 1 "path/to/source.x"
+
+proc foo(a: bits[32] id=5 pos=[(1, 10, 2)], b: bits[32] pos=[(1, 20, 4)] id=12, init={42, 100}) {
+  next (a, b)
+}
+)";
+  XLS_ASSERT_OK_AND_ASSIGN(auto package, Parser::ParsePackage(program));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, package->GetProc("foo"));
+  ASSERT_EQ(proc->GetStateElementCount(), 2);
+  StateElement* a = proc->GetStateElement(0);
+  StateElement* b = proc->GetStateElement(1);
+  EXPECT_EQ(a->loc().ToString(), "[(1,10,2)]");
+  EXPECT_EQ(b->loc().ToString(), "[(1,20,4)]");
+}
+
+TEST(IrParserTest, StateElementToStringWithPos) {
+  Package p("my_package");
+  StateElement state(
+      "my_state", p.GetBitsType(32), Value(UBits(42, 32)),
+      SourceInfo(SourceLocation(Fileno(1), Lineno(10), Colno(5))));
+  EXPECT_EQ(state.ToString(),
+            "state my_state(bits[32], initial_value=42, non_synth=false, "
+            "pos=[(1,10,5)])");
 }
 
 }  // namespace xls

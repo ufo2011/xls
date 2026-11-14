@@ -1,32 +1,27 @@
 # Adding a new IR operation
 
-XLS has about 60 different
-[opcodes](https://github.com/google/xls/tree/main/xls/ir/op_specification.py) and
-periodically new ones are added to extend functionality or improve the
+XLS has about 60 different [opcodes](https://github.com/google/xls/tree/main/xls/ir/op.h)
+and periodically new ones are added to extend functionality or improve the
 expressiveness of the IR. XLS has many different components and adding a new
 opcode involves changes to numerous places in the code. These changes, some of
 which are optional, are described below:
 
-1.  Add operation to
-    [op_specification.py](https://github.com/google/xls/tree/main/xls/ir/op_specification.py)
+1.  Add operation to [op.h](https://github.com/google/xls/tree/main/xls/ir/op.h).
 
-    Opcodes and IR node classes are defined in the file `op_specification.py`.
-    This Python code generates the C++ header and source files which define
-    opcodes (`op.h` and `op.cc`) and the IR node type heirarchy (`nodes.h` and
-    `nodes.cc`). Every opcode has an associated node subclass derived from the
-    `xls::Node` base class. Some opcodes such as `Op::kArray` have their own
+    Opcodes are defined in the file `op.h` and IR node classes are defined in
+    the file `nodes.h`.Every opcode has an associated node subclass derived from
+    the `xls::Node` base class. Some opcodes such as `Op::kArray` have their own
     class (`Array`) because of the unique structure of the operation. Other
     opcodes such as the logical operations (`Op::kAnd`, `Op::kOr`, etc) share a
     common base class (`BinOp`).
 
     The first step to adding a new operations is to add an opcode, and
-    potentially a new Node class, in `op_specification.py`. After adding the
-    opcode numerous files will fail to build because switch statements over the
-    set of opcodes will no longer be exhaustive. Add the necessary cases to each
-    switch statement. The exact code in each case will, of course, be
-    operation-specific. Initially the implementation might return an
-    `absl::UnimplementedError` status until later changes add proper support for
-    the new operation.
+    potentially a new Node class. After adding the opcode numerous files will
+    fail to build because switch statements over the set of opcodes will no
+    longer be exhaustive. Add the necessary cases to each switch statement. The
+    exact code in each case will, of course, be operation-specific. Initially
+    the implementation might return an `absl::UnimplementedError` status until
+    later changes add proper support for the new operation.
 
     As part of this change the new operations needs to be added to the DFS
     visitor class `DfsVisitor` by adding a handler method. This class is used
@@ -64,7 +59,7 @@ which are optional, are described below:
     Add support for parsing of the new operation. The parser tests typically
     send a snippet of IR with the operation through the parser and text
     serialization and verifies that the output matches the original. Supporting
-    the new operation may requre modifying the `xls::Node::ToString` method to
+    the new operation may require modifying the `xls::Node::ToString` method to
     emit any special fields required by the operation.
 
     [(Code example)](https://github.com/google/xls/commit/eb12ef77d51e2d65f4295e80ffa944043f021b2f)
@@ -92,7 +87,7 @@ which are optional, are described below:
 
     [(Code example)](https://github.com/google/xls/commit/eb12ef77d51e2d65f4295e80ffa944043f021b2f)
 
-1.  [LLVM JIT](https://github.com/google/xls/tree/main/xls/jit/function_builder_visitor.h)
+1.  [LLVM JIT](https://github.com/google/xls/tree/main/xls/jit/ir_builder_visitor.h)
 
     The LLVM JIT enables fast simulation of the XLS IR. The JIT constructs LLVM
     IR for each XLS operation which is then optimized by LLVM and runs natively
@@ -139,7 +134,7 @@ which are optional, are described below:
 
     [(Code example)](https://github.com/google/xls/commit/bda129fed73de323574d7955292753187af7bb20)
 
-1.  [Delay model](https://github.com/google/xls/tree/main/xls/delay_model)
+1.  [Delay model](https://github.com/google/xls/tree/main/xls/estimators/delay_model)
 
     In order to generate efficient circuits which meet timing requirement, XLS
     models the delay (in picoseconds) of each operation for different process
@@ -159,6 +154,27 @@ which are optional, are described below:
     frontend will likely be necessary.
 
     [(Code example)](https://github.com/google/xls/commit/feeac2c4c0bcc73b529cb0c4a976abae47f96730)
+
+1.  [IR Fuzzer](https://github.com/google/xls/tree/main/xls/ir_fuzzer/ir_fuzzer)
+
+    The IR Fuzzer generates a fuzzed IR function which may contain a variety of
+    different IR operations. This fuzzed function is then provided to FuzzTests
+    to discover bugs in the XLS codebase.
+
+    [(Code example)](https://github.com/google/xls/commit/ca64d7e8b5d35bc5eb87b9126300fa0d9b9b43dd)
+
+1.  [Fuzzer](https://github.com/google/xls/tree/main/xls/fuzzer)
+
+    The fuzzer generates random DSLX functions and random inputs to check and
+    compare different parts of XLS, for example checking that un-optimized and
+    optimized IR give the same outputs when interpreted. If there is an
+    operation in DSLX that maps nicely onto the newly added operation, the
+    fuzzer can be modified to generate functions with DSLX that exercise the new
+    operation. This is done by adding a handler to `AstGenerator`. See
+    [here](./fuzzer.md) for
+    more details on how the fuzzer works and how to run it.
+
+    [(Code example)](https://github.com/google/xls/commit/c09339f3b0c147031eadd626d1a856a860031e05)
 
 1.  Operation-specific optimizations
 

@@ -1,0 +1,18 @@
+package test_module
+
+file_number 0 "test_module.x"
+
+top proc __test_module__String_0_next<>(__state: bits[8][5], init={[104, 101, 108, 108, 111]}) {
+  literal.2: bits[1] = literal(value=1, id=2)
+  not.7: bits[1] = not(literal.2, id=7)
+  __state: bits[8][5] = state_read(state_element=__state, predicate=literal.2, id=4)
+  __token: token = literal(value=token, id=1)
+  or.8: bits[1] = or(not.7, literal.2, id=8)
+  literal.6: bits[8][5] = literal(value=[119, 111, 114, 108, 100], id=6)
+  tuple.3: () = tuple(id=3)
+  current: bits[8][5] = identity(__state, id=5)
+  assert.9: token = assert(__token, or.8, message="State element written before read in same activation.", id=9)
+  next_value.10: () = next_value(state_element=__state, value=literal.6, predicate=literal.2, id=10)
+  tuple.11: () = tuple(id=11)
+  tuple.12: () = tuple(id=12)
+}

@@ -1,0 +1,183 @@
+// Copyright 2024 The XLS Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+edition = "2024";
+
+package xls;
+
+import "xls/ir/xls_type.proto";
+import "xls/ir/xls_value.proto";
+
+import option "google/protobuf/cpp_features.proto";
+
+// TODO(joshuata): Migrate to string_view over legacy strings.
+option features.(pb.cpp).string_type = STRING;
+
+message PackageInterfaceProto {
+  // A generic thing with a name and a type.
+  message NamedValue {
+    string name = 1;
+    TypeProto type = 2;
+    // If present the corresponding sv type for this value.
+    string sv_type = 3;
+  }
+
+  message Channel {
+    enum Direction {
+      INVALID = 0;
+      // Only receives are valid.
+      IN = 1;
+      // Only sends are valid.
+      OUT = 2;
+      // Both sends and receives are valid.
+      INOUT = 3;
+    }
+    string name = 1;
+    TypeProto type = 2;
+    Direction direction = 3;
+    // If present the corresponding sv type for this channel.
+    string sv_type = 4;
+
+    // For proc-scoped channels, the proc containing the channel.
+    string proc_name = 5;
+  }
+
+  // Common fields to all types of executables.
+  message FunctionBase {
+    bool top = 1;
+    string name = 2;
+  }
+
+  export message Function {
+    FunctionBase base = 1;
+    repeated NamedValue parameters = 2;
+    TypeProto result_type = 3;
+    // If present the corresponding sv type for the result of this function.
+    string sv_result_type = 4;
+
+    // The structured fuzzing domains for this function. There may be
+    // either zero domains, or exactly one domain per parameter.
+    repeated FuzzTestDomain parameter_domains = 5;
+  }
+
+  export message Proc {
+    message StateValue {
+      NamedValue name = 1;
+      // If true this state value is marked as non_synth
+      bool non_synthesizable = 2;
+    }
+    FunctionBase base = 1;
+    // DEPRECATED: Use state_values instead.
+    repeated NamedValue state = 2 [deprecated = true];
+    // The state value information.
+    repeated StateValue state_values = 5;
+    // Names of channels which this particular proc sends on. Refers to entries
+    // in the channels list.
+    repeated string send_channels = 3;
+    // Names of channels which this particular proc receives on. Refers to
+    // entries in the channels list.
+    repeated string recv_channels = 4;
+  }
+
+  // Common information for scheduled pipelines.
+  message PipelineInformation {
+    // How long the full pipeline is.
+    int32 pipeline_length = 1;
+    // What the initiation interval for this pipeline is. 1 is full throughput.
+    int32 initiation_interval = 2;
+  }
+
+  // Information about a function which has gone through scheduling.
+  message ScheduledFunction {
+    Function function = 1;
+    PipelineInformation pipeline_info = 2;
+  }
+
+  message ScheduledProc {
+    // Information about a send or receive.
+    message IO {
+      // The stage at which this IO is scheduled.
+      int32 stage = 1;
+      // Either a send/recv channel that is used in the given stage.
+      string channel_name = 2;
+      bool is_blocking = 4;
+    }
+    // Information about when state information is read or written which
+    // controls throughput and latency.
+    message StateAccess {
+      // The state element
+      string name = 1;
+      // The stage at which this state element is accessed (read or written).
+      int32 stage = 2;
+    }
+    Proc proc = 1;
+    PipelineInformation pipeline_info = 2;
+    repeated IO sends = 3;
+    repeated IO recvs = 4;
+    repeated StateAccess state_reads = 5;
+    repeated StateAccess state_writes = 6;
+  }
+
+  message ScheduledFunctionBase {
+    oneof type {
+      ScheduledFunction scheduled_function = 1;
+      ScheduledProc scheduled_proc = 2;
+    }
+  }
+
+  export message Block {
+    FunctionBase base = 1;
+    repeated NamedValue registers = 2;
+    repeated NamedValue input_ports = 3;
+    repeated NamedValue output_ports = 4;
+  }
+
+  message FuzzTestDomain {
+    message Range {
+      ValueProto min = 1;
+      ValueProto max = 2;
+    }
+    message ElementOf {
+      repeated ValueProto values = 1;
+    }
+    message Tuple {
+      repeated FuzzTestDomain elements = 1;
+    }
+    message Array {
+      repeated FuzzTestDomain elements = 1;
+    }
+
+    oneof domain_kind {
+      bool arbitrary = 1;
+      Range range = 2;
+      ElementOf element_of = 3;
+      Tuple tuple = 4;
+      Array array = 5;
+    }
+  }
+
+  // Name of the overall package.
+  string name = 1;
+
+  // Files used to construct this package, not in any particular order.
+  repeated string files = 2;
+  // Channels defined on the top-level of the package.
+  repeated Channel channels = 3;
+
+  repeated Function functions = 4;
+  repeated Proc procs = 5;
+  repeated Block blocks = 6;
+  repeated ScheduledFunction scheduled_functions = 7;
+  repeated ScheduledProc scheduled_procs = 8;
+}

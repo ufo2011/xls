@@ -12,24 +12,61 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-syntax = "proto2";
+syntax = "proto3";
 
 package xls;
 
+message TimedNodeProto {
+  // Name of the node
+  optional string node = 1;
+
+  // Operation delay in picoseconds the XLS delay
+  // estimator assumes for this node.
+  optional int64 node_delay_ps = 2;
+
+  // Path delay in picosecond as measured from the start of the pipeline stage
+  // (including the delay of the node itself).
+  optional int64 path_delay_ps = 3;
+}
+
 // Holds per-stage scheduling information.
 message StageProto {
+  reserved 2;  // previously un-timed node fields.
+  reserved "nodes";
+
   // Number (index) of this stage, 0-indexed.
   optional int32 stage = 1;
 
-  // Names of the [IR] nodes present in this stage.
-  repeated string nodes = 2;
+  // Names and corresponding time of the [IR] nodes present in this stage.
+  repeated TimedNodeProto timed_nodes = 3;
 }
 
-// Holds the overall module pipeline schedule.
+// Holds the pipeline schedule for a function or proc.
 message PipelineScheduleProto {
   // The name of the [IR] function matching this schedule.
   optional string function = 1;
 
   // The set of stages comprising this schedule.
   repeated StageProto stages = 2;
+
+  // The minimum possible clock period for the schedule, if computed. This is
+  // purely for tracing purposes.
+  optional int64 min_clock_period_ps = 3;
+
+  // The number of stages in the schedule.
+  optional int64 length = 4;
+
+  // The actual target clock period used for scheduling and timing verification.
+  optional int64 target_clock_period_ps = 5;
+}
+
+// Holds pipeline schedules for a subset of functions/procs in a package.
+message PackageScheduleProto {
+  // Map from FunctionBase name to pipeline schedule.
+  map<string, PipelineScheduleProto> schedules = 1;
+
+  // If this is the synchronous schedule (for synchronous proc implementation)
+  // then this map holds the offset of each FunctionBase (indexed by name)
+  // within the synchronous schedule.
+  map<string, int64> synchronous_offsets = 2;
 }

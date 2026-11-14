@@ -1,4 +1,4 @@
-// Copyright 2020 The XLS Authors
+// Copyright 2022 The XLS Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,9 +15,16 @@
 #ifndef XLS_COMMON_MATH_UTIL_H_
 #define XLS_COMMON_MATH_UTIL_H_
 
+#include <cmath>
+#include <cstdint>
+#include <functional>
 #include <limits>
+#include <tuple>
+#include <type_traits>
+#include <vector>
 
-#include "xls/common/logging/logging.h"
+#include "absl/log/check.h"
+#include "absl/types/span.h"
 
 namespace xls {
 
@@ -34,10 +41,10 @@ constexpr IntegralType CeilOrFloorOfRatio(IntegralType numerator,
                                           IntegralType denominator) {
   static_assert(std::numeric_limits<IntegralType>::is_integer,
                 "CeilOfRatio is only defined for integral types");
-  XLS_DCHECK_NE(0, denominator) << "Division by zero is not supported.";
-  XLS_DCHECK(!std::numeric_limits<IntegralType>::is_signed ||
-             numerator != std::numeric_limits<IntegralType>::min() ||
-             denominator != -1)
+  DCHECK_NE(0, denominator) << "Division by zero is not supported.";
+  DCHECK(!std::numeric_limits<IntegralType>::is_signed ||
+         numerator != std::numeric_limits<IntegralType>::min() ||
+         denominator != -1)
       << "Dividing " << numerator << " by -1 is not supported: it would SIGFPE";
 
   const IntegralType rounded_toward_zero = numerator / denominator;
@@ -49,10 +56,9 @@ constexpr IntegralType CeilOrFloorOfRatio(IntegralType numerator,
   if (ceil) {  // Compile-time condition: not an actual branching
     return rounded_toward_zero +
            static_cast<IntegralType>(same_sign && needs_round);
-  } else {
-    return rounded_toward_zero -
-           static_cast<IntegralType>(!same_sign && needs_round);
   }
+  return rounded_toward_zero -
+         static_cast<IntegralType>(!same_sign && needs_round);
 }
 
 // ----------------------------------------------------------------------
@@ -97,7 +103,7 @@ T RoundUpToNearest(T value, T divisor) {
 
 template <typename T>
 T RoundDownToNearest(T value, T divisor) {
-  return value / divisor * divisor;
+  return (value / divisor) * divisor;
 }
 
 template <typename T>
@@ -106,11 +112,68 @@ inline bool IsPowerOfTwo(T x) {
   return x != 0 && (x & (x - 1)) == 0;
 }
 
-// Returns ceil(log2(value)). Returns zero for the value zero.
-int64_t CeilOfLog2(uint64_t value);
+// Returns true when x is even.
+template <typename T>
+inline bool IsEven(T x) {
+  static_assert(!std::numeric_limits<T>::is_signed, "unsigned types only");
+  return (x & 0b1) == 0;
+}
 
-// Returns floor(log2(value)). Returns zero for the value zero.
-int64_t FloorOfLog2(uint64_t value);
+// Returns 2ⁿ. Assumes n >= 0. Assumes 2ⁿ fits in the result type (could produce
+// a negative result for large n and signed type).
+template <typename Int>
+static constexpr Int Exp2(int n) {
+  static_assert(std::numeric_limits<Int>::is_integer, "integral types only");
+  CHECK_LT(n, std::numeric_limits<Int>::digits);
+  CHECK_GE(n, 0);
+
+  Int one = 1;
+  return one << n;
+}
+
+// Returns (odd, y) such that x = odd * 2^y.
+//
+// That is, factorizes x into an odd number and a power of two. Returns the odd
+// number and the exponent.
+//
+// Special case:
+// FactorizePowerOfTwo(0) = 0 * 2^0
+template <typename T>
+std::tuple<T, int> FactorizePowerOfTwo(T x) {
+  int power = 0;
+  while (IsEven(x) && x > 0) {
+    x /= 2;
+    power += 1;
+  }
+  return std::make_tuple(x, power);
+}
+
+// Returns the number of leading zeros in the given value.
+inline uint64_t Clz(uint64_t value) {
+#if __has_builtin(__builtin_clzl)
+  return value == 0 ? 64 : __builtin_clzl(value);
+#else
+  for (int i = 0; i < 64; ++i) {
+    if ((value >> (64 - i - 1)) & 1) {
+      return static_cast<uint64_t>(i);
+    }
+  }
+  return 64;
+#endif
+}
+
+inline uint64_t FloorOfLog2(uint64_t value) {
+  return (value == 0) ? 0 : 63 - Clz(value);
+}
+
+// Returns ceil(log2(value)). Returns zero for the value zero.
+inline uint64_t CeilOfLog2(uint64_t value) {
+  if (value == 0) {
+    return 0;
+  }
+  uint64_t floor = FloorOfLog2(value);
+  return IsPowerOfTwo(value) ? floor : floor + 1;
+}
 
 // Returns true if the given floating-point value is 0 or subnormal.
 template <typename T>
@@ -123,14 +186,121 @@ bool ZeroOrSubnormal(T value) {
 template <typename T>
 T FlushSubnormal(T value) {
   if (std::fpclassify(value) == FP_SUBNORMAL) {
-    if (value < 0) {
-      return -0.0;
-    } else {
-      return 0.0;
-    }
+    return (value < 0) ? -0.0 : 0.0;
   }
 
   return value;
+}
+
+// Calls the given function on every possible mixed-radix number of a given
+// length (the length of the radix vector). Each element `i` of a
+// "number vector" is thought of as a digit with radix equal to `radix[i]`.
+// If the given function returns `true`, the iteration ends early and we return
+// `true`. Otherwise, `false` is returned.
+//
+// For example, if the `radix` is `[6, 4, 8, 2]` and the most recent time the
+// callback was called was on `[5, 3, 0, 0]` then the next call will be
+// with `[0, 0, 1, 0]` (note that the convention is little-endian).
+bool MixedRadixIterate(absl::Span<const int64_t> radix,
+                       std::function<bool(const std::vector<int64_t>&)> f);
+
+// The result from a Saturating* operation.
+template <typename IntType>
+struct SaturatedResult {
+  // What the result value is.
+  IntType result;
+  // Would the non-saturating operation have overflowed/underflowed. NB If this
+  // is true then 'result' is saturated.
+  bool did_overflow;
+};
+
+// Perform a saturating subtraction between l and r. If l - r would underflow
+// std::numeric_limits<IntType>::min() is returned instead and did_overflow is
+// set to true.  If l - r would overflow then
+// std::numeric_limits<IntType>::max() is returned and did_overflow is set to
+// true.
+template <typename IntType>
+constexpr SaturatedResult<IntType> SaturatingSub(IntType l, IntType r)
+  requires(std::is_integral_v<IntType>)
+{
+  static_assert(__has_builtin(__builtin_sub_overflow));
+  SaturatedResult<IntType> res;
+  res.did_overflow = __builtin_sub_overflow(l, r, &res.result);
+  if (res.did_overflow) {
+    res.result = r < IntType{0} ? std::numeric_limits<IntType>::max()
+                                : std::numeric_limits<IntType>::min();
+  }
+  return res;
+}
+
+// Perform a saturating addition between l and r. If l + r would overflow
+// std::numeric_limits<IntType>::max() is returned instead and did_overflow is
+// set to true.
+template <typename IntType>
+constexpr SaturatedResult<IntType> SaturatingAdd(IntType l, IntType r)
+  requires(std::is_integral_v<IntType>)
+{
+  static_assert(__has_builtin(__builtin_add_overflow));
+  SaturatedResult<IntType> res;
+  res.did_overflow = __builtin_add_overflow(l, r, &res.result);
+  if (res.did_overflow) {
+    res.result = r < IntType{0} ? std::numeric_limits<IntType>::min()
+                                : std::numeric_limits<IntType>::max();
+  }
+  return res;
+}
+
+// Perform a saturating multiplication between l and r. If l * r would overflow
+// std::numeric_limits<IntType>::max() is returned instead and did_overflow is
+// set to true. If l * r would underflow std;:numeric_limits<IntType>::min9) is
+// returned instead and did_overflow is set to true.
+template <typename IntType>
+constexpr SaturatedResult<IntType> SaturatingMul(IntType l, IntType r)
+  requires(std::is_integral_v<IntType>)
+{
+  static_assert(__has_builtin(__builtin_mul_overflow));
+  SaturatedResult<IntType> res;
+  res.did_overflow = __builtin_mul_overflow(l, r, &res.result);
+  if (res.did_overflow) {
+    bool l_neg = l < IntType{0};
+    bool r_neg = r < IntType{0};
+    res.result = l_neg != r_neg ? std::numeric_limits<IntType>::min()
+                                : std::numeric_limits<IntType>::max();
+  }
+  return res;
+}
+
+// Perform a saturating left shift between l and r. If l << r would shift set
+// bits out of the result, std::numeric_limits<IntType>::max() is returned
+// instead and did_overflow is set to true.
+template <typename IntType>
+constexpr SaturatedResult<IntType> SaturatingLeftShift(IntType l, int64_t r)
+  requires(std::is_integral_v<IntType>)
+{
+  CHECK_GE(r, 0) << "Left shift by negative amount: " << r;
+
+  if (l == IntType{0} || r == 0) {
+    // Shifting zero by any amount gives zero (the original value).
+    // Shifting anything by zero gives the original value.
+    return {.result = l, .did_overflow = false};
+  }
+
+  constexpr int64_t num_bits = sizeof(IntType) * 8;
+  constexpr int64_t usable_bits =
+      num_bits - (std::is_signed_v<IntType> ? 1 : 0);
+  // Shifting a non-zero value by at least the number of [non-sign] bits in the
+  // type always saturates.
+  if (r >= usable_bits) {
+    return {.result = std::numeric_limits<IntType>::max(),
+            .did_overflow = true};
+  }
+  const int64_t bits_remaining = usable_bits - r;
+  const IntType mask = static_cast<IntType>(~IntType{0}) << bits_remaining;
+  if ((l & mask) != IntType{0}) {
+    return {.result = std::numeric_limits<IntType>::max(),
+            .did_overflow = true};
+  }
+  return {.result = static_cast<IntType>(l << r), .did_overflow = false};
 }
 
 }  // namespace xls

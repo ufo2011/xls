@@ -15,71 +15,67 @@
 # Compiler data structures for converting high level algorithms into Hardware
 # Description Language.
 
-# pytype binary, library
+load("//xls/build_rules:py_oss_defs.bzl", "pytype_strict_binary", "pytype_strict_library")
 
 package(
-    default_visibility = ["//xls:xls_internal"],
+    default_applicable_licenses = ["//:license"],
+    features = [
+        "layering_check",
+        "parse_headers",
+    ],
     licenses = ["notice"],  # Apache 2.0
 )
 
-py_library(
+pytype_strict_library(
     name = "flags_checks",
     srcs = [
         "flags_checks.py",
     ],
 )
 
-py_binary(
+pytype_strict_binary(
     name = "n_bit_add_generator",
     srcs = [
         "n_bit_add_generator.py",
     ],
-    python_version = "PY3",
     deps = [
         ":flags_checks",
         "//xls/common:gfile",
-        "@com_google_absl_py//absl:app",
-        "@com_google_absl_py//absl/flags",
+        "@abseil-py//absl:app",
+        "@abseil-py//absl/flags",
     ],
 )
 
-py_binary(
+pytype_strict_binary(
     name = "n_bit_mul_generator",
     srcs = [
         "n_bit_mul_generator.py",
     ],
-    python_version = "PY3",
     deps = [
         ":flags_checks",
         "//xls/common:gfile",
-        "@com_google_absl_py//absl:app",
-        "@com_google_absl_py//absl/flags",
+        "@abseil-py//absl:app",
+        "@abseil-py//absl/flags",
     ],
 )
 
-py_library(
+pytype_strict_library(
     name = "n_bit_nested_add_generator",
     srcs = [
         "n_bit_nested_add_generator.py",
     ],
-    deps = [
-        ":flags_checks",
-        "//xls/common:gfile",
-    ],
+    deps = ["//xls/common:gfile"],
 )
 
-py_library(
+pytype_strict_library(
     name = "n_bit_nested_mul_generator",
     srcs = [
         "n_bit_nested_mul_generator.py",
     ],
-    deps = [
-        ":flags_checks",
-        "//xls/common:gfile",
-    ],
+    deps = ["//xls/common:gfile"],
 )
 
-py_library(
+pytype_strict_library(
     name = "n_bit_nested_shift_generator",
     srcs = [
         "n_bit_nested_shift_generator.py",
@@ -89,19 +85,18 @@ py_library(
     ],
 )
 
-py_library(
+pytype_strict_library(
     name = "solvers_op_comparison_functions",
     srcs = [
         "solvers_op_comparison_functions.py",
     ],
 )
 
-py_binary(
+pytype_strict_binary(
     name = "solvers_op_comparison_bits_list",
     srcs = [
         "solvers_op_comparison_bits_list.py",
     ],
-    python_version = "PY3",
     deps = [
         ":flags_checks",
         ":n_bit_nested_add_generator",
@@ -109,17 +104,16 @@ py_binary(
         ":n_bit_nested_shift_generator",
         ":solvers_op_comparison_functions",
         "//xls/common:gfile",
-        "@com_google_absl_py//absl:app",
-        "@com_google_absl_py//absl/flags",
+        "@abseil-py//absl:app",
+        "@abseil-py//absl/flags",
     ],
 )
 
-py_binary(
+pytype_strict_binary(
     name = "solvers_op_comparison_nests_list",
     srcs = [
         "solvers_op_comparison_nests_list.py",
     ],
-    python_version = "PY3",
     deps = [
         ":flags_checks",
         ":n_bit_nested_add_generator",
@@ -127,21 +121,20 @@ py_binary(
         ":n_bit_nested_shift_generator",
         ":solvers_op_comparison_functions",
         "//xls/common:gfile",
-        "@com_google_absl_py//absl:app",
-        "@com_google_absl_py//absl/flags",
+        "@abseil-py//absl:app",
+        "@abseil-py//absl/flags",
     ],
 )
 
-py_binary(
+pytype_strict_binary(
     name = "plot_csv_solver_speed_data",
     srcs = [
         "plot_csv_solver_speed_data.py",
     ],
-    python_version = "PY3",
     deps = [
-        ":flags_checks",
         "//xls/common:gfile",
-        "@com_google_absl_py//absl:app",
-        "@com_google_absl_py//absl/flags",
+        "@abseil-py//absl:app",
+        "@abseil-py//absl/flags",
+        "@xls_pip_deps//matplotlib",
     ],
 )

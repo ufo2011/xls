@@ -14,10 +14,12 @@
 
 // Negative compilation tests for StrongInt.
 
+#include <cstdint>
+
 #include "xls/common/strong_int.h"
 
-DEFINE_STRONG_INT_TYPE(USD, int32_t);
-DEFINE_STRONG_INT_TYPE(EUR, int32_t);
+XLS_DEFINE_STRONG_INT_TYPE(USD, int32_t);
+XLS_DEFINE_STRONG_INT_TYPE(EUR, int32_t);
 
 class Explicit {
  public:
@@ -25,7 +27,8 @@ class Explicit {
 };
 
 // Each case specified under each symbol must fail to compile.
-void MustNotCompile() {
+// NOLINTNEXTLINE(clang-diagnostic-unused-function)
+static void MustNotCompile() {
   USD dollars(1);
   (void)dollars;  // Avoid unused variable warning.
   EUR euro(2);

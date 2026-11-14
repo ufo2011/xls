@@ -23,10 +23,17 @@
 #ifndef XLS_IR_VALUE_VIEW_H_
 #define XLS_IR_VALUE_VIEW_H_
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
+#include <limits>
+#include <type_traits>
+#include <vector>
 
+#include "absl/log/check.h"
+#include "absl/numeric/int128.h"
+#include "absl/types/span.h"
 #include "xls/common/bits_util.h"
-#include "xls/common/logging/logging.h"
 #include "xls/common/math_util.h"
 #include "xls/ir/package.h"
 #include "xls/ir/type.h"
@@ -39,10 +46,12 @@ template <typename ElementT, uint64_t kNumElements>
 class ArrayView {
  public:
   explicit ArrayView(absl::Span<const uint8_t> buffer) : buffer_(buffer) {
-    XLS_CHECK(buffer_.data() == nullptr);
-    XLS_CHECK(buffer_.size() == GetTypeSize())
+    CHECK(buffer_.data() == nullptr);
+    CHECK(buffer_.size() == GetTypeSize())
         << "Span isn't sized to this array's type!";
   }
+
+  const uint8_t* buffer() { return buffer_.data(); }
 
   // Gets the storage size of this array.
   static constexpr uint64_t GetTypeSize() {
@@ -74,27 +83,28 @@ inline uint64_t MakeMask<0>() {
 template <int64_t kNumBits>
 class BitsView {
  public:
-  BitsView() : buffer_(nullptr) { XLS_CHECK(buffer_ == nullptr); }
+  BitsView() : buffer_(nullptr) { CHECK(buffer_ == nullptr); }
   explicit BitsView(const uint8_t* buffer) : buffer_(buffer) {}
+  const uint8_t* buffer() { return buffer_; }
 
   // Determines the appropriate return type for this BitsView type.
-  static_assert(kNumBits != 0 && kNumBits <= 64);
-  typedef typename std::conditional<
-      (kNumBits > 32), uint64_t,
-      typename std::conditional<
-          (kNumBits > 16), uint32_t,
-          typename std::conditional<
-              (kNumBits > 8), uint16_t,
-              typename std::conditional<(kNumBits > 1), uint8_t, bool>::type>::
-              type>::type>::type ReturnT;
+  using ReturnT = std::conditional_t<
+      (kNumBits > 128), std::array<uint8_t, (kNumBits - 1) / 8 + 1>,
+      std::conditional_t<
+          (kNumBits > 64), absl::uint128,
+          std::conditional_t<
+              (kNumBits > 32), uint64_t,
+              std::conditional_t<
+                  (kNumBits > 16), uint32_t,
+                  std::conditional_t<
+                      (kNumBits > 8), uint16_t,
+                      std::conditional_t<(kNumBits > 1), uint8_t, bool>>>>>>;
 
   // Gets the storage size of this type.
   static constexpr uint64_t GetTypeSize() { return sizeof(ReturnT); }
 
-  // Note that this will only return the first 8 bytes of a > 64b type.
-  // Values larger than 64 bits should be converted to proper Bits type before
-  // usage.
-  ReturnT GetValue() {
+  template <int N = kNumBits>
+  std::enable_if_t<(N <= 128), ReturnT> GetValue() {
     return *reinterpret_cast<const ReturnT*>(buffer_) & MakeMask<kNumBits>();
   }
 
@@ -111,7 +121,7 @@ class BitsView {
 template <typename... Types>
 class TupleView {
  public:
-  TupleView() : buffer_(nullptr) { XLS_CHECK(buffer_ == nullptr); }
+  TupleView() : buffer_(nullptr) { CHECK(buffer_ == nullptr); }
   explicit TupleView(const uint8_t* buffer) : buffer_(buffer) {}
   const uint8_t* buffer() { return buffer_; }
 
@@ -158,13 +168,12 @@ class TupleView {
     // If offset isn't aligned to our type size, then add padding.
     // TODO(rspringer): We need to require the buffer to be aligned, too.
     // TODO(rspringer): Aligned to min(our_type_size, 8)?
-    uint64_t padding = offset % FrontT::GetTypeSize();
-    return offset + padding;
+    return RoundUpToNearest<uint64_t>(offset, FrontT::GetTypeSize());
   }
 
   // ---- Element type access.
   // Metaprogramming horrors to get the type of the N'th element.
-  // Recursive case - keep drilling down until the element of interst.
+  // Recursive case - keep drilling down until the element of interest.
   template <int kElementIndex, typename FrontT, typename... Rest>
   struct element_accessor<kElementIndex, FrontT, Rest...>
       : element_accessor<kElementIndex - 1, Rest...> {};
@@ -183,47 +192,44 @@ class TupleView {
 // depend on their parent types for their implementations - only operations
 // touching "buffer_" need to be overridden.
 template <typename ElementT, uint64_t kNumElements>
-class MutableArrayView {
+class MutableArrayView : public ArrayView<ElementT, kNumElements> {
  public:
-  explicit MutableArrayView(absl::Span<uint8_t> buffer) : buffer_(buffer) {
-    int64_t type_size = ArrayView<ElementT, kNumElements>::GetTypeSize();
-    XLS_DCHECK(buffer_.size() == type_size)
-        << "Span isn't sized to this array's type!";
-  }
+  explicit MutableArrayView(absl::Span<uint8_t> buffer)
+      : ArrayView<ElementT, kNumElements>(buffer) {}
 
-  // Gets the N'th element in the array.
+  uint8_t* mutable_buffer() { return const_cast<uint8_t*>(this->buffer()); }
+
+  // Gets the Nth element in the array.
   ElementT Get(int index) {
-    return ElementT(buffer_ + (ElementT::GetTypeSize() * index));
+    return ElementT(mutable_buffer() + (ElementT::GetTypeSize() * index));
   }
-
- private:
-  absl::Span<uint8_t> buffer_;
 };
 
 template <uint64_t kNumBits>
 class MutableBitsView : public BitsView<kNumBits> {
  public:
-  explicit MutableBitsView(uint8_t* buffer) : buffer_(buffer) {}
+  explicit MutableBitsView(uint8_t* buffer) : BitsView<kNumBits>(buffer) {}
+
+  uint8_t* mutable_buffer() { return const_cast<uint8_t*>(this->buffer()); }
 
   typename BitsView<kNumBits>::ReturnT GetValue() {
     return *reinterpret_cast<const typename BitsView<kNumBits>::ReturnT*>(
-               buffer_) &
+               mutable_buffer()) &
            MakeMask<kNumBits>();
   }
 
   void SetValue(typename BitsView<kNumBits>::ReturnT value) {
-    *reinterpret_cast<typename BitsView<kNumBits>::ReturnT*>(buffer_) =
+    *reinterpret_cast<typename BitsView<kNumBits>::ReturnT*>(mutable_buffer()) =
         value & MakeMask<kNumBits>();
   }
-
- private:
-  uint8_t* buffer_;
 };
 
 template <typename... Types>
 class MutableTupleView : public TupleView<Types...> {
  public:
-  explicit MutableTupleView(uint8_t* buffer) : buffer_(buffer) {}
+  explicit MutableTupleView(uint8_t* buffer) : TupleView<Types...>(buffer) {}
+
+  uint8_t* mutable_buffer() { return const_cast<uint8_t*>(this->buffer()); }
 
   // Gets the N'th element in the tuple.
   template <int kElementIndex>
@@ -232,13 +238,13 @@ class MutableTupleView : public TupleView<Types...> {
   Get() {
     return typename TupleView<Types...>::
         template element_accessor<kElementIndex, Types...>::type(
-            buffer_ +
+            mutable_buffer() +
             TupleView<Types...>::template GetOffset<kElementIndex, Types...>(
                 0));
   }
 
  private:
-  uint8_t* buffer_;
+  uint8_t* mutable_buffer_;
 };
 
 // Specialization of BitsView for non-byte-aligned bit vectors inside a larger
@@ -253,13 +259,14 @@ class PackedBitsView {
   // should be incremented).
   PackedBitsView(uint8_t* buffer, int buffer_offset)
       : buffer_(buffer), buffer_offset_(buffer_offset) {
-    XLS_DCHECK(buffer_offset >= 0 && buffer_offset <= 7);
+    DCHECK(buffer_offset >= 0 && buffer_offset <= 7);
   }
 
   // Returns the XLS IR Type corresponding to this packed view.
   static Type* GetFullType(Package* p) { return p->GetBitsType(kElementBits); }
 
-  uint8_t* buffer() { return buffer_; }
+  const uint8_t* buffer() { return buffer_; }
+  uint8_t* mutable_buffer() { return buffer_; }
 
   static constexpr int64_t kBitCount = kElementBits;
 
@@ -344,10 +351,30 @@ class PackedArrayView {
  public:
   static constexpr int64_t kBitCount = ElementT::kBitCount * kNumElements;
 
+  // *Somewhat* magical converter, which will grab the guts of an array with an
+  // appropriate width integral type and turn it into this packed array view
+  // type. This allows us to pass std::arrays to APIs which take fixed size
+  // arrays of that bit count with more type safety than casting to a `void*`.
+  //
+  // For example:
+  //    absl::Status PopulateArray(std::array<int32_t, 64>* a) {
+  //      return populate_array_jit->Run(
+  //        PackedArrayView<PackedBitsView<32>, 64>(a));
+  //    }
+  template <typename ArrayElementT,
+            typename =
+                std::enable_if_t<std::is_integral<ArrayElementT>::value &&
+                                 std::numeric_limits<ArrayElementT>::digits +
+                                         std::is_signed<ArrayElementT>::value ==
+                                     ElementT::kBitCount>>
+  explicit PackedArrayView(std::array<ArrayElementT, kNumElements>* array)
+      : PackedArrayView(absl::bit_cast<uint8_t*>(array->data()), 0) {}
+
   PackedArrayView(uint8_t* buffer, int64_t buffer_offset)
       : buffer_(buffer), buffer_offset_(buffer_offset) {}
 
-  uint8_t* buffer() { return buffer_; }
+  const uint8_t* buffer() { return buffer_; }
+  uint8_t* mutable_buffer() { return buffer_; }
 
   // Returns the XLS IR Type corresponding to this packed view.
   static Type* GetFullType(Package* p) {
@@ -356,7 +383,7 @@ class PackedArrayView {
 
   // Returns the element at the given index in the array.
   ElementT Get(int index) {
-    assert(index < kNumElements);
+    DCHECK_LT(index, kNumElements);
     int64_t bit_increment = index * ElementT::kBitCount + buffer_offset_;
     int64_t byte_offset = bit_increment / kCharBit;
     int64_t bit_offset = bit_increment % kCharBit;
@@ -379,7 +406,8 @@ class PackedTupleView {
   PackedTupleView(uint8_t* buffer, int64_t buffer_offset)
       : buffer_(buffer), buffer_offset_(buffer_offset) {}
 
-  uint8_t* buffer() { return buffer_; }
+  const uint8_t* buffer() { return buffer_; }
+  uint8_t* mutable_buffer() { return buffer_; }
 
   // Recursive templates - determine the size (in bits) of this packed tuple.
   template <typename FrontT, typename... ElemTypes>
@@ -456,11 +484,10 @@ class PackedTupleView {
     if (kCurrentIndex < kTargetIndex) {
       return GetStartBitOffset<kCurrentIndex + 1, kTargetIndex, NextT, Rest...>(
           offset);
-    } else {
-      return NextT::kBitCount +
-             GetStartBitOffset<kCurrentIndex + 1, kTargetIndex, NextT, Rest...>(
-                 offset);
     }
+    return NextT::kBitCount +
+           GetStartBitOffset<kCurrentIndex + 1, kTargetIndex, NextT, Rest...>(
+               offset);
   }
 
   template <int kCurrentIndex, int kTargetIndex, typename FrontT,
@@ -485,6 +512,14 @@ class PackedTupleView {
     typedef FrontT type;
   };
 };
+
+// Some common view types.
+using PackedFloat = PackedTupleView</* sign */ PackedBitsView<1>,
+                                    /* exponent */ PackedBitsView<8>,
+                                    /* mantissa */ PackedBitsView<23>>;
+using PackedDouble = PackedTupleView</* sign */ PackedBitsView<1>,
+                                     /* exponent */ PackedBitsView<11>,
+                                     /* mantissa */ PackedBitsView<52>>;
 
 }  // namespace xls
 

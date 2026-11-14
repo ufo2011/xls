@@ -23,11 +23,14 @@
 #define XLS_NOC_SIMULATION_INDEXER_H_
 
 #include <cstdint>
-#include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "xls/noc/simulation/common.h"
 #include "xls/noc/simulation/parameters.h"
 
@@ -112,6 +115,10 @@ class VirtualChannelIndexMap {
   absl::StatusOr<int64_t> GetVirtualChannelIndex(PortId port_id,
                                                  VirtualChannelParam vc) const;
 
+  // Returns corresponding index of virtual channel name.
+  absl::StatusOr<int64_t> GetVirtualChannelIndexByName(
+      PortId port_id, std::string_view vc_name) const;
+
   // Retrieve virtual channel based off of their index.
   // Note - must be called after FinalizeVirtualChannelOrder();
   absl::StatusOr<VirtualChannelParam> GetVirtualChannelByIndex(
@@ -177,6 +184,11 @@ class NetworkComponentIndexMap {
   // and the ordering should be unique within [0, vc_index.size()).
   absl::Status Add(
       const absl::flat_hash_map<NetworkComponentId, int64_t>& nc_index);
+
+  // Retrieve list of all network components.
+  absl::Span<const NetworkComponentId> GetNetworkComponents() const {
+    return absl::MakeSpan(ordered_components_);
+  }
 
  private:
   absl::flat_hash_map<NetworkComponentId, int64_t> component_index_;

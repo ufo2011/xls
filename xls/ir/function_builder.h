@@ -15,18 +15,57 @@
 #ifndef XLS_IR_FUNCTION_BUILDER_H_
 #define XLS_IR_FUNCTION_BUILDER_H_
 
+// NOTE: We're trying to keep the API minimal here to not drag too much into
+// publicly-exposed APIs (FunctionBuilder/ProcBuilder are publicly exposed), so
+// forward decls are used.
+//
+// To this end, DO NOT add node/function headers here.
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <ostream>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "absl/base/casts.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/string_view.h"
-#include "xls/common/logging/logging.h"
-#include "xls/ir/function.h"
+#include "absl/types/span.h"
+#include "xls/common/status/ret_check.h"
+#include "xls/common/visitor.h"
+#include "xls/data_structures/leaf_type_tree.h"
+#include "xls/ir/bits.h"
+#include "xls/ir/block.h"
+#include "xls/ir/channel.h"
+#include "xls/ir/foreign_function_data.pb.h"
+#include "xls/ir/format_strings.h"
+#include "xls/ir/instantiation.h"
+#include "xls/ir/lsb_or_msb.h"
+#include "xls/ir/nodes.h"
+#include "xls/ir/op.h"
+#include "xls/ir/package.h"
 #include "xls/ir/proc.h"
+#include "xls/ir/register.h"
 #include "xls/ir/source_location.h"
 #include "xls/ir/value.h"
+#include "xls/ir/value_builder.h"
 
 namespace xls {
 
 class BuilderBase;
+class Channel;
+class Function;
+class FunctionBase;
 class Node;
+class Proc;
+class ProcBuilder;
+class StateElement;
+class Type;
 
 // Represents a value for use in the function-definition building process,
 // supports some basic C++ operations that have a natural correspondence to the
@@ -43,42 +82,25 @@ class BValue {
   BuilderBase* builder() const { return builder_; }
 
   Node* node() const { return node_; }
-  Type* GetType() const { return node()->GetType(); }
-  int64_t BitCountOrDie() const { return node()->BitCountOrDie(); }
-  absl::optional<SourceLocation> loc() const { return node_->loc(); }
-  std::string ToString() const {
-    return node_ == nullptr ? std::string("<null BValue>") : node_->ToString();
-  }
+  Type* GetType() const;
+  int64_t BitCountOrDie() const;
+  const SourceInfo& loc() const;
+  std::string ToString() const;
 
   bool valid() const {
-    XLS_CHECK_EQ(node_ == nullptr, builder_ == nullptr);
+    CHECK_EQ(node_ == nullptr, builder_ == nullptr);
     return node_ != nullptr;
   }
 
   // Sets the name of the node.
-  std::string SetName(absl::string_view name) {
-    if (node_ != nullptr) {
-      node_->SetName(name);
-    }
-    return "";
-  }
+  std::string SetName(std::string_view name);
 
   // Returns the name of the node.
-  std::string GetName() const {
-    if (node_ != nullptr) {
-      return node_->GetName();
-    }
-    return "";
-  }
+  std::string GetName() const;
 
   // Returns whether the node has been assigned a name. Nodes without assigned
   // names have names generated from the opcode and unique id.
-  bool HasAssignedName() const {
-    if (node_ != nullptr) {
-      return node_->HasAssignedName();
-    }
-    return false;
-  }
+  bool HasAssignedName() const;
 
   BValue operator>>(BValue rhs);
   BValue operator<<(BValue rhs);
@@ -91,10 +113,235 @@ class BValue {
   // Note: unary negation.
   BValue operator-();
 
+  friend bool operator==(const BValue& a, const BValue& b) {
+    return a.node_ == b.node_ && a.builder_ == b.builder_;
+  }
+
+  template <typename H>
+  friend H AbslHashValue(H h, const BValue& bv) {
+    return H::combine(std::move(h), bv.node_, bv.builder_);
+  }
+
  private:
   Node* node_;
   BuilderBase* builder_;
 };
+
+std::ostream& operator<<(std::ostream& os, const BValue& bv);
+
+// A wrapper around xls::StateElement that associates it with the ProcBuilder
+// that created it. Allows ProcBuilder methods to verify that the StateElement
+// is owned by the builder.
+class BStateElement {
+ public:
+  BStateElement() : BStateElement(nullptr, nullptr) {}
+  BStateElement(StateElement* state_element, ProcBuilder* builder)
+      : state_element_(state_element), builder_(builder) {}
+  explicit BStateElement(StateElement* state_element)
+      : state_element_(state_element), builder_(nullptr) {}
+
+  ProcBuilder* builder() const { return builder_; }
+  StateElement* state_element() const { return state_element_; }
+
+  bool valid() const { return state_element_ != nullptr; }
+
+  bool operator==(const BStateElement& other) const {
+    return state_element_ == other.state_element_ && builder_ == other.builder_;
+  }
+
+ private:
+  StateElement* state_element_;
+  ProcBuilder* builder_;
+};
+
+// A wrapper around xls::Channel that associates it with the ProcBuilder that
+// created it.
+class BChannel {
+ public:
+  BChannel() : BChannel(nullptr, nullptr) {}
+  BChannel(Channel* channel, ProcBuilder* builder)
+      : channel_(channel), builder_(builder) {}
+  explicit BChannel(Channel* channel) : channel_(channel), builder_(nullptr) {}
+
+  ProcBuilder* builder() const { return builder_; }
+  Channel* channel() const { return channel_; }
+
+  bool valid() const { return channel_ != nullptr; }
+
+  std::string_view name() const;
+  Type* GetType() const;
+
+  bool operator==(const BChannel& other) const {
+    return channel_ == other.channel_ && builder_ == other.builder_;
+  }
+
+ private:
+  Channel* channel_;
+  ProcBuilder* builder_;
+};
+
+struct BReceiveChannelRef;
+struct BSendChannelRef;
+
+// A wrapper around xls::ReceiveChannelInterface that associates it with the
+// ProcBuilder that created it.
+class BReceiveChannel {
+ public:
+  BReceiveChannel() : BReceiveChannel(nullptr, nullptr) {}
+  BReceiveChannel(ReceiveChannelInterface* channel_interface,
+                  ProcBuilder* builder)
+      : channel_interface_(channel_interface), builder_(builder) {}
+  explicit BReceiveChannel(ReceiveChannelInterface* channel_interface)
+      : channel_interface_(channel_interface), builder_(nullptr) {}
+
+  ProcBuilder* builder() const { return builder_; }
+  ReceiveChannelInterface* channel_interface() const {
+    return channel_interface_;
+  }
+  BReceiveChannelRef as_ref() const;
+
+  bool valid() const { return channel_interface_ != nullptr; }
+
+  std::string_view name() const;
+  Type* GetType() const;
+
+  bool operator==(const BReceiveChannel& other) const {
+    return channel_interface_ == other.channel_interface_ &&
+           builder_ == other.builder_;
+  }
+
+ private:
+  ReceiveChannelInterface* channel_interface_;
+  ProcBuilder* builder_;
+};
+
+// A wrapper around xls::SendChannelInterface that associates it with the
+// ProcBuilder that created it.
+class BSendChannel {
+ public:
+  BSendChannel() : BSendChannel(nullptr, nullptr) {}
+  BSendChannel(SendChannelInterface* channel_interface, ProcBuilder* builder)
+      : channel_interface_(channel_interface), builder_(builder) {}
+  explicit BSendChannel(SendChannelInterface* channel_interface)
+      : channel_interface_(channel_interface), builder_(nullptr) {}
+
+  ProcBuilder* builder() const { return builder_; }
+  SendChannelInterface* channel_interface() const { return channel_interface_; }
+  BSendChannelRef as_ref() const;
+
+  bool valid() const { return channel_interface_ != nullptr; }
+
+  std::string_view name() const;
+  Type* GetType() const;
+
+  bool operator==(const BSendChannel& other) const {
+    return channel_interface_ == other.channel_interface_ &&
+           builder_ == other.builder_;
+  }
+
+ private:
+  SendChannelInterface* channel_interface_;
+  ProcBuilder* builder_;
+};
+
+// A convenience structure grouping a channel and its send/receive interfaces.
+struct BChannelWithInterfaces {
+  BChannel channel;
+  BSendChannel send_interface;
+  BReceiveChannel receive_interface;
+
+  ChannelWithInterfaces ToChannelWithInterfaces() const {
+    return ChannelWithInterfaces{
+        .channel = channel.channel(),
+        .send_interface = send_interface.channel_interface(),
+        .receive_interface = receive_interface.channel_interface(),
+    };
+  }
+};
+
+struct BReceiveChannelRef
+    : public std::variant<Channel*, ReceiveChannelInterface*, BChannel,
+                          BReceiveChannel> {
+  using variant::variant;
+  explicit BReceiveChannelRef(ReceiveChannelRef ref) {
+    *this = std::visit(
+        Visitor{
+            [](Channel* c) -> BReceiveChannelRef { return c; },
+            [](ReceiveChannelInterface* i) -> BReceiveChannelRef { return i; }},
+        ref);
+  }
+  ReceiveChannelRef receive_channel_ref() const {
+    return std::visit(
+        Visitor{
+            [](Channel* c) -> ReceiveChannelRef { return c; },
+            [](ReceiveChannelInterface* i) -> ReceiveChannelRef { return i; },
+            [](const BChannel& c) -> ReceiveChannelRef { return c.channel(); },
+            [](const BReceiveChannel& c) -> ReceiveChannelRef {
+              return c.channel_interface();
+            }},
+        *this);
+  }
+};
+
+struct BSendChannelRef : public std::variant<Channel*, SendChannelInterface*,
+                                             BChannel, BSendChannel> {
+  using variant::variant;
+  explicit BSendChannelRef(SendChannelRef ref) {
+    *this = std::visit(
+        Visitor{[](Channel* c) -> BSendChannelRef { return c; },
+                [](SendChannelInterface* i) -> BSendChannelRef { return i; }},
+        ref);
+  }
+  SendChannelRef send_channel_ref() const {
+    return std::visit(
+        Visitor{[](Channel* c) -> SendChannelRef { return c; },
+                [](SendChannelInterface* i) -> SendChannelRef { return i; },
+                [](const BChannel& c) -> SendChannelRef { return c.channel(); },
+                [](const BSendChannel& c) -> SendChannelRef {
+                  return c.channel_interface();
+                }},
+        *this);
+  }
+};
+
+struct BChannelInterfaceRef
+    : public std::variant<ChannelInterface*, BReceiveChannel, BSendChannel> {
+  using variant::variant;
+  ChannelInterface* channel_interface() const {
+    return std::visit(
+        Visitor{[](ChannelInterface* i) -> ChannelInterface* { return i; },
+                [](const BReceiveChannel& c) -> ChannelInterface* {
+                  return c.channel_interface();
+                },
+                [](const BSendChannel& c) -> ChannelInterface* {
+                  return c.channel_interface();
+                }},
+        *this);
+  }
+};
+
+struct BAnyChannelRef
+    : public std::variant<BSendChannelRef, BReceiveChannelRef> {
+  using variant::variant;
+  ChannelRef channel_ref() const {
+    return std::visit(Visitor{
+                          [](const BSendChannelRef& ref) -> ChannelRef {
+                            return ToChannelRef(ref.send_channel_ref());
+                          },
+                          [](const BReceiveChannelRef& ref) -> ChannelRef {
+                            return ToChannelRef(ref.receive_channel_ref());
+                          },
+                      },
+                      *this);
+  }
+};
+
+inline BReceiveChannelRef BReceiveChannel::as_ref() const {
+  return BReceiveChannelRef(channel_interface_);
+}
+inline BSendChannelRef BSendChannel::as_ref() const {
+  return BSendChannelRef(channel_interface_);
+}
 
 // Base class for function and proc. Provides interface for adding nodes to a
 // function proc. Example usage (for derived FunctionBuilder class):
@@ -115,218 +362,250 @@ class BuilderBase {
   // 'should_verify' is a test-only argument which can be set to false in tests
   // that wish to build malformed IR.
   explicit BuilderBase(std::unique_ptr<FunctionBase> function,
-                       bool should_verify = true)
-      : function_(std::move(function)),
-        error_pending_(false),
-        should_verify_(should_verify) {}
-  virtual ~BuilderBase() = default;
+                       bool should_verify = true);
 
-  const std::string& name() const { return function_->name(); }
+  // Builders are neither copyable or movable- builder values contain references
+  // to their builder that can't be updated.
+  BuilderBase(const BuilderBase&) = delete;
+  BuilderBase& operator=(const BuilderBase&) = delete;
+  BuilderBase(BuilderBase&&) = delete;
+  BuilderBase& operator=(BuilderBase&&) = delete;
+
+  virtual ~BuilderBase();
+
+  const std::string& name() const;
+
+  // Set function as top to package.
+  absl::Status SetAsTop();
+
+  bool IsFunction() const { return function_->IsFunction(); }
+  bool IsBlock() const { return function_->IsBlock(); }
+  bool IsProc() const { return function_->IsProc(); }
+
+  // Makes it so that this builder moves the final `Function` to `dest` on
+  // `Build()` rather than adding it to the package.
+  void OverrideDestination(std::unique_ptr<FunctionBase>* dest) {
+    overridden_dest_ = dest;
+  }
+
+  // Set information about foreign function if the underlying function is
+  // a foreign function.
+  void SetForeignFunctionData(const std::optional<ForeignFunctionData>& ff);
 
   // Get access to currently built up function (or proc).
   FunctionBase* function() const { return function_.get(); }
 
   // Declares a parameter to the function being built of type "type".
-  virtual BValue Param(absl::string_view name, Type* type,
-                       absl::optional<SourceLocation> loc = absl::nullopt) = 0;
+  virtual BValue Param(std::string_view name, Type* type,
+                       const SourceInfo& loc = SourceInfo()) = 0;
 
   // Shift right arithmetic.
   BValue Shra(BValue operand, BValue amount,
-              absl::optional<SourceLocation> loc = absl::nullopt,
-              absl::string_view name = "");
+              const SourceInfo& loc = SourceInfo(), std::string_view name = "");
 
   // Shift right logical.
   BValue Shrl(BValue operand, BValue amount,
-              absl::optional<SourceLocation> loc = absl::nullopt,
-              absl::string_view name = "");
+              const SourceInfo& loc = SourceInfo(), std::string_view name = "");
 
   // Shift left (logical).
   BValue Shll(BValue operand, BValue amount,
-              absl::optional<SourceLocation> loc = absl::nullopt,
-              absl::string_view name = "");
+              const SourceInfo& loc = SourceInfo(), std::string_view name = "");
 
   // Bitwise or.
-  BValue Or(BValue lhs, BValue rhs,
-            absl::optional<SourceLocation> loc = absl::nullopt,
-            absl::string_view name = "");
+  BValue Or(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+            std::string_view name = "");
   BValue Or(absl::Span<const BValue> operands,
-            absl::optional<SourceLocation> loc = absl::nullopt,
-            absl::string_view name = "");
+            const SourceInfo& loc = SourceInfo(), std::string_view name = "");
+
+  // Bitwise nor.
+  BValue Nor(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
+  BValue Nor(absl::Span<const BValue> operands,
+             const SourceInfo& loc = SourceInfo(), std::string_view name = "");
 
   // Bitwise xor.
-  BValue Xor(BValue lhs, BValue rhs,
-             absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+  BValue Xor(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
   BValue Xor(absl::Span<const BValue> operands,
-             absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+             const SourceInfo& loc = SourceInfo(), std::string_view name = "");
 
   // Bitwise and.
-  BValue And(BValue lhs, BValue rhs,
-             absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+  BValue And(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
   BValue And(absl::Span<const BValue> operands,
-             absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+             const SourceInfo& loc = SourceInfo(), std::string_view name = "");
+
+  // Bitwise nand.
+  BValue Nand(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+              std::string_view name = "");
+  BValue Nand(absl::Span<const BValue> operands,
+              const SourceInfo& loc = SourceInfo(), std::string_view name = "");
 
   // Unary and-reduction.
-  BValue AndReduce(BValue operand,
-                   absl::optional<SourceLocation> loc = absl::nullopt,
-                   absl::string_view name = "");
+  BValue AndReduce(BValue operand, const SourceInfo& loc = SourceInfo(),
+                   std::string_view name = "");
 
   // Unary or-reduction.
-  BValue OrReduce(BValue operand,
-                  absl::optional<SourceLocation> loc = absl::nullopt,
-                  absl::string_view name = "");
+  BValue OrReduce(BValue operand, const SourceInfo& loc = SourceInfo(),
+                  std::string_view name = "");
 
   // Unary xor-reduction.
-  BValue XorReduce(BValue operand,
-                   absl::optional<SourceLocation> loc = absl::nullopt,
-                   absl::string_view name = "");
+  BValue XorReduce(BValue operand, const SourceInfo& loc = SourceInfo(),
+                   std::string_view name = "");
 
   // Unsigned/signed multiply. Result width is the same as the operand
   // width. Operand widths must be the same.
-  BValue UMul(BValue lhs, BValue rhs,
-              absl::optional<SourceLocation> loc = absl::nullopt,
-              absl::string_view name = "");
-  BValue SMul(BValue lhs, BValue rhs,
-              absl::optional<SourceLocation> loc = absl::nullopt,
-              absl::string_view name = "");
+  BValue UMul(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+              std::string_view name = "");
+  BValue SMul(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+              std::string_view name = "");
 
   // Unsigned/signed multiply with explicitly specified result width. Operand
   // widths can be arbitrary.
   BValue UMul(BValue lhs, BValue rhs, int64_t result_width,
-              absl::optional<SourceLocation> loc = absl::nullopt,
-              absl::string_view name = "");
+              const SourceInfo& loc = SourceInfo(), std::string_view name = "");
   BValue SMul(BValue lhs, BValue rhs, int64_t result_width,
-              absl::optional<SourceLocation> loc = absl::nullopt,
-              absl::string_view name = "");
+              const SourceInfo& loc = SourceInfo(), std::string_view name = "");
+
+  // Unsigned/signed partial product multiply. Result width is the same as the
+  // operand width. Operand widths must be the same.
+  BValue UMulp(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+               std::string_view name = "");
+  BValue SMulp(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+               std::string_view name = "");
+
+  // Unsigned/signed partial product multiply with explicitly specified result
+  // width. Operand widths can be arbitrary.
+  BValue UMulp(BValue lhs, BValue rhs, int64_t result_width,
+               const SourceInfo& loc = SourceInfo(),
+               std::string_view name = "");
+  BValue SMulp(BValue lhs, BValue rhs, int64_t result_width,
+               const SourceInfo& loc = SourceInfo(),
+               std::string_view name = "");
 
   // Unsigned/signed division. Result width is the same as the operand
   // width. Operand widths must be the same.
-  BValue UDiv(BValue lhs, BValue rhs,
-              absl::optional<SourceLocation> loc = absl::nullopt,
-              absl::string_view name = "");
-  BValue SDiv(BValue lhs, BValue rhs,
-              absl::optional<SourceLocation> loc = absl::nullopt,
-              absl::string_view name = "");
+  BValue UDiv(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+              std::string_view name = "");
+  BValue SDiv(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+              std::string_view name = "");
+  BValue UMod(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+              std::string_view name = "");
+  BValue SMod(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+              std::string_view name = "");
 
   // Two's complement subtraction/addition.
-  BValue Subtract(BValue lhs, BValue rhs,
-                  absl::optional<SourceLocation> loc = absl::nullopt,
-                  absl::string_view name = "");
-  BValue Add(BValue lhs, BValue rhs,
-             absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+  BValue Subtract(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+                  std::string_view name = "");
+  BValue Add(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
 
   // Concatenates the operands (zero-th operand are the most significant bits in
   // the result).
   BValue Concat(absl::Span<const BValue> operands,
-                absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "");
+                const SourceInfo& loc = SourceInfo(),
+                std::string_view name = "");
 
   // Unsigned less-or-equal.
-  BValue ULe(BValue lhs, BValue rhs,
-             absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+  BValue ULe(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
   // Unsigned less-than.
-  BValue ULt(BValue lhs, BValue rhs,
-             absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+  BValue ULt(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
   // Unsigned greater-or-equal.
-  BValue UGe(BValue lhs, BValue rhs,
-             absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+  BValue UGe(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
   // Unsigned greater-than.
-  BValue UGt(BValue lhs, BValue rhs,
-             absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+  BValue UGt(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
 
   // Signed less-or-equal.
-  BValue SLe(BValue lhs, BValue rhs,
-             absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+  BValue SLe(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
   // Signed less-than.
-  BValue SLt(BValue lhs, BValue rhs,
-             absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+  BValue SLt(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
   // Signed greater-or-equal.
-  BValue SGe(BValue lhs, BValue rhs,
-             absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+  BValue SGe(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
   // Signed greater-than.
-  BValue SGt(BValue lhs, BValue rhs,
-             absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+  BValue SGt(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
 
   // Equal.
-  BValue Eq(BValue lhs, BValue rhs,
-            absl::optional<SourceLocation> loc = absl::nullopt,
-            absl::string_view name = "");
+  BValue Eq(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+            std::string_view name = "");
   // Not Equal.
-  BValue Ne(BValue lhs, BValue rhs,
-            absl::optional<SourceLocation> loc = absl::nullopt,
-            absl::string_view name = "");
+  BValue Ne(BValue lhs, BValue rhs, const SourceInfo& loc = SourceInfo(),
+            std::string_view name = "");
 
   // Two's complement (arithmetic) negation.
-  BValue Negate(BValue x, absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "");
+  BValue Negate(BValue x, const SourceInfo& loc = SourceInfo(),
+                std::string_view name = "");
 
   // One's complement negation (bitwise not).
-  BValue Not(BValue x, absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+  BValue Not(BValue x, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
 
   // Turns a literal value into a handle that can be used in this function being
   // built.
-  BValue Literal(Value value,
-                 absl::optional<SourceLocation> loc = absl::nullopt,
-                 absl::string_view name = "");
-  BValue Literal(Bits bits, absl::optional<SourceLocation> loc = absl::nullopt,
-                 absl::string_view name = "") {
-    return Literal(Value(bits), loc);
+  BValue Literal(Value value, const SourceInfo& loc = SourceInfo(),
+                 std::string_view name = "");
+  BValue Literal(ValueBuilder value, const SourceInfo& loc = SourceInfo(),
+                 std::string_view name = "");
+  BValue Literal(Bits bits, const SourceInfo& loc = SourceInfo(),
+                 std::string_view name = "") {
+    return Literal(Value(bits), loc, name);
   }
 
   // An n-ary select which selects among an arbitrary number of cases based on
   // the selector value. If the number of cases is less than 2**selector_width
   // then a default value must be specified.
   BValue Select(BValue selector, absl::Span<const BValue> cases,
-                absl::optional<BValue> default_value = absl::nullopt,
-                absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "");
+                std::optional<BValue> default_value = std::nullopt,
+                const SourceInfo& loc = SourceInfo(),
+                std::string_view name = "");
 
   // An overload for binary select: selects on_true when selector is true,
   // on_false otherwise.
   // TODO(meheff): switch positions of on_true and on_false to match the
   // ordering of the cases span in the n-ary select.
   BValue Select(BValue selector, BValue on_true, BValue on_false,
-                absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "");
+                const SourceInfo& loc = SourceInfo(),
+                std::string_view name = "");
 
   // Creates a one-hot operation which generates a one-hot bits value from its
   // inputs.
   BValue OneHot(BValue input, LsbOrMsb priority,
-                absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "");
+                const SourceInfo& loc = SourceInfo(),
+                std::string_view name = "");
 
   // Creates a select operation which uses a one-hot selector (rather than a
   // binary encoded selector as used in Select).
   BValue OneHotSelect(BValue selector, absl::Span<const BValue> cases,
-                      absl::optional<SourceLocation> loc = absl::nullopt,
-                      absl::string_view name = "");
+                      const SourceInfo& loc = SourceInfo(),
+                      std::string_view name = "");
+
+  // Creates a select operation which uses a one-hot selector (rather than a
+  // binary encoded selector as used in Select).
+  BValue PrioritySelect(BValue selector, absl::Span<const BValue> cases,
+                        BValue default_value,
+                        const SourceInfo& loc = SourceInfo(),
+                        std::string_view name = "");
 
   // Counts the number of leading zeros in the value 'x'.
   //
   // x must be of bits type. This function returns a value of the same type that
   // it takes as an argument.
-  BValue Clz(BValue x, absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+  BValue Clz(BValue x, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
 
   // Counts the number of trailing zeros in the value 'x'.
   //
   // x must be of bits type. This function returns a value of the same type that
   // it takes as an argument.
-  BValue Ctz(BValue x, absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+  BValue Ctz(BValue x, const SourceInfo& loc = SourceInfo(),
+             std::string_view name = "");
 
   // Creates an match operation which compares 'condition' against each of the
   // case clauses and produces the respective case value of the first match. If
@@ -339,21 +618,20 @@ class BuilderBase {
     BValue value;
   };
   BValue Match(BValue condition, absl::Span<const Case> cases,
-               BValue default_value,
-               absl::optional<SourceLocation> loc = absl::nullopt,
-               absl::string_view name = "");
+               BValue default_value, const SourceInfo& loc = SourceInfo(),
+               std::string_view name = "");
 
   // Creates a match operation which matches each of the case clauses against
   // the single-bit literal one. Each case clause must be a single-bit Bits
   // value.
   BValue MatchTrue(absl::Span<const Case> cases, BValue default_value,
-                   absl::optional<SourceLocation> loc = absl::nullopt,
-                   absl::string_view name = "");
+                   const SourceInfo& loc = SourceInfo(),
+                   std::string_view name = "");
   // Overload which is easier to expose to Python.
   BValue MatchTrue(absl::Span<const BValue> case_clauses,
                    absl::Span<const BValue> case_values, BValue default_value,
-                   absl::optional<SourceLocation> loc = absl::nullopt,
-                   absl::string_view name = "");
+                   const SourceInfo& loc = SourceInfo(),
+                   std::string_view name = "");
 
   // Creates a tuple of values.
   //
@@ -365,24 +643,29 @@ class BuilderBase {
   //
   //  The arrow indicates the source location for the tuple expression.
   BValue Tuple(absl::Span<const BValue> elements,
-               absl::optional<SourceLocation> loc = absl::nullopt,
-               absl::string_view name = "");
+               const SourceInfo& loc = SourceInfo(),
+               std::string_view name = "");
 
   // Creates an AfterAll ordering operation.
   BValue AfterAll(absl::Span<const BValue> dependencies,
-                  absl::optional<SourceLocation> loc = absl::nullopt,
-                  absl::string_view name = "");
+                  const SourceInfo& loc = SourceInfo(),
+                  std::string_view name = "");
+
+  // Creates a MinDelay constraint operation.
+  BValue MinDelay(BValue token, int64_t delay,
+                  const SourceInfo& loc = SourceInfo(),
+                  std::string_view name = "");
 
   // Creates an array of values. Each value in element must be the same type
   // which is given by element_type.
   BValue Array(absl::Span<const BValue> elements, Type* element_type,
-               absl::optional<SourceLocation> loc = absl::nullopt,
-               absl::string_view name = "");
+               const SourceInfo& loc = SourceInfo(),
+               std::string_view name = "");
 
   // Adds an tuple index expression.
   BValue TupleIndex(BValue arg, int64_t idx,
-                    absl::optional<SourceLocation> loc = absl::nullopt,
-                    absl::string_view name = "");
+                    const SourceInfo& loc = SourceInfo(),
+                    std::string_view name = "");
 
   // Adds a "counted for-loop" to the computation, having a known-constant
   // number of loop iterations.
@@ -403,31 +686,8 @@ class BuilderBase {
   BValue CountedFor(BValue init_value, int64_t trip_count, int64_t stride,
                     Function* body,
                     absl::Span<const BValue> invariant_args = {},
-                    absl::optional<SourceLocation> loc = absl::nullopt,
-                    absl::string_view name = "");
-
-  // Adds a "dynamic counted for-loop" to the computation, having a
-  // dynamically determined number of loop iterations and stride.
-  //
-  // Args:
-  //  trip_count: Of bits type, number of iterations to execute "body".
-  //  stride: Of bits type, count by which to increment induction variable.
-  //  init_value: Of type "T", the starting value for the loop carry data.
-  //  body: Of type "(u32, T) -> T": the body that is invoked on the loop carry
-  //    data decorated with the iteration number, producing new loop carry data
-  //    (of the same type) each iteration.
-  //  invariant_args: Arguments that are passed to the body function in a
-  //    loop-invariant fashion (for each of these arguments, the same value is
-  //    passed as an argument on every trip and the value does not change).
-  //  loc: Source location for this counted for-loop.
-  //
-  // Returns the value that results from this counted for loop after it has
-  // completed all of its trips.
-  BValue DynamicCountedFor(BValue init_value, BValue trip_count, BValue stride,
-                           Function* body,
-                           absl::Span<const BValue> invariant_args = {},
-                           absl::optional<SourceLocation> loc = absl::nullopt,
-                           absl::string_view name = "");
+                    const SourceInfo& loc = SourceInfo(),
+                    std::string_view name = "");
 
   // Adds a map to the computation.
   // Applies the function to_apply to each element of the array-typed operand
@@ -440,164 +700,249 @@ class BuilderBase {
   //
   // Returns a value of type "Array<U, N>".
   BValue Map(BValue operand, Function* to_apply,
-             absl::optional<SourceLocation> loc = absl::nullopt,
-             absl::string_view name = "");
+             const SourceInfo& loc = SourceInfo(), std::string_view name = "");
 
   // Adds a function call with parameters.
   BValue Invoke(absl::Span<const BValue> args, Function* to_apply,
-                absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "");
+                const SourceInfo& loc = SourceInfo(),
+                std::string_view name = "");
 
   // Adds an multi-dimensional array index expression. The indices should be all
   // bits types.
   BValue ArrayIndex(BValue arg, absl::Span<const BValue> indices,
-                    absl::optional<SourceLocation> loc = absl::nullopt,
-                    absl::string_view name = "");
+                    bool assumed_in_bounds,
+                    const SourceInfo& loc = SourceInfo(),
+                    std::string_view name = "");
+
+  // Adds an multi-dimensional array index expression. The indices should be all
+  // bits types.
+  BValue ArrayIndex(BValue arg, absl::Span<const BValue> indices,
+                    const SourceInfo& loc = SourceInfo(),
+                    std::string_view name = "") {
+    return ArrayIndex(arg, indices, /*assumed_in_bounds=*/false, loc, name);
+  }
 
   // Slices an array with a given start and end position.
   BValue ArraySlice(BValue array, BValue start, int64_t width,
-                    absl::optional<SourceLocation> loc = absl::nullopt,
-                    absl::string_view name = "");
+                    const SourceInfo& loc = SourceInfo(),
+                    std::string_view name = "");
+
+  // Updates the array element at index "idx" to update_value. The indices
+  // should be all bits types.
+  BValue ArrayUpdate(BValue arg, BValue update_value,
+                     absl::Span<const BValue> indices, bool assumed_in_bounds,
+                     const SourceInfo& loc = SourceInfo(),
+                     std::string_view name = "");
 
   // Updates the array element at index "idx" to update_value. The indices
   // should be all bits types.
   BValue ArrayUpdate(BValue arg, BValue update_value,
                      absl::Span<const BValue> indices,
-                     absl::optional<SourceLocation> loc = absl::nullopt,
-                     absl::string_view name = "");
+                     const SourceInfo& loc = SourceInfo(),
+                     std::string_view name = "") {
+    return ArrayUpdate(arg, update_value, indices, /*assumed_in_bounds=*/false,
+                       loc, name);
+  }
 
   // Concatenates array operands into a single array.  zero-th
   // element is the zero-th element of the zero-th (left-most) array.
   BValue ArrayConcat(absl::Span<const BValue> operands,
-                     absl::optional<SourceLocation> loc = absl::nullopt,
-                     absl::string_view name = "");
+                     const SourceInfo& loc = SourceInfo(),
+                     std::string_view name = "");
 
   // Reverses the order of the bits of the argument.
-  BValue Reverse(BValue arg, absl::optional<SourceLocation> loc = absl::nullopt,
-                 absl::string_view name = "");
+  BValue Reverse(BValue arg, const SourceInfo& loc = SourceInfo(),
+                 std::string_view name = "");
 
   // Adds an identity expression.
-  BValue Identity(BValue var,
-                  absl::optional<SourceLocation> loc = absl::nullopt,
-                  absl::string_view name = "");
+  BValue Identity(BValue var, const SourceInfo& loc = SourceInfo(),
+                  std::string_view name = "");
 
   // Sign-extends arg to the new_bit_count.
   BValue SignExtend(BValue arg, int64_t new_bit_count,
-                    absl::optional<SourceLocation> loc = absl::nullopt,
-                    absl::string_view name = "");
+                    const SourceInfo& loc = SourceInfo(),
+                    std::string_view name = "");
 
   // Zero-extends arg to the new_bit_count.
   BValue ZeroExtend(BValue arg, int64_t new_bit_count,
-                    absl::optional<SourceLocation> loc = absl::nullopt,
-                    absl::string_view name = "");
+                    const SourceInfo& loc = SourceInfo(),
+                    std::string_view name = "");
 
   // Extracts a slice from the bits-typed arg. 'start' is the first bit of the
   // slice and is zero-indexed where zero is the LSb of arg.
   BValue BitSlice(BValue arg, int64_t start, int64_t width,
-                  absl::optional<SourceLocation> loc = absl::nullopt,
-                  absl::string_view name = "");
+                  const SourceInfo& loc = SourceInfo(),
+                  std::string_view name = "");
 
   // Updates a slice of the given bits-typed 'arg' starting at index 'start'
   // with 'update_value'.
   BValue BitSliceUpdate(BValue arg, BValue start, BValue update_value,
-                        absl::optional<SourceLocation> loc = absl::nullopt,
-                        absl::string_view name = "");
+                        const SourceInfo& loc = SourceInfo(),
+                        std::string_view name = "");
 
   // Same as BitSlice, but allows for dynamic 'start' offsets
   BValue DynamicBitSlice(BValue arg, BValue start, int64_t width,
-                         absl::optional<SourceLocation> loc = absl::nullopt,
-                         absl::string_view name = "");
+                         const SourceInfo& loc = SourceInfo(),
+                         std::string_view name = "");
 
   // Binary encodes the n-bit input to a log_2(n) bit output.
-  BValue Encode(BValue arg, absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "");
+  BValue Encode(BValue arg, const SourceInfo& loc = SourceInfo(),
+                std::string_view name = "");
 
   // Binary decodes the n-bit input to a one-hot output. 'width' can be at most
   // 2**n where n is the bit width of the operand. If 'width' is not specified
   // the output is 2**n bits wide.
-  BValue Decode(BValue arg, absl::optional<int64_t> width = absl::nullopt,
-                absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "");
+  BValue Decode(BValue arg, std::optional<int64_t> width = std::nullopt,
+                const SourceInfo& loc = SourceInfo(),
+                std::string_view name = "");
 
   // Retrieves the type of "value" and returns it.
-  Type* GetType(BValue value) { return value.node()->GetType(); }
+  Type* GetType(const BValue& value) { return value.GetType(); }
 
   // Adds a Arith/UnOp/BinOp/CompareOp to the function. Exposed for
   // programmatically adding these ops using with variable Op values.
-  BValue AddUnOp(Op op, BValue x,
-                 absl::optional<SourceLocation> loc = absl::nullopt,
-                 absl::string_view name = "");
+  BValue AddUnOp(Op op, BValue x, const SourceInfo& loc = SourceInfo(),
+                 std::string_view name = "");
   BValue AddBinOp(Op op, BValue lhs, BValue rhs,
-                  absl::optional<SourceLocation> loc = absl::nullopt,
-                  absl::string_view name = "");
+                  const SourceInfo& loc = SourceInfo(),
+                  std::string_view name = "");
   BValue AddCompareOp(Op op, BValue lhs, BValue rhs,
-                      absl::optional<SourceLocation> loc = absl::nullopt,
-                      absl::string_view name = "");
+                      const SourceInfo& loc = SourceInfo(),
+                      std::string_view name = "");
   BValue AddNaryOp(Op op, absl::Span<const BValue> args,
-                   absl::optional<SourceLocation> loc = absl::nullopt,
-                   absl::string_view name = "");
+                   const SourceInfo& loc = SourceInfo(),
+                   std::string_view name = "");
   // If result width is not given the result width set to the width of the
   // arguments lhs and rhs which must have the same width.
   BValue AddArithOp(Op op, BValue lhs, BValue rhs,
-                    absl::optional<int64_t> result_width,
-                    absl::optional<SourceLocation> loc = absl::nullopt,
-                    absl::string_view name = "");
-  BValue AddBitwiseReductionOp(
-      Op op, BValue arg, absl::optional<SourceLocation> loc = absl::nullopt,
-      absl::string_view name = "");
+                    std::optional<int64_t> result_width,
+                    const SourceInfo& loc = SourceInfo(),
+                    std::string_view name = "");
+  BValue AddPartialProductOp(Op op, BValue lhs, BValue rhs,
+                             std::optional<int64_t> result_width,
+                             const SourceInfo& loc = SourceInfo(),
+                             std::string_view name = "");
+  BValue AddBitwiseReductionOp(Op op, BValue arg,
+                               const SourceInfo& loc = SourceInfo(),
+                               std::string_view name = "");
 
   // Adds an assert op to the function. Assert raises an error containing the
   // given message if the given condition evaluates to false.
-  BValue Assert(BValue token, BValue condition, absl::string_view message,
-                absl::optional<std::string> label = absl::nullopt,
-                absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "");
+  BValue Assert(BValue token, BValue condition, std::string_view message,
+                std::optional<std::string> label = std::nullopt,
+                const SourceInfo& loc = SourceInfo(),
+                std::string_view name = "");
+
+  // Adds a trace op to the function. In simulation, when the condition is true
+  // the traced data will be printed.
+  BValue Trace(BValue token, BValue condition, absl::Span<const BValue> args,
+               absl::Span<const FormatStep> format, int64_t verbosity = 0,
+               const SourceInfo& loc = SourceInfo(),
+               std::string_view name = "");
+
+  // Overloaded version of Trace that parses a format string argument instead of
+  // directly requiring the parsed form.
+  BValue Trace(BValue token, BValue condition, absl::Span<const BValue> args,
+               std::string_view format_string, int64_t verbosity = 0,
+               const SourceInfo& loc = SourceInfo(),
+               std::string_view name = "");
+
+  // Adds a coverpoint to the function that records every time the associated
+  // condition evaluates to true.
+  BValue Cover(BValue condition, std::string_view label,
+               const SourceInfo& loc = SourceInfo(),
+               std::string_view name = "");
+
+  // Adds a gate operation. The output of the operation is `data` if `cond` is
+  // true and zero-valued otherwise. Gates are side-effecting.
+  BValue Gate(BValue condition, BValue data,
+              const SourceInfo& loc = SourceInfo(),
+              std::string_view name = "") {
+    return Gate(condition, data, GateType::kZeroGate, loc, name);
+  }
+
+  // Adds a gate operation with a specified gate type. The output of the
+  // operation is `data` if `cond` is true and otherwise depends on the gate
+  // type. Gates are side-effecting.
+  // are side-effecting.
+  BValue Gate(BValue condition, BValue data, GateType gate_type,
+              const SourceInfo& loc = SourceInfo(), std::string_view name = "");
 
   // Add a receive operation. The type of the data value received is
   // determined by the channel.
-  virtual BValue Receive(Channel* channel, BValue token,
-                         absl::optional<SourceLocation> loc = absl::nullopt,
-                         absl::string_view name = "") = 0;
+  BValue Receive(BReceiveChannelRef channel, BValue token,
+                 const SourceInfo& loc = SourceInfo(),
+                 std::string_view name = "");
 
-  // Add a receive_if operation. The receive executes conditionally on the value
-  // of the predicate "pred". The type of the data value received is
+  // Add a conditional receive operation. The receive executes conditionally on
+  // the value of the predicate "pred". The type of the data value received is
   // determined by the channel.
-  virtual BValue ReceiveIf(Channel* channel, BValue token, BValue pred,
-                           absl::optional<SourceLocation> loc = absl::nullopt,
-                           absl::string_view name = "") = 0;
+  BValue ReceiveIf(BReceiveChannelRef channel, BValue token, BValue pred,
+                   const SourceInfo& loc = SourceInfo(),
+                   std::string_view name = "");
+
+  // Add a non-blocking receive operation. The type of the data value received
+  // is determined by the channel.
+  BValue ReceiveIfNonBlocking(BReceiveChannelRef channel, BValue token,
+                              BValue pred, const SourceInfo& loc = SourceInfo(),
+                              std::string_view name = "");
+
+  // Add a non-blocking receive operation. The type of the data value received
+  // is determined by the channel.
+  BValue ReceiveNonBlocking(BReceiveChannelRef channel, BValue token,
+                            const SourceInfo& loc = SourceInfo(),
+                            std::string_view name = "");
 
   // Add a send operation.
-  virtual BValue Send(Channel* channel, BValue token, BValue data,
-                      absl::optional<SourceLocation> loc = absl::nullopt,
-                      absl::string_view name = "") = 0;
+  BValue Send(BSendChannelRef channel, BValue token, BValue data,
+              const SourceInfo& loc = SourceInfo(), std::string_view name = "");
 
-  // Add a send_if operation. The send executes conditionally on the value of
-  // the predicate "pred".
-  virtual BValue SendIf(Channel* channel, BValue token, BValue pred,
-                        BValue data,
-                        absl::optional<SourceLocation> loc = absl::nullopt,
-                        absl::string_view name = "") = 0;
+  // Add a conditional send operation. The send executes conditionally on the
+  // value of the predicate "pred".
+  BValue SendIf(BSendChannelRef channel, BValue token, BValue pred, BValue data,
+                const SourceInfo& loc = SourceInfo(),
+                std::string_view name = "");
 
-  Package* package() const { return function_->package(); }
+  // Adds a (conditional) next value for the named state element. Returns an
+  // empty tuple.
+  BValue Next(BValue state_read, BValue value,
+              std::optional<BValue> pred = std::nullopt,
+              std::optional<std::string> label = std::nullopt,
+              const SourceInfo& loc = SourceInfo(), std::string_view name = "");
+  BValue Next(BStateElement state_element, BValue value,
+              std::optional<BValue> pred = std::nullopt,
+              std::optional<std::string> label = std::nullopt,
+              const SourceInfo& loc = SourceInfo(), std::string_view name = "");
+
+  // Converts a BValue to a LeafTypeTree of BValues.
+  LeafTypeTree<BValue> MakeLeafTypeTree(BValue v);
+
+  Package* package() const;
+
+  // Returns the last node enqueued onto this builder -- when Build() is called
+  // this is what is used as the return value.
+  absl::StatusOr<BValue> GetLastValue() {
+    XLS_RET_CHECK(last_node_ != nullptr);
+    return BValue(last_node_, this);
+  }
+
+  // Returns a detailed pending error, or absl::OkStatus() if no error
+  // is pending.
+  absl::Status GetError() const;
 
  protected:
-  BValue SetError(absl::string_view msg, absl::optional<SourceLocation> loc);
-  bool ErrorPending() { return error_pending_; }
+  BValue SetError(std::string_view msg, const SourceInfo& loc);
+  bool ErrorPending() const { return error_pending_; }
+
+  // Invoked as a callback after a node is added via AddNode.
+  virtual void OnNodeAdded(Node* node) {}
 
   // Constructs and adds a node to the function and returns a corresponding
   // BValue.
   template <typename NodeT, typename... Args>
-  BValue AddNode(absl::optional<SourceLocation> loc, Args&&... args) {
-    last_node_ = function_->AddNode<NodeT>(absl::make_unique<NodeT>(
-        loc, std::forward<Args>(args)..., function_.get()));
-    if (should_verify_) {
-      absl::Status verify_status = VerifyNode(last_node_);
-      if (!verify_status.ok()) {
-        return SetError(verify_status.message(), loc);
-      }
-    }
-    return BValue(last_node_, this);
-  }
+  BValue AddNode(const SourceInfo& loc, Args&&... args);
+
+  BValue CreateBValue(Node* node, const SourceInfo& loc);
 
   // The most recently added node to the function.
   Node* last_node_ = nullptr;
@@ -611,36 +956,41 @@ class BuilderBase {
   // tests.
   bool should_verify_;
 
+  std::unique_ptr<FunctionBase>* overridden_dest_ = nullptr;
+
   std::string error_msg_;
   std::string error_stacktrace_;
-  absl::optional<SourceLocation> error_loc_;
+  SourceInfo error_loc_;
 };
+
+// Tags to distinguish scheduled vs non-scheduled builders.
+struct ScheduledFunctionTag {};
+struct ScheduledProcTag {};
+struct ScheduledBlockTag {};
 
 // Class for building an XLS Function.
 class FunctionBuilder : public BuilderBase {
  public:
   // Builder for xls::Functions. 'should_verify' is a test-only argument which
   // can be set to false in tests that wish to build malformed IR.
-  FunctionBuilder(absl::string_view name, Package* package,
-                  bool should_verify = true)
-      : BuilderBase(absl::make_unique<Function>(std::string(name), package),
-                    should_verify) {}
-  virtual ~FunctionBuilder() = default;
+  FunctionBuilder(std::string_view name, Package* package,
+                  bool should_verify = true);
+  FunctionBuilder(std::string_view name, Package* package,
+                  ScheduledFunctionTag tag, bool should_verify = true);
+  ~FunctionBuilder() override = default;
 
-  BValue Param(absl::string_view name, Type* type,
-               absl::optional<SourceLocation> loc = absl::nullopt) override;
-  BValue Receive(Channel* channel, BValue token,
-                 absl::optional<SourceLocation> loc = absl::nullopt,
-                 absl::string_view name = "") override;
-  BValue ReceiveIf(Channel* channel, BValue token, BValue pred,
-                   absl::optional<SourceLocation> loc = absl::nullopt,
-                   absl::string_view name = "") override;
-  BValue Send(Channel* channel, BValue token, BValue data,
-              absl::optional<SourceLocation> loc = absl::nullopt,
-              absl::string_view name = "") override;
-  BValue SendIf(Channel* channel, BValue token, BValue pred, BValue data,
-                absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "") override;
+  // Builders are neither copyable or movable- builder values contain references
+  // to their builder that can't be updated.
+  FunctionBuilder(const FunctionBuilder&) = delete;
+  FunctionBuilder& operator=(const FunctionBuilder&) = delete;
+  FunctionBuilder(FunctionBuilder&&) = delete;
+  FunctionBuilder& operator=(FunctionBuilder&&) = delete;
+
+  BValue Param(std::string_view name, Type* type,
+               const SourceInfo& loc = SourceInfo()) override;
+
+  // Forces the parameters to appear in the given order.
+  void SetParamOrder(absl::Span<BValue const> new_order);
 
   // Adds the function internally being built-up by this builder to the package
   // given at construction time, and returns a pointer to it (the function is
@@ -651,132 +1001,367 @@ class FunctionBuilder : public BuilderBase {
 
   // Build function using given return value.
   absl::StatusOr<Function*> BuildWithReturnValue(BValue return_value);
+
+  // Build function using no return value. This is intended for skeletal source
+  // functions nested in a partially lowered block.
+  absl::StatusOr<Function*> BuildWithNoReturnValue();
 };
+
+// Type used as special argument to ProcBuilder constructor to indicate that the
+// proc to be built is a new style proc (ie, has proc-scoped channels). This
+// makes ProcBuilder definitions self-documenting:
+//
+//   ProcBuilder pb(NewStyleProc(), ...);
+//
+// TODO(https://github.com/google/xls/issues/869): Remove this when all procs
+// are new style.
+struct NewStyleProc {};
 
 // Class for building an XLS Proc (a communicating sequential process).
 class ProcBuilder : public BuilderBase {
  public:
   // Builder for xls::Procs. 'should_verify' is a test-only argument which can
-  // be set to false in tests that wish to build malformed IR.
-  ProcBuilder(absl::string_view name, const Value& init_value,
-              absl::string_view token_name, absl::string_view state_name,
-              Package* package, bool should_verify = true)
-      : BuilderBase(absl::make_unique<Proc>(name, init_value, token_name,
-                                            state_name, package),
-                    should_verify),
-        // The parameter nodes are added at construction time. Create a BValue
-        // for each param node so they may be used in construction of
-        // expressions.
-        token_param_(proc()->TokenParam(), this),
-        state_param_(proc()->StateParam(), this) {}
-  virtual ~ProcBuilder() = default;
+  // be set to false in tests that wish to build malformed IR. Proc starts with
+  // no state elements.
+  ProcBuilder(std::string_view name, Package* package,
+              bool should_verify = true);
+  ProcBuilder(std::string_view name, Package* package, ScheduledProcTag tag,
+              bool should_verify = true);
+  // Constructor for new-style procs which have proc-scoped channels.
+  ProcBuilder(NewStyleProc tag, std::string_view name, Package* package,
+              bool should_verify = true);
+  ProcBuilder(NewStyleProc tag, std::string_view name, Package* package,
+              ScheduledProcTag stag, bool should_verify = true);
+
+  ~ProcBuilder() override = default;
+
+  // Builders are neither copyable or movable- builder values contain references
+  // to their builder that can't be updated.
+  ProcBuilder(const ProcBuilder&) = delete;
+  ProcBuilder& operator=(const ProcBuilder&) = delete;
+  ProcBuilder(ProcBuilder&&) = delete;
+  ProcBuilder& operator=(ProcBuilder&&) = delete;
 
   // Returns the Proc being constructed.
-  Proc* proc() const { return down_cast<Proc*>(function()); }
+  Proc* proc() const;
 
-  // Returns the Param BValue for the state or token parameter. Unlike
-  // BuilderBase::Param this does add a Param node to the Proc. Rather the state
-  // and token parameters are added to the Proc at construction time and these
-  // methods return references to the these parameters.
-  BValue GetStateParam() const { return state_param_; }
-  BValue GetTokenParam() const { return token_param_; }
+  // Add an internal channel scoped to the proc. Only can be called for new
+  // style procs.
+  BChannelWithInterfaces AddChannel(
+      std::string_view name, Type* type,
+      ChannelKind kind = ChannelKind::kStreaming,
+      absl::Span<const Value> initial_values = {},
+      std::optional<ChannelConfig> channel_config = std::nullopt);
 
-  // Build the proc using the given BValues as the recurrent token and state
-  // respectively. The return value of the proc is constructed as a two-tuple
-  // of the token and next-state.
-  absl::StatusOr<Proc*> Build(BValue token, BValue next_state);
+  // Add an interface channel to the proc. Only can be called for new style
+  // procs.
+  BReceiveChannel AddInputChannel(
+      std::string_view name, Type* type,
+      ChannelKind kind = ChannelKind::kStreaming,
+      std::optional<ChannelStrictness> strictness = std::nullopt,
+      std::optional<FlowControl> flow_control = std::nullopt);
+  BSendChannel AddOutputChannel(
+      std::string_view name, Type* type,
+      ChannelKind kind = ChannelKind::kStreaming,
+      std::optional<ChannelStrictness> strictness = std::nullopt,
+      std::optional<FlowControl> flow_control = std::nullopt);
 
-  BValue Param(absl::string_view name, Type* type,
-               absl::optional<SourceLocation> loc = absl::nullopt) override;
-  BValue Receive(Channel* channel, BValue token,
-                 absl::optional<SourceLocation> loc = absl::nullopt,
-                 absl::string_view name = "") override;
-  BValue ReceiveIf(Channel* channel, BValue token, BValue pred,
-                   absl::optional<SourceLocation> loc = absl::nullopt,
-                   absl::string_view name = "") override;
-  BValue Send(Channel* channel, BValue token, BValue data,
-              absl::optional<SourceLocation> loc = absl::nullopt,
-              absl::string_view name = "") override;
-  BValue SendIf(Channel* channel, BValue token, BValue pred, BValue data,
-                absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "") override;
+  // Returns true if there is an channel entity (a xls::Channel object for
+  // old-style proc or a proc-scoped channel or interface channel for new style
+  // procs).
+  // TODO(https://github.com/google/xls/issues/869): Rename this Has.*End when
+  // all procs are new style.
+  bool HasSendChannelRef(std::string_view name) const;
+  bool HasReceiveChannelRef(std::string_view name) const;
+
+  // Returns the receive/send channel end with the given name. Only can be
+  // called for new style procs.
+  BReceiveChannel GetReceiveChannelInterface(std::string_view name);
+  BSendChannel GetSendChannelInterface(std::string_view name);
+
+  // Instantiates the specified proc in this proc. `channel_interfaces` must
+  // match the number, type, and direction of channels on the interface of the
+  // instantiated proc.
+  void InstantiateProc(
+      std::string_view name, Proc* instantiated_proc,
+      absl::Span<const BChannelInterfaceRef> channel_interfaces);
+
+  // Returns the Param BValue for the state parameters. Unlike
+  // BuilderBase::Param this doesn't add a Param node to the Proc. Rather the
+  // state parameters are added to the Proc at construction time and these
+  // methods return references to these parameters.
+  virtual BValue GetStateParam(int64_t index) const {
+    return state_params_.at(index);
+  }
+
+  // Returns the BStateElement for the state element at the given index.
+  virtual BStateElement GetStateElement(int64_t index) const {
+    return state_elements_.at(index);
+  }
+
+  absl::StatusOr<Proc*> Build();
+
+  // Build the proc using the given BValues as the next state values. If
+  // `next_state` is not empty, the number of recurrent state elements in
+  // `next_state` must match the number of state elements in the proc.
+  //
+  // Provided as a convenience for the common case where we can treat the next
+  // state as approximately a return value.
+  absl::StatusOr<Proc*> Build(absl::Span<const BValue> next_state);
+
+  // Adds a state element to the proc with the given initial value (and read
+  // predicate if provided). Returns the newly added state read.
+  BValue ReadStateElement(std::string_view name, const Value& initial_value,
+                          std::optional<BValue> read_predicate,
+                          bool non_synthesizable,
+                          const SourceInfo& loc = SourceInfo());
+  BValue ReadStateElement(std::string_view name,
+                          const ValueBuilder& initial_value,
+                          std::optional<BValue> read_predicate,
+                          bool non_synthesizable,
+                          const SourceInfo& loc = SourceInfo());
+  BValue ReadStateElement(std::string_view name, const Bits& initial_value,
+                          std::optional<BValue> read_predicate,
+                          bool non_synthesizable,
+                          const SourceInfo& loc = SourceInfo()) {
+    return ReadStateElement(name, Value(initial_value), read_predicate,
+                            non_synthesizable, loc);
+  }
+  BValue ReadStateElement(std::string_view name, const Value& initial_value,
+                          bool non_synthesizable = false,
+                          const SourceInfo& loc = SourceInfo()) {
+    return ReadStateElement(name, initial_value,
+                            /*read_predicate=*/std::nullopt, non_synthesizable,
+                            loc);
+  }
+  BValue ReadStateElement(std::string_view name,
+                          const ValueBuilder& initial_value,
+                          bool non_synthesizable = false,
+                          const SourceInfo& loc = SourceInfo()) {
+    return ReadStateElement(name, initial_value,
+                            /*read_predicate=*/std::nullopt, non_synthesizable,
+                            loc);
+  }
+  BValue ReadStateElement(std::string_view name, const Bits& initial_value,
+                          bool non_synthesizable = false,
+                          const SourceInfo& loc = SourceInfo()) {
+    return ReadStateElement(name, Value(initial_value),
+                            /*read_predicate=*/std::nullopt, non_synthesizable,
+                            loc);
+  }
+
+  // Adds a state element to the proc without creating a state read.
+  BStateElement StateElement(std::string_view name, const Value& initial_value,
+                             bool non_synthesizable = false,
+                             const SourceInfo& loc = SourceInfo());
+
+  // Adds a state read node for an existing state element.
+  BValue StateRead(BStateElement state_element,
+                   std::optional<BValue> predicate = std::nullopt,
+                   std::optional<std::string> label = std::nullopt,
+                   const SourceInfo& loc = SourceInfo());
+
+  // Overriden Param method is explicitly disabled (returns an error). Use
+  // StateElement method to add state elements.
+  BValue Param(std::string_view name, Type* type,
+               const SourceInfo& loc = SourceInfo()) override;
 
  private:
-  // The BValue of the token parameter (parameter 1).
-  BValue token_param_;
-
-  // The BValue of the state parameter (parameter 0).
-  BValue state_param_;
+  // The BValues of the state parameters.
+  std::vector<BValue> state_params_;
+  // The BStateElements of the state elements.
+  std::vector<BStateElement> state_elements_;
 };
 
 // A derived ProcBuilder which automatically manages tokens internally.  This
 // makes it much less verbose to construct procs with sends, receives, or other
-// token-using operations. In the TokenlessProcBuilder, *all* token-using
-// operations use GetTokenParam() as their token operand, and the recurrent
-// token is an AfterAll operation whose operands are the tokens from all of the
-// token-using operations. The limitation of the TokenlessProcBuilder is that it
-// cannot be used if non-trivial ordering of these operations is required
-// (enforced via token data dependencies).
+// token-using operations. In the TokenlessProcBuilder, token-using
+// operations are totally ordered by threading of a single token. The limitation
+// of the TokenlessProcBuilder is that it cannot be used if non-trivial ordering
+// of these operations is required, or if there are requirements on
+// cross-activation ordering between nodes (enforced via token data
+// dependencies).
 //
 // Note: a proc built with the TokenlessProcBuilder still has token types
 // internally. "Tokenless" refers to the fact that token values are hidden from
 // the builder interface.
 class TokenlessProcBuilder : public ProcBuilder {
  public:
-  TokenlessProcBuilder(absl::string_view name, const Value& init_value,
-                       absl::string_view token_name,
-                       absl::string_view state_name, Package* package,
+  // Builder for xls::Procs. 'should_verify' is a test-only argument which can
+  // be set to false in tests that wish to build malformed IR. Proc starts with
+  // no state elements.
+  TokenlessProcBuilder(std::string_view name, std::string_view token_name,
+                       Package* package, bool should_verify = true)
+      : ProcBuilder(name, package, should_verify),
+        orig_token_(Literal(Value::Token(), SourceInfo(), token_name)),
+        last_token_(orig_token_) {}
+  // Constructor for new-style procs which have proc-scoped channels.
+  TokenlessProcBuilder(NewStyleProc tag, std::string_view name,
+                       std::string_view token_name, Package* package,
                        bool should_verify = true)
-      : ProcBuilder(name, init_value, token_name, state_name, package,
-                    should_verify) {}
-  virtual ~TokenlessProcBuilder() = default;
+      : ProcBuilder(tag, name, package, should_verify),
+        orig_token_(Literal(Value::Token(), SourceInfo(), token_name)),
+        last_token_(orig_token_) {}
 
-  // Build the proc using the given BValue as the recurrent state
-  // respectively. The recurrent token value is a constructed as an AfterAll
-  // operation whose operands are all of the tokens from the
-  // send(if)/receive(if) operations in the proc.
-  absl::StatusOr<Proc*> Build(BValue next_state);
+  ~TokenlessProcBuilder() override = default;
+
+  void ResetToken() { last_token_ = orig_token_; }
+
+  BValue InitialToken() const { return orig_token_; }
+
+  BValue CurrentToken() const { return last_token_; }
+
+  // Add a MinDelay constraint operation.
+  using ProcBuilder::MinDelay;
+  BValue MinDelay(int64_t delay, const SourceInfo& loc = SourceInfo(),
+                  std::string_view name = "");
 
   // Add a receive operation. The type of the data value received is determined
-  // by the channel. The returned BValue is the received data itself (not a
-  // tuple containing a token and the data).
+  // by the channel. The returned BValue is the received data itself (*not* the
+  // receive operation itself which produces a tuple containing a token and the
+  // data).
   using ProcBuilder::Receive;
-  BValue Receive(Channel* channel,
-                 absl::optional<SourceLocation> loc = absl::nullopt,
-                 absl::string_view name = "");
+  BValue Receive(BReceiveChannelRef channel,
+                 const SourceInfo& loc = SourceInfo(),
+                 std::string_view name = "");
 
-  // Add a receive_if operation. The receive executes conditionally on the value
-  // of the predicate "pred". The type of the data value received is determined
-  // by the channel.  The returned BValue is the received data itself (not a
-  // tuple containing a token and the data).
+  // Add a non-blocking receive operation. The type of the data value received
+  // is determined by the channel. The returned BValue is a pair of
+  // the received data itself along with a valid bit.
+  using ProcBuilder::ReceiveNonBlocking;
+  std::pair<BValue, BValue> ReceiveNonBlocking(
+      BReceiveChannelRef channel, const SourceInfo& loc = SourceInfo(),
+      std::string_view name = "");
+
+  // Add a conditinal receive operation. The receive executes conditionally on
+  // the value of the predicate "pred". The type of the data value received is
+  // determined by the channel.  The returned BValue is the received data itself
+  // (*not* the receiveif operation itself which produces a tuple containing a
+  // token and the data).
   using ProcBuilder::ReceiveIf;
-  BValue ReceiveIf(Channel* channel, BValue pred,
-                   absl::optional<SourceLocation> loc = absl::nullopt,
-                   absl::string_view name = "");
+  BValue ReceiveIf(BReceiveChannelRef channel, BValue pred,
+                   const SourceInfo& loc = SourceInfo(),
+                   std::string_view name = "");
+
+  // Add a conditional, non-blocking receive operation. The type of the data
+  // value received is determined by the channel. The returned BValue is a pair
+  // of the received data itself along with a valid bit.
+  using ProcBuilder::ReceiveIfNonBlocking;
+  std::pair<BValue, BValue> ReceiveIfNonBlocking(
+      BReceiveChannelRef channel, BValue pred,
+      const SourceInfo& loc = SourceInfo(), std::string_view name = "");
 
   // Add a send operation. Returns the token-typed BValue of the send node.
   using ProcBuilder::Send;
-  BValue Send(Channel* channel, BValue data,
-              absl::optional<SourceLocation> loc = absl::nullopt,
-              absl::string_view name = "");
+  BValue Send(BSendChannelRef channel, BValue data,
+              const SourceInfo& loc = SourceInfo(), std::string_view name = "");
 
-  // Add a send_if operation. The send executes conditionally on the value of
-  // the predicate "pred". Returns the token-typed BValue of the send_if node.
+  // Add a conditional send operation. The send executes conditionally on the
+  // value of the predicate "pred". Returns the token-typed BValue of the send
+  // node.
   using ProcBuilder::SendIf;
-  BValue SendIf(Channel* channel, BValue pred, BValue data,
-                absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "");
+  BValue SendIf(BSendChannelRef channel, BValue pred, BValue data,
+                const SourceInfo& loc = SourceInfo(),
+                std::string_view name = "");
 
   // Add an assert operation. Returns the token-typed assert operation.
   using BuilderBase::Assert;
-  BValue Assert(BValue condition, absl::string_view message,
-                absl::optional<std::string> label = absl::nullopt,
-                absl::optional<SourceLocation> loc = absl::nullopt,
-                absl::string_view name = "");
+  BValue Assert(BValue condition, std::string_view message,
+                std::optional<std::string> label = std::nullopt,
+                const SourceInfo& loc = SourceInfo(),
+                std::string_view name = "");
 
  private:
-  // The tokens from any added send(if)/receive(if) nodes.
-  std::vector<BValue> tokens_;
+  // The token created at the start of each activation.
+  BValue orig_token_;
+
+  // The token of the most recently added token-producing operation (send,
+  // receive, etc).
+  BValue last_token_;
+};
+
+// Class for building an XLS Block.
+class BlockBuilder : public BuilderBase {
+ public:
+  // Builder for xls::Blocks. 'should_verify' is a test-only argument which can
+  // be set to false in tests that wish to build malformed IR.
+  BlockBuilder(std::string_view name, Package* package,
+               bool should_verify = true);
+  BlockBuilder(std::string_view name, Package* package, ScheduledBlockTag tag,
+               bool should_verify = true);
+  ~BlockBuilder() override = default;
+
+  // Builders are neither copyable or movable- builder values contain references
+  // to their builder that can't be updated.
+  BlockBuilder(const BlockBuilder&) = delete;
+  BlockBuilder& operator=(const BlockBuilder&) = delete;
+  BlockBuilder(BlockBuilder&&) = delete;
+  BlockBuilder& operator=(BlockBuilder&&) = delete;
+
+  // Returns the Block being constructed.
+  Block* block() const { return absl::down_cast<Block*>(function()); }
+
+  // Build the block.
+  absl::StatusOr<Block*> Build();
+
+  void AddClockPort(std::string_view name);
+
+  BValue Param(std::string_view name, Type* type,
+               const SourceInfo& loc = SourceInfo()) override;
+
+  // Add a reset port.
+  BValue ResetPort(std::string_view name, ResetBehavior reset_behavior,
+                   const SourceInfo& loc = SourceInfo());
+  // Add an input/output port.
+  BValue InputPort(std::string_view name, Type* type,
+                   const SourceInfo& loc = SourceInfo());
+  BValue OutputPort(std::string_view name, BValue operand,
+                    const SourceInfo& loc = SourceInfo());
+  // Add an output port with a register in front of it.
+  BValue FloppedOutputPort(std::string_view name, BValue operand,
+                           BValue reset_signal, Value reset_value,
+                           const SourceInfo& loc = SourceInfo());
+  BValue FloppedOutputPort(std::string_view name, BValue operand,
+                           const SourceInfo& loc = SourceInfo());
+
+  // Add a register read operation. The register argument comes from a
+  // Block::AddRegister.
+  BValue RegisterRead(Register* reg, const SourceInfo& loc = SourceInfo(),
+                      std::string_view name = "");
+
+  // Add a register write operation. The register argument comes from a
+  // Block::AddRegister. If the register being written has a reset value then
+  // `reset` must be specified.
+  BValue RegisterWrite(Register* reg, BValue data,
+                       std::optional<BValue> load_enable = std::nullopt,
+                       std::optional<BValue> reset = std::nullopt,
+                       const SourceInfo& loc = SourceInfo(),
+                       std::string_view name = "");
+
+  // Add a register named 'name' with an input of 'data'. Returns the output
+  // value of the register. Equivalent to creating a register with
+  // Block::AddRegister, adding a RegisterWrite operation with operand 'data'
+  // and adding a RegisterRead operation. Returned BValue is the RegisterRead
+  // operation.
+  BValue InsertRegister(std::string_view name, BValue data,
+                        std::optional<BValue> load_enable = std::nullopt,
+                        const SourceInfo& loc = SourceInfo());
+
+  // As InsertRegister above but with a reset value.
+  BValue InsertRegister(std::string_view name, BValue data, BValue reset_signal,
+                        Value reset_value,
+                        std::optional<BValue> load_enable = std::nullopt,
+                        const SourceInfo& loc = SourceInfo());
+
+  // Add an instantiation input/output to the block.
+  BValue InstantiationInput(Instantiation* instantiation,
+                            std::string_view port_name, BValue data,
+                            const SourceInfo& loc = SourceInfo(),
+                            std::string_view name = "");
+  BValue InstantiationOutput(Instantiation* instantiation,
+                             std::string_view port_name,
+                             const SourceInfo& loc = SourceInfo(),
+                             std::string_view name = "");
 };
 
 }  // namespace xls

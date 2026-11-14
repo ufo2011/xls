@@ -14,24 +14,31 @@
 
 #include "xls/passes/identity_removal_pass.h"
 
+#include <utility>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "xls/common/fuzzing/fuzztest.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "xls/common/status/matchers.h"
 #include "xls/common/status/status_macros.h"
-#include "xls/ir/bits.h"
+#include "xls/fuzzer/ir_fuzzer/ir_fuzz_domain.h"
+#include "xls/fuzzer/ir_fuzzer/ir_fuzz_test_library.h"
 #include "xls/ir/function.h"
 #include "xls/ir/ir_matcher.h"
 #include "xls/ir/ir_test_base.h"
 #include "xls/ir/package.h"
 #include "xls/passes/dce_pass.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/pass_base.h"
 
 namespace m = ::xls::op_matchers;
 
 namespace xls {
 namespace {
 
-using status_testing::IsOkAndHolds;
+using ::absl_testing::IsOkAndHolds;
 
 class IdentityRemovalPassTest : public IrTestBase {
  protected:
@@ -39,11 +46,15 @@ class IdentityRemovalPassTest : public IrTestBase {
 
   absl::StatusOr<bool> Run(Package* p) {
     PassResults results;
+    OptimizationContext context;
     XLS_ASSIGN_OR_RETURN(bool changed,
-                         IdentityRemovalPass().Run(p, PassOptions(), &results));
+                         IdentityRemovalPass().Run(p, OptimizationPassOptions(),
+                                                   &results, context));
     // Run dce to clean things up.
     XLS_RETURN_IF_ERROR(
-        DeadCodeEliminationPass().Run(p, PassOptions(), &results).status());
+        DeadCodeEliminationPass()
+            .Run(p, OptimizationPassOptions(), &results, context)
+            .status());
     // Return whether cse changed anything.
     return changed;
   }
@@ -84,6 +95,13 @@ TEST_F(IdentityRemovalPassTest, IdentityRemovalFromParam) {
   ASSERT_THAT(Run(p.get()), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Param("x"));
 }
+
+void IrFuzzIdentityRemoval(FuzzPackageWithArgs fuzz_package_with_args) {
+  IdentityRemovalPass pass;
+  OptimizationPassChangesOutputs(std::move(fuzz_package_with_args), pass);
+}
+FUZZ_TEST(IrFuzzTest, IrFuzzIdentityRemoval)
+    .WithDomains(IrFuzzDomainWithArgs(/*arg_set_count=*/10));
 
 }  // namespace
 }  // namespace xls

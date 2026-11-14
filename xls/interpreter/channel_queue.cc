@@ -14,134 +14,231 @@
 
 #include "xls/interpreter/channel_queue.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/memory/memory.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/str_join.h"
+#include "absl/strings/str_format.h"
+#include "absl/synchronization/mutex.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
-#include "xls/ir/type.h"
-#include "xls/ir/value_helpers.h"
+#include "xls/ir/channel.h"
+#include "xls/ir/package.h"
+#include "xls/ir/proc_elaboration.h"
+#include "xls/ir/value.h"
+#include "xls/ir/value_utils.h"
 
 namespace xls {
 
-absl::Status ChannelQueue::Enqueue(const Value& value) {
-  XLS_VLOG(4) << absl::StreamFormat("Enqueuing value on channel %s: { %s }",
-                                    channel_->name(), value.ToString());
-  if (!ValueConformsToType(value, channel_->type())) {
-    return absl::InvalidArgumentError(absl::StrFormat(
-        "Channel %s expects values to have type %s, got: %s", channel_->name(),
-        channel_->type()->ToString(), value.ToString()));
+absl::Status ChannelQueue::AttachGenerator(GeneratorFn generator) {
+  absl::MutexLock lock(mutex_);
+  if (generator_.has_value()) {
+    return absl::InternalError("ChannelQueue already has a generator attached");
   }
-
-  absl::MutexLock lock(&mutex_);
-  queue_.push_back(value);
-  XLS_VLOG(4) << absl::StreamFormat("Channel now has %d elements", size());
+  if (channel()->kind() == ChannelKind::kSingleValue) {
+    return absl::InternalError(
+        absl::StrFormat("ChannelQueues for single-value channels cannot have a "
+                        "generator. Channel: %s",
+                        channel()->name()));
+  }
+  generator_ = std::move(generator);
   return absl::OkStatus();
 }
 
-absl::StatusOr<Value> ChannelQueue::Dequeue() {
-  if (empty()) {
-    return absl::NotFoundError(
-        absl::StrFormat("Attempting to dequeue data from empty channel %s (%d)",
-                        channel_->name(), channel_->id()));
+absl::Status ChannelQueue::Write(const Value& value) {
+  VLOG(4) << absl::StreamFormat(
+      "Writing value to channel instance `%s`: { %s }",
+      channel_instance()->ToString(), value.ToString());
+  absl::MutexLock lock(mutex_);
+  if (generator_.has_value()) {
+    return absl::InternalError(
+        "Cannot write to ChannelQueue because it has a generator function.");
   }
-  absl::MutexLock lock(&mutex_);
+  if (!ValueConformsToType(value, channel()->type())) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Channel `%s` expects values to have type %s, got: %s",
+        channel()->name(), channel()->type()->ToString(), value.ToString()));
+  }
+
+  WriteInternal(value);
+  VLOG(4) << absl::StreamFormat("Channel now has %d elements", queue_.size());
+  return absl::OkStatus();
+}
+
+void ChannelQueue::WriteInternal(const Value& value) {
+  CallWriteCallbacks(value);
+  if (channel()->kind() == ChannelKind::kSingleValue) {
+    if (queue_.empty()) {
+      queue_.push_back(value);
+    } else {
+      queue_.front() = value;
+    }
+    return;
+  }
+
+  CHECK_EQ(channel()->kind(), ChannelKind::kStreaming);
+  queue_.push_back(value);
+}
+
+std::optional<Value> ChannelQueue::Read() {
+  absl::MutexLock lock(mutex_);
+  if (generator_.has_value()) {
+    // Write/ReadInternal are virtual and may have other side-effects so rather
+    // than directly returning the generated value, write then read it.
+    std::optional<Value> generated_value = (*generator_)();
+    if (generated_value.has_value()) {
+      WriteInternal(generated_value.value());
+    }
+  }
+  std::optional<Value> value = ReadInternal();
+  VLOG(4) << absl::StreamFormat(
+      "Reading data from channel instance %s: %s",
+      channel_instance()->ToString(),
+      value.has_value() ? value->ToString() : "(none)");
+  VLOG(4) << absl::StreamFormat("Channel now has %d elements", queue_.size());
+  return value;
+}
+
+int64_t ChannelQueue::GetSizeInternal() const { return queue_.size(); }
+
+std::optional<Value> ChannelQueue::ReadInternal() {
+  if (queue_.empty()) {
+    return std::nullopt;
+  }
   Value value = queue_.front();
-  queue_.pop_front();
-  XLS_VLOG(4) << absl::StreamFormat("Dequeuing data on channel %s: %s",
-                                    channel_->name(), value.ToString());
-  XLS_VLOG(4) << absl::StreamFormat("Channel now has %d elements", size());
-  return std::move(value);
-}
-
-absl::Status RxOnlyChannelQueue::Enqueue(const Value& value) {
-  return absl::UnimplementedError(
-      absl::StrFormat("Cannot enqueue to RxOnlyChannelQueue on channel %s.",
-                      channel()->name()));
-}
-
-absl::StatusOr<Value> RxOnlyChannelQueue::Dequeue() {
-  XLS_ASSIGN_OR_RETURN(Value value, generator_func_());
-  XLS_VLOG(4) << absl::StreamFormat("Dequeuing data on channel %s: %s",
-                                    channel()->name(), value.ToString());
-  return std::move(value);
-}
-
-absl::StatusOr<Value> FixedRxOnlyChannelQueue::GenerateValue() {
-  if (values_.empty()) {
-    return absl::ResourceExhaustedError(
-        absl::StrFormat("FixedInputChannel for channel %s (%d) is empty.",
-                        channel()->name(), channel()->id()));
+  CallReadCallbacks(value);
+  if (channel()->kind() != ChannelKind::kSingleValue) {
+    queue_.pop_front();
   }
-  Value value = std::move(values_.front());
-  values_.pop_front();
   return std::move(value);
 }
 
-/* static */
-absl::StatusOr<std::unique_ptr<ChannelQueueManager>>
-ChannelQueueManager::Create(
-    std::vector<std::unique_ptr<RxOnlyChannelQueue>>&& rx_only_queues,
-    Package* package) {
-  auto manager = absl::WrapUnique(new ChannelQueueManager(package));
+/* static */ absl::StatusOr<std::unique_ptr<ChannelQueueManager>>
+ChannelQueueManager::Create(Package* package) {
+  if (package->ChannelsAreProcScoped()) {
+    XLS_ASSIGN_OR_RETURN(Proc * top, package->GetTopAsProc());
+    XLS_ASSIGN_OR_RETURN(ProcElaboration elaboration,
+                         ProcElaboration::Elaborate(top));
+    return Create(std::move(elaboration));
+  }
 
-  // Verify there is an receive-only queue for every ReceiveOnly channel in the
-  // package.
-  for (auto& rx_only_queue : rx_only_queues) {
-    if (rx_only_queue->channel()->supported_ops() != ChannelOps::kReceiveOnly) {
+  XLS_ASSIGN_OR_RETURN(ProcElaboration elaboration,
+                       ProcElaboration::ElaborateOldStylePackage(package));
+  return Create(std::move(elaboration));
+}
+
+/* static */ absl::StatusOr<std::unique_ptr<ChannelQueueManager>>
+ChannelQueueManager::Create(std::vector<std::unique_ptr<ChannelQueue>>&& queues,
+                            ProcElaboration elaboration) {
+  // Verify there is exactly one queue per channel.
+  absl::flat_hash_set<ChannelInstance*> channel_instances(
+      elaboration.channel_instances().begin(),
+      elaboration.channel_instances().end());
+  absl::flat_hash_set<ChannelInstance*> queue_chan_instances;
+  for (const std::unique_ptr<ChannelQueue>& queue : queues) {
+    if (!channel_instances.contains(queue->channel_instance())) {
       return absl::InvalidArgumentError(absl::StrFormat(
-          "receive-only queues only can be used with receive_only "
-          "channels, used with %s channel %s",
-          ChannelOpsToString(rx_only_queue->channel()->supported_ops()),
-          rx_only_queue->channel()->name()));
+          "Channel instance `%s` for queue does not exist in package `%s`",
+          queue->channel_instance()->ToString(),
+          elaboration.package()->name()));
     }
-    if (manager->queues_.contains(rx_only_queue->channel())) {
-      return absl::InvalidArgumentError(absl::StrFormat(
-          "More than one receive-only queue given for channel %s",
-          rx_only_queue->channel()->name()));
+    auto [ir, inserted] =
+        queue_chan_instances.insert(queue->channel_instance());
+    if (!inserted) {
+      return absl::InvalidArgumentError(
+          absl::StrFormat("Multiple queues specified for channel instance `%s`",
+                          queue->channel_instance()->ToString()));
     }
-    manager->queues_[rx_only_queue->channel()] = std::move(rx_only_queue);
+  }
+  for (ChannelInstance* instance : elaboration.channel_instances()) {
+    if (!queue_chan_instances.contains(instance)) {
+      return absl::InvalidArgumentError(
+          absl::StrFormat("No queue specified for channel instance `%s`",
+                          instance->ToString()));
+    }
   }
 
-  // Verify that every receive-only channel has an receive-only queue and create
-  // queues for the remaining non-receive-only channels.
-  for (Channel* channel : package->channels()) {
-    if (!channel->IsStreaming()) {
-      return absl::UnimplementedError("Only streaming channels are supported.");
+  return absl::WrapUnique(
+      new ChannelQueueManager(std::move(elaboration), std::move(queues)));
+}
+
+/* static */ absl::StatusOr<std::unique_ptr<ChannelQueueManager>>
+ChannelQueueManager::Create(ProcElaboration elaboration) {
+  std::vector<std::unique_ptr<ChannelQueue>> queues;
+
+  // Create a queue per channel instance in the elaboration.
+  for (ChannelInstance* channel_instance : elaboration.channel_instances()) {
+    if (channel_instance->channel->kind() != ChannelKind::kStreaming &&
+        channel_instance->channel->kind() != ChannelKind::kSingleValue) {
+      return absl::UnimplementedError(
+          "Only streaming and single-value channels are supported.");
     }
-    if (channel->supported_ops() == ChannelOps::kReceiveOnly) {
-      if (!manager->queues_.contains(channel)) {
-        return absl::InvalidArgumentError(absl::StrFormat(
-            "No receive-only queue specified for receive_only channel %s (%d)",
-            channel->name(), channel->id()));
-      }
-      continue;
-    }
-    manager->queues_[channel] = absl::make_unique<ChannelQueue>(channel);
+    queues.push_back(std::make_unique<ChannelQueue>(channel_instance));
   }
 
-  // Create a sorted vector of channel queues in the manager for easy iteration
-  // through the queues.
-  for (auto& [channel, queue] : manager->queues_) {
-    manager->queue_vec_.push_back(queue.get());
+  return absl::WrapUnique(
+      new ChannelQueueManager(std::move(elaboration), std::move(queues)));
+}
+
+ChannelQueueManager::ChannelQueueManager(
+    ProcElaboration elaboration,
+    std::vector<std::unique_ptr<ChannelQueue>>&& queues)
+    : elaboration_(std::move(elaboration)) {
+  for (std::unique_ptr<ChannelQueue>& queue : queues) {
+    ChannelInstance* instance = queue->channel_instance();
+    queues_[instance] = std::move(queue);
+    queue_vec_.push_back(queues_[instance].get());
   }
-  std::sort(manager->queue_vec_.begin(), manager->queue_vec_.end(),
+  // Stably sort the queues by channel ID.
+  std::sort(queue_vec_.begin(), queue_vec_.end(),
             [](ChannelQueue* a, ChannelQueue* b) {
               return a->channel()->id() < b->channel()->id();
             });
-  return std::move(manager);
 }
 
 absl::StatusOr<ChannelQueue*> ChannelQueueManager::GetQueueById(
     int64_t channel_id) {
-  XLS_ASSIGN_OR_RETURN(Channel * channel, package_->GetChannel(channel_id));
-  return queues_.at(channel).get();
+  XLS_ASSIGN_OR_RETURN(Channel * channel, package()->GetChannel(channel_id));
+  XLS_ASSIGN_OR_RETURN(ChannelInstance * instance,
+                       elaboration().GetUniqueInstance(channel));
+  return queues_.at(instance).get();
 }
 
 absl::StatusOr<ChannelQueue*> ChannelQueueManager::GetQueueByName(
-    absl::string_view name) {
-  XLS_ASSIGN_OR_RETURN(Channel * channel, package_->GetChannel(name));
-  return queues_.at(channel).get();
+    std::string_view name, std::string_view proc_name) {
+  // Packages with proc-scoped channels must provide a proc_name in order to
+  // retrieve the channel.
+  XLS_RET_CHECK(!package()->ChannelsAreProcScoped() || !proc_name.empty());
+  if (package()->ChannelsAreProcScoped()) {
+    XLS_ASSIGN_OR_RETURN(Proc * proc, package()->GetProc(proc_name));
+    XLS_ASSIGN_OR_RETURN(ChannelInstance * instance,
+                         elaboration().GetChannelInstance(name, proc->name()));
+    return &GetQueue(instance);
+  }
+  XLS_ASSIGN_OR_RETURN(Channel * channel, package()->GetChannel(name));
+  XLS_ASSIGN_OR_RETURN(ChannelInstance * instance,
+                       elaboration().GetUniqueInstance(channel));
+  return queues_.at(instance).get();
+}
+
+absl::StatusOr<ChannelQueue*> ChannelQueueManager::GetBoundaryQueueByName(
+    std::string_view name) {
+  if (package()->ChannelsAreProcScoped()) {
+    XLS_RET_CHECK(package()->HasTop());
+    XLS_ASSIGN_OR_RETURN(Proc * top, package()->GetTopAsProc());
+    return GetQueueByName(name, top->name());
+  }
+  return GetQueueByName(name);
 }
 
 }  // namespace xls

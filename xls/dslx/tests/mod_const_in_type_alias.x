@@ -14,15 +14,11 @@
 
 // Uses an externally-defined constant in a type alias as a dimension.
 
-import xls.dslx.tests.mod_simple_const
+import xls.dslx.tests.mod_simple_const;
 
 type U32X4 = u32[mod_simple_const::FOUR];
 
-fn main(x: u32) -> U32X4 {
-  U32X4:[x, ...]
-}
+fn main(x: u32) -> U32X4 { U32X4:[x, ...] }
 
-#![test]
-fn main_test() {
-  assert_eq(main(u32:42), u32[4]:[42, 42, 42, 42])
-}
+#[test]
+fn main_test() { assert_eq(main(u32:42), u32[4]:[42, 42, 42, 42]) }

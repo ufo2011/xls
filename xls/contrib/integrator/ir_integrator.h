@@ -12,12 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef XLS_INTEGRATOR_IR_INTEGRATOR_H_
-#define XLS_INTEGRATOR_IR_INTEGRATOR_H_
+#ifndef XLS_CONTRIB_INTEGRATOR_IR_INTEGRATOR_H_
+#define XLS_CONTRIB_INTEGRATOR_IR_INTEGRATOR_H_
 
+#include <cstdint>
+#include <list>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/container/node_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "xls/contrib/integrator/integration_options.h"
 #include "xls/ir/function.h"
+#include "xls/ir/node.h"
 #include "xls/ir/package.h"
 
 namespace xls {
@@ -230,6 +245,7 @@ class IntegrationFunction {
   // Helper function for UnifyIntegrationNodesWithGlobalMuxSelect that handles
   // the cases that one of the input nodes is a pre-existing mux. The other
   // input is a node that will be added as a case(s) to the mux.
+  // NOLINTNEXTLINE(readability-inconsistent-declaration-parameter-name)
   absl::StatusOr<UnifiedNode> UnifyIntegrationNodesWithGlobalMuxSelectNoMuxArg(
       Node* mux, Node* case_node);
 
@@ -246,7 +262,7 @@ class IntegrationFunction {
   absl::StatusOr<Node*> DeUnifyIntegrationNodesWithGlobalMuxSelect(Node* node);
 
   // Replaces 'mux' with a new mux which is identical except that
-  // the the cases at the indexes in 'source_index_to_case'
+  // the cases at the indexes in 'source_index_to_case'
   // are replaced with the nodes specified.
   absl::StatusOr<Node*> ReplaceMuxCases(
       Node* mux_node,
@@ -254,7 +270,8 @@ class IntegrationFunction {
 
   // Track mapping of original function nodes to integrated function nodes.
   absl::flat_hash_map<const Node*, Node*> original_node_to_integrated_node_map_;
-  absl::flat_hash_map<const Node*, absl::flat_hash_set<const Node*>>
+  // Use node_hash_map because we rely on pointer stability in SetNodeMapping.
+  absl::node_hash_map<const Node*, absl::flat_hash_set<const Node*>>
       integrated_node_to_original_nodes_map_;
 
   // Track which node-pairs have an associated mux.
@@ -301,4 +318,4 @@ class IntegrationFunction {
 
 }  // namespace xls
 
-#endif  // XLS_INTEGRATOR_IR_INTEGRATOR_H_
+#endif  // XLS_CONTRIB_INTEGRATOR_IR_INTEGRATOR_H_

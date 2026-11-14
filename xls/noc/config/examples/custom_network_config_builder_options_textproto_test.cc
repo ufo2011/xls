@@ -12,8 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "gmock/gmock.h"
+#include <filesystem>
+#include <string>
+#include <string_view>
+
 #include "gtest/gtest.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "xls/common/file/filesystem.h"
 #include "xls/common/file/get_runfile_path.h"
@@ -25,7 +30,7 @@ namespace xls::noc {
 static const char* kExamplesPath = "xls/noc/config/examples/";
 
 static absl::Status ParseTextProtoFileToNetworkConfigBuilderOptionsProto(
-    absl::string_view filename) {
+    std::string_view filename) {
   std::string filepath = absl::StrCat(kExamplesPath, filename);
   absl::StatusOr<std::filesystem::path> runfile_path =
       GetXlsRunfilePath(filepath);

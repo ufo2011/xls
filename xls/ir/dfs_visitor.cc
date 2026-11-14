@@ -14,6 +14,9 @@
 
 #include "xls/ir/dfs_visitor.h"
 
+#include "absl/status/status.h"
+#include "xls/ir/nodes.h"
+
 namespace xls {
 
 absl::Status DfsVisitorWithDefault::HandleAdd(BinOp* add) {
@@ -59,6 +62,10 @@ absl::Status DfsVisitorWithDefault::HandleAfterAll(AfterAll* after_all) {
   return DefaultHandler(after_all);
 }
 
+absl::Status DfsVisitorWithDefault::HandleMinDelay(MinDelay* min_delay) {
+  return DefaultHandler(min_delay);
+}
+
 absl::Status DfsVisitorWithDefault::HandleArray(Array* array) {
   return DefaultHandler(array);
 }
@@ -84,6 +91,10 @@ absl::Status DfsVisitorWithDefault::HandleAssert(Assert* assert_op) {
   return DefaultHandler(assert_op);
 }
 
+absl::Status DfsVisitorWithDefault::HandleTrace(Trace* trace_op) {
+  return DefaultHandler(trace_op);
+}
+
 absl::Status DfsVisitorWithDefault::HandleBitSlice(BitSlice* bit_slice) {
   return DefaultHandler(bit_slice);
 }
@@ -93,20 +104,16 @@ absl::Status DfsVisitorWithDefault::HandleBitSliceUpdate(
   return DefaultHandler(update);
 }
 
+absl::Status DfsVisitorWithDefault::HandleCover(Cover* cover) {
+  return DefaultHandler(cover);
+}
+
 absl::Status DfsVisitorWithDefault::HandleReceive(Receive* receive) {
   return DefaultHandler(receive);
 }
 
-absl::Status DfsVisitorWithDefault::HandleReceiveIf(ReceiveIf* receive_if) {
-  return DefaultHandler(receive_if);
-}
-
 absl::Status DfsVisitorWithDefault::HandleSend(Send* send) {
   return DefaultHandler(send);
-}
-
-absl::Status DfsVisitorWithDefault::HandleSendIf(SendIf* send_if) {
-  return DefaultHandler(send_if);
 }
 
 absl::Status DfsVisitorWithDefault::HandleDynamicBitSlice(
@@ -126,11 +133,6 @@ absl::Status DfsVisitorWithDefault::HandleDecode(Decode* decode) {
   return DefaultHandler(decode);
 }
 
-absl::Status DfsVisitorWithDefault::HandleDynamicCountedFor(
-    DynamicCountedFor* dynamic_counted_for) {
-  return DefaultHandler(dynamic_counted_for);
-}
-
 absl::Status DfsVisitorWithDefault::HandleEncode(Encode* encode) {
   return DefaultHandler(encode);
 }
@@ -139,12 +141,33 @@ absl::Status DfsVisitorWithDefault::HandleEq(CompareOp* eq) {
   return DefaultHandler(eq);
 }
 
+absl::Status DfsVisitorWithDefault::HandleGate(Gate* gate) {
+  return DefaultHandler(gate);
+}
+
 absl::Status DfsVisitorWithDefault::HandleIdentity(UnOp* identity) {
   return DefaultHandler(identity);
 }
 
+absl::Status DfsVisitorWithDefault::HandleInputPort(InputPort* input_port) {
+  return DefaultHandler(input_port);
+}
+absl::Status DfsVisitorWithDefault::HandleOutputPort(OutputPort* output_port) {
+  return DefaultHandler(output_port);
+}
+
 absl::Status DfsVisitorWithDefault::HandleInvoke(Invoke* invoke) {
   return DefaultHandler(invoke);
+}
+
+absl::Status DfsVisitorWithDefault::HandleInstantiationInput(
+    InstantiationInput* instantiation_input) {
+  return DefaultHandler(instantiation_input);
+}
+
+absl::Status DfsVisitorWithDefault::HandleInstantiationOutput(
+    InstantiationOutput* instantiation_output) {
+  return DefaultHandler(instantiation_output);
 }
 
 absl::Status DfsVisitorWithDefault::HandleLiteral(Literal* literal) {
@@ -175,8 +198,41 @@ absl::Status DfsVisitorWithDefault::HandleOneHotSel(OneHotSelect* sel) {
   return DefaultHandler(sel);
 }
 
+absl::Status DfsVisitorWithDefault::HandlePrioritySel(PrioritySelect* sel) {
+  return DefaultHandler(sel);
+}
+
 absl::Status DfsVisitorWithDefault::HandleParam(Param* param) {
   return DefaultHandler(param);
+}
+
+absl::Status DfsVisitorWithDefault::HandleStateRead(StateRead* state_read) {
+  return DefaultHandler(state_read);
+}
+
+absl::Status DfsVisitorWithDefault::HandleNext(Next* next) {
+  return DefaultHandler(next);
+}
+
+absl::Status DfsVisitorWithDefault::HandleNewChannel(NewChannel* new_channel) {
+  return DefaultHandler(new_channel);
+}
+
+absl::Status DfsVisitorWithDefault::HandleRecvChannelEnd(RecvChannelEnd* rce) {
+  return DefaultHandler(rce);
+}
+
+absl::Status DfsVisitorWithDefault::HandleSendChannelEnd(SendChannelEnd* sce) {
+  return DefaultHandler(sce);
+}
+
+absl::Status DfsVisitorWithDefault::HandleRegisterRead(RegisterRead* reg_read) {
+  return DefaultHandler(reg_read);
+}
+
+absl::Status DfsVisitorWithDefault::HandleRegisterWrite(
+    RegisterWrite* reg_write) {
+  return DefaultHandler(reg_write);
 }
 
 absl::Status DfsVisitorWithDefault::HandleReverse(UnOp* reverse) {
@@ -211,6 +267,10 @@ absl::Status DfsVisitorWithDefault::HandleUMul(ArithOp* mul) {
   return DefaultHandler(mul);
 }
 
+absl::Status DfsVisitorWithDefault::HandleUMulp(PartialProductOp* mul) {
+  return DefaultHandler(mul);
+}
+
 absl::Status DfsVisitorWithDefault::HandleSel(Select* sel) {
   return DefaultHandler(sel);
 }
@@ -235,6 +295,9 @@ absl::Status DfsVisitorWithDefault::HandleSMul(ArithOp* mul) {
   return DefaultHandler(mul);
 }
 
+absl::Status DfsVisitorWithDefault::HandleSMulp(PartialProductOp* mul) {
+  return DefaultHandler(mul);
+}
 absl::Status DfsVisitorWithDefault::HandleSub(BinOp* sub) {
   return DefaultHandler(sub);
 }

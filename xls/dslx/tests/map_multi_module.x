@@ -16,24 +16,18 @@
 // * of an array defined as a constant in one module, with...
 // * a parametric function defined in another module
 
-import xls.dslx.tests.mod_imported_array
-import xls.dslx.tests.mod_imported_lsb
+import xls.dslx.tests.mod_imported_array;
+import xls.dslx.tests.mod_imported_lsb;
 
-fn f() -> u1[4] {
-  map(mod_imported_array::A, mod_imported_lsb::lsb_u32)
-}
+fn f() -> u1[4] { map(mod_imported_array::A, mod_imported_lsb::lsb_u32) }
 
-fn g() -> u1[4] {
-  map(mod_imported_array::A, mod_imported_lsb::lsb)
-}
+fn g() -> u1[4] { map(mod_imported_array::A, mod_imported_lsb::lsb) }
 
-fn main() -> (u1[4], u1[4]) {
-  (f(), g())
-}
+fn main() -> (u1[4], u1[4]) { (f(), g()) }
 
-#![test]
+#[test]
 fn main_test() {
-  let (f, g) = main();
-  let _ = assert_eq(u1[4]:[0, 1, 0, 1], f);
-  assert_eq(u1[4]:[0, 1, 0, 1], g)
+    let (f, g) = main();
+    assert_eq(u1[4]:[0, 1, 0, 1], f);
+    assert_eq(u1[4]:[0, 1, 0, 1], g)
 }

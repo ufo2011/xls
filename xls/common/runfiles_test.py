@@ -1,5 +1,3 @@
-# Lint as: python3
-#
 # Copyright 2020 The XLS Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -32,9 +30,11 @@ class RunfilesTest(absltest.TestCase):
 
   def testGetContentsAsText(self):
     self.assertEqual(
-        runfiles.get_contents_as_text('xls/common/testdata/foo.txt'), 'FOO\n')
+        runfiles.get_contents_as_text('xls/common/testdata/foo.txt'), 'FOO\n'
+    )
     self.assertEqual(
-        runfiles.get_contents_as_text('xls/common/testdata/bar.txt'), 'BAR\n')
+        runfiles.get_contents_as_text('xls/common/testdata/bar.txt'), 'BAR\n'
+    )
 
   def testNonexistantFile(self):
     with self.assertRaises(FileNotFoundError):

@@ -14,113 +14,863 @@
 
 #include "xls/ir/proc.h"
 
+#include <array>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
+#include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "xls/common/status/matchers.h"
+#include "xls/common/status/status_macros.h"
+#include "xls/ir/bits.h"
+#include "xls/ir/channel.h"
+#include "xls/ir/channel_ops.h"
+#include "xls/ir/function_base.h"
+#include "xls/ir/function_builder.h"
 #include "xls/ir/ir_matcher.h"
+#include "xls/ir/ir_parser.h"
 #include "xls/ir/ir_test_base.h"
+#include "xls/ir/node.h"
+#include "xls/ir/nodes.h"
+#include "xls/ir/op.h"
+#include "xls/ir/package.h"
+#include "xls/ir/proc_instantiation.h"
+#include "xls/ir/scheduled_builder.h"
+#include "xls/ir/source_location.h"
+#include "xls/ir/value.h"
 
 namespace m = ::xls::op_matchers;
 
 namespace xls {
 namespace {
 
-using status_testing::StatusIs;
+using ::absl_testing::IsOkAndHolds;
+using ::absl_testing::StatusIs;
+using ::testing::ElementsAre;
 using ::testing::HasSubstr;
+using ::testing::IsEmpty;
+using ::testing::UnorderedElementsAre;
 
-class ProcTest : public IrTestBase {};
+class ProcTest : public IrTestBase {
+ protected:
+  struct TestTransformer : public Proc::StateElementTransformer {
+   public:
+    absl::StatusOr<Node*> TransformStateRead(
+        Proc* proc, StateRead* new_state_read,
+        StateRead* old_state_read) override {
+      return proc->MakeNode<UnOp>(new_state_read->loc(), new_state_read,
+                                  Op::kNeg);
+    }
+    absl::StatusOr<Node*> TransformNextValue(Proc* proc,
+                                             StateElement* new_state_element,
+                                             Next* old_next) override {
+      return proc->MakeNode<UnOp>(old_next->value()->loc(), old_next->value(),
+                                  Op::kNeg);
+    }
+    absl::StatusOr<std::optional<Node*>> TransformNextPredicate(
+        Proc* proc, StateElement* new_state_element, Next* old_next) override {
+      XLS_ASSIGN_OR_RETURN(
+          Node * true_const,
+          proc->MakeNode<Literal>(old_next->loc(), Value::Bool(true)));
+      if (old_next->predicate()) {
+        return proc->MakeNode<NaryOp>(
+            old_next->predicate().value()->loc(),
+            std::array<Node*, 2>{true_const, *old_next->predicate()}, Op::kAnd);
+      }
+      return true_const;
+    }
+  };
+};
 
 TEST_F(ProcTest, SimpleProc) {
   auto p = CreatePackage();
-  ProcBuilder pb("p", /*init_value=*/Value(UBits(42, 32)), "tkn", "st",
-                 p.get());
-  BValue add = pb.Add(pb.Literal(UBits(1, 32)), pb.GetStateParam());
-  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build(pb.GetTokenParam(), add));
+  ProcBuilder pb("p", p.get());
+  BValue state = pb.ReadStateElement("st", Value(UBits(42, 32)));
+  BValue add = pb.Add(pb.Literal(UBits(1, 32)), state);
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build({add}));
 
   EXPECT_FALSE(proc->IsFunction());
   EXPECT_TRUE(proc->IsProc());
-
-  EXPECT_EQ(proc->DumpIr(), R"(proc p(tkn: token, st: bits[32], init=42) {
-  literal.3: bits[32] = literal(value=1, id=3)
-  add.4: bits[32] = add(literal.3, st, id=4)
-  next (tkn, add.4)
+  EXPECT_EQ(proc->GetStateFlatBitCount(), 32);
+  EXPECT_EQ(proc->DumpIr(), R"(proc p(st: bits[32], init={42}) {
+  literal.2: bits[32] = literal(value=1, id=2)
+  st: bits[32] = state_read(state_element=st, id=1)
+  add.3: bits[32] = add(literal.2, st, id=3)
+  next_value.4: () = next_value(state_element=st, value=add.3, id=4)
 }
 )");
 }
 
 TEST_F(ProcTest, MutateProc) {
   auto p = CreatePackage();
-  ProcBuilder pb("p", /*init_value=*/Value(UBits(42, 32)), "tkn", "st",
-                 p.get());
-  BValue add = pb.Add(pb.Literal(UBits(1, 32)), pb.GetStateParam());
-  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc,
-                           pb.Build(pb.AfterAll({pb.GetTokenParam()}), add));
+  ProcBuilder pb("p", p.get());
+  BValue tkn = pb.ReadStateElement("tkn", Value::Token());
+  BValue state = pb.ReadStateElement("st", Value(UBits(42, 32)));
+  BValue add = pb.Add(pb.Literal(UBits(1, 32)), state);
+  BValue after_all = pb.AfterAll({tkn});
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build({after_all, add}));
 
-  EXPECT_THAT(proc->NextToken(), m::AfterAll(m::Param("tkn")));
-  XLS_ASSERT_OK(proc->SetNextToken(proc->TokenParam()));
-  EXPECT_THAT(proc->NextToken(), m::Param("tkn"));
+  ASSERT_THAT(proc->next_values(proc->GetStateElement(0)),
+              ElementsAre(m::Next(m::StateElement("tkn"),
+                                  m::AfterAll(m::StateRead("tkn")))));
+  Next* next_tkn = *proc->next_values(proc->GetStateElement(0)).begin();
+  XLS_ASSERT_OK(proc->RemoveNode(next_tkn));
+  XLS_ASSERT_OK(proc->RemoveNode(after_all.node()));
+  EXPECT_THAT(proc->next_values(proc->GetStateElement(0)), IsEmpty());
 
-  EXPECT_THAT(proc->NextState(), m::Add());
-  XLS_ASSERT_OK(proc->SetNextState(proc->StateParam()));
-  EXPECT_THAT(proc->NextState(), m::Param("st"));
-
-  // Replace the state with a new type. First need to delete the (dead) use of
-  // the existing state param.
-  XLS_ASSERT_OK(proc->RemoveNode(add.node()));
-  XLS_ASSERT_OK_AND_ASSIGN(
-      Node * new_state,
-      proc->MakeNode<Literal>(/*loc=*/absl::nullopt, Value(UBits(100, 100))));
-  XLS_ASSERT_OK(proc->ReplaceState("new_state", new_state));
-
-  EXPECT_THAT(proc->NextState(), m::Literal(UBits(100, 100)));
-  EXPECT_THAT(proc->StateParam(), m::Type("bits[100]"));
+  ASSERT_THAT(proc->next_values(proc->GetStateElement(1)),
+              ElementsAre(m::Next(m::StateElement("st"), m::Add())));
+  Next* next_st = *proc->next_values(proc->GetStateElement(1)).begin();
+  XLS_ASSERT_OK(proc->RemoveNode(next_st));
+  EXPECT_THAT(proc->next_values(proc->GetStateElement(1)), IsEmpty());
 }
 
-TEST_F(ProcTest, InvalidTokenType) {
+TEST_F(ProcTest, AddAndRemoveState) {
   auto p = CreatePackage();
-  ProcBuilder pb("p", /*init_value=*/Value(UBits(42, 32)), "tkn", "st",
-                 p.get());
-  BValue add = pb.Add(pb.Literal(UBits(1, 32)), pb.GetStateParam());
-  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc,
-                           pb.Build(pb.AfterAll({pb.GetTokenParam()}), add));
+  ProcBuilder pb("p", p.get());
+  BValue tkn = pb.ReadStateElement("tkn", Value::Token());
+  BValue state = pb.ReadStateElement("x", Value(UBits(42, 32)));
+  BValue add = pb.Add(pb.Literal(UBits(1, 32)), state, SourceInfo(), "my_add");
+  BValue after_all = pb.AfterAll({tkn}, SourceInfo(), "my_after_all");
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build({after_all, add}));
 
-  // Try setting invalid typed nodes as the next token/state.
+  EXPECT_EQ(proc->GetStateElementCount(), 2);
+  EXPECT_EQ(proc->GetStateElement(0)->name(), "tkn");
+  EXPECT_EQ(proc->GetStateElement(0)->initial_value(), Value::Token());
+  EXPECT_EQ(proc->GetStateElement(1)->name(), "x");
+  EXPECT_EQ(proc->GetStateElement(1)->initial_value(), Value(UBits(42, 32)));
+
+  XLS_ASSERT_OK(proc->AppendStateElement("y", Value(UBits(100, 32)),
+                                         /*read_predicate=*/std::nullopt,
+                                         /*next_state=*/std::nullopt,
+                                         /*non_synthesizable=*/false));
+  EXPECT_EQ(proc->GetStateElementCount(), 3);
+  EXPECT_EQ(proc->GetStateElement(0)->name(), "tkn");
+  EXPECT_EQ(proc->GetStateElement(1)->name(), "x");
+  EXPECT_EQ(proc->GetStateElement(2)->name(), "y");
+  EXPECT_EQ(proc->GetStateElement(0)->initial_value(), Value::Token());
+  EXPECT_EQ(proc->GetStateElement(1)->initial_value(), Value(UBits(42, 32)));
+  EXPECT_EQ(proc->GetStateElement(2)->initial_value(), Value(UBits(100, 32)));
+
+  // Add a state element with a specified next state (the literal 0).
+  XLS_ASSERT_OK_AND_ASSIGN(Literal * zero_literal,
+                           proc->MakeNodeWithName<Literal>(
+                               SourceInfo(), Value(UBits(0, 32)), "zero"));
+  XLS_ASSERT_OK(proc->AppendStateElement("z", Value(UBits(123, 32)),
+                                         /*read_predicate=*/std::nullopt,
+                                         /*next_state=*/zero_literal,
+                                         /*non_synthesizable=*/false));
+  EXPECT_EQ(proc->GetStateElementCount(), 4);
+  EXPECT_EQ(proc->GetStateElement(0)->name(), "tkn");
+  EXPECT_EQ(proc->GetStateElement(1)->name(), "x");
+  EXPECT_EQ(proc->GetStateElement(2)->name(), "y");
+  EXPECT_EQ(proc->GetStateElement(3)->name(), "z");
+  EXPECT_EQ(proc->GetStateElement(0)->initial_value(), Value::Token());
+  EXPECT_EQ(proc->GetStateElement(1)->initial_value(), Value(UBits(42, 32)));
+  EXPECT_EQ(proc->GetStateElement(2)->initial_value(), Value(UBits(100, 32)));
+  EXPECT_EQ(proc->GetStateElement(3)->initial_value(), Value(UBits(123, 32)));
   EXPECT_THAT(
-      proc->SetNextToken(add.node()),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr(
-                   "Cannot set next token to \"add.4\", expected token type")));
+      proc->next_values(proc->GetStateElement(0)),
+      ElementsAre(m::Next(m::StateElement("tkn"), m::Name("my_after_all"))));
+  EXPECT_THAT(proc->next_values(proc->GetStateElement(1)),
+              ElementsAre(m::Next(m::StateElement("x"), m::Name("my_add"))));
+  EXPECT_THAT(proc->next_values(proc->GetStateElement(2)), IsEmpty());
+  EXPECT_THAT(proc->next_values(proc->GetStateElement(3)),
+              ElementsAre(m::Next(m::StateElement("z"), m::Literal(0))));
+
+  XLS_ASSERT_OK(proc->RemoveStateElement(2));
+  EXPECT_EQ(proc->GetStateElementCount(), 3);
+  EXPECT_EQ(proc->GetStateElement(0)->name(), "tkn");
+  EXPECT_EQ(proc->GetStateElement(1)->name(), "x");
+  EXPECT_EQ(proc->GetStateElement(2)->name(), "z");
+
+  XLS_ASSERT_OK(proc->InsertStateElement(0, "foo", Value(UBits(123, 32)),
+                                         /*read_predicate=*/std::nullopt,
+                                         /*next_state=*/std::nullopt,
+                                         /*non_synthesizable=*/false));
+  EXPECT_EQ(proc->GetStateElementCount(), 4);
+  EXPECT_EQ(proc->GetStateElement(0)->name(), "foo");
+  EXPECT_EQ(proc->GetStateElement(1)->name(), "tkn");
+  EXPECT_EQ(proc->GetStateElement(2)->name(), "x");
+  EXPECT_EQ(proc->GetStateElement(3)->name(), "z");
+
+  XLS_ASSERT_OK(proc->InsertStateElement(4, "bar", Value(UBits(1, 64)),
+                                         /*read_predicate=*/std::nullopt,
+                                         /*next_state=*/std::nullopt,
+                                         /*non_synthesizable=*/false));
+  EXPECT_EQ(proc->GetStateElementCount(), 5);
+  EXPECT_EQ(proc->GetStateElement(0)->name(), "foo");
+  EXPECT_EQ(proc->GetStateElement(1)->name(), "tkn");
+  EXPECT_EQ(proc->GetStateElement(2)->name(), "x");
+  EXPECT_EQ(proc->GetStateElement(3)->name(), "z");
+  EXPECT_EQ(proc->GetStateElement(4)->name(), "bar");
+
+  XLS_ASSERT_OK(
+      proc->RemoveNode(*proc->next_values(proc->GetStateElement(3)).begin()));
+  EXPECT_THAT(
+      proc->DumpIr(),
+      HasSubstr("proc p(foo: bits[32], tkn: token, x: bits[32], z: "
+                "bits[32], bar: bits[64], init={123, token, 42, 123, 1}"));
+  EXPECT_THAT(proc->next_values(proc->GetStateElement(0)), IsEmpty());
+  EXPECT_THAT(
+      proc->next_values(proc->GetStateElement(1)),
+      ElementsAre(m::Next(m::StateElement("tkn"), m::Name("my_after_all"))));
+  EXPECT_THAT(proc->next_values(proc->GetStateElement(2)),
+              ElementsAre(m::Next(m::StateElement("x"), m::Name("my_add"))));
+  EXPECT_THAT(proc->next_values(proc->GetStateElement(3)), IsEmpty());
+  EXPECT_THAT(proc->next_values(proc->GetStateElement(4)), IsEmpty());
 }
 
-TEST_F(ProcTest, InvalidStateType) {
+TEST_F(ProcTest, StatelessProc) {
   auto p = CreatePackage();
-  ProcBuilder pb("p", /*init_value=*/Value(UBits(42, 32)), "tkn", "st",
-                 p.get());
-  BValue add = pb.Add(pb.Literal(UBits(1, 32)), pb.GetStateParam());
-  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc,
-                           pb.Build(pb.AfterAll({pb.GetTokenParam()}), add));
+  ProcBuilder pb("p", p.get());
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build({}));
 
-  EXPECT_THAT(proc->SetNextState(proc->TokenParam()),
+  EXPECT_EQ(proc->GetStateElementCount(), 0);
+  EXPECT_EQ(proc->GetStateFlatBitCount(), 0);
+
+  EXPECT_EQ(proc->DumpIr(), "proc p() {\n}\n");
+}
+
+TEST_F(ProcTest, MultipleStateReads) {
+  auto p = CreatePackage();
+  ProcBuilder pb("p", p.get());
+  BValue tkn = pb.ReadStateElement("tkn", Value::Token());
+  BValue state = pb.ReadStateElement("x", Value(UBits(42, 32)));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build({tkn, state}));
+
+  StateElement* state_elem = proc->GetStateElement(1);
+
+  EXPECT_EQ(proc->GetStateReads(1).size(), 1);
+  StateRead* read1 = proc->GetStateReads(1).front();
+
+  // Second Read
+  XLS_ASSERT_OK_AND_ASSIGN(
+      StateRead * read2,
+      proc->MakeNodeWithName<StateRead>(SourceInfo(), state_elem,
+                                        /*predicate=*/std::nullopt,
+                                        /*label=*/std::nullopt, "x_read2"));
+  XLS_ASSERT_OK(proc->RebuildSideTables());
+
+  EXPECT_EQ(proc->GetStateReads(1).size(), 2);
+  EXPECT_THAT(proc->GetStateReads(1), ElementsAre(read1, read2));
+
+  EXPECT_EQ(proc->GetStateReadsByStateElement(state_elem).size(), 2);
+  EXPECT_THAT(proc->GetStateReadsByStateElement(state_elem),
+              ElementsAre(read1, read2));
+
+  // Remove the second read.
+  [[maybe_unused]] std::string read2_name = read2->GetName();
+  XLS_ASSERT_OK(proc->RemoveNode(read2));
+  XLS_ASSERT_OK(proc->RebuildSideTables());
+
+  // Now we should have 1 read again.
+  EXPECT_EQ(proc->GetStateReads(1).size(), 1);
+  EXPECT_EQ(proc->GetStateReads(1).front(), read1);
+}
+
+TEST_F(ProcTest, RemoveStateThatStillHasUse) {
+  // Don't call CreatePackage which creates a VerifiedPackage because we
+  // intentionally create a malformed proc.
+  Package p(TestName());
+  ProcBuilder pb("p", &p);
+  BValue state = pb.ReadStateElement("st", Value(UBits(42, 32)));
+  BValue add = pb.Add(pb.Literal(UBits(1, 32)), state);
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build({add}));
+
+  EXPECT_THAT(proc->RemoveStateElement(0),
               StatusIs(absl::StatusCode::kInvalidArgument,
-                       HasSubstr("Cannot set next state to \"tkn\"; type token "
-                                 "does not match proc state type bits[32]")));
+                       HasSubstr("state read st has uses")));
 }
 
-TEST_F(ProcTest, ReplaceStateThatStillHasUse) {
+TEST_F(ProcTest, GetNextStateReadDecoupled) {
   auto p = CreatePackage();
-  ProcBuilder pb("p", /*init_value=*/Value(UBits(42, 32)), "tkn", "st",
-                 p.get());
-  BValue add = pb.Add(pb.Literal(UBits(1, 32)), pb.GetStateParam());
-  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc,
-                           pb.Build(pb.AfterAll({pb.GetTokenParam()}), add));
+  TokenlessProcBuilder pb(TestName(), "tkn", p.get());
+  BStateElement state_elem = pb.StateElement("x", Value(UBits(42, 32)),
+                                             /*non_synthesizable=*/false);
+  BValue read = pb.StateRead(state_elem);
+  BValue next_val = pb.Add(read, pb.Literal(Value(UBits(1, 32))));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build({}));
+
+  StateRead* state_read =
+      proc->GetStateReadByStateElement(state_elem.state_element());
+  EXPECT_EQ(state_read->GetNextValues().size(), 0);
+
+  XLS_ASSERT_OK(proc->MakeNodeWithName<Next>(SourceInfo(),
+                                             state_elem.state_element(),
+                                             next_val.node(),
+                                             /*predicate=*/std::nullopt,
+                                             /*label=*/std::nullopt, "x_next")
+                    .status());
+  EXPECT_EQ(state_read->GetNextValues().size(), 1);
 
   XLS_ASSERT_OK_AND_ASSIGN(
-      Node * new_state,
-      proc->MakeNode<Literal>(/*loc=*/absl::nullopt, Value(UBits(100, 100))));
+      Literal * next_value,
+      proc->MakeNode<Literal>(SourceInfo(), Value(UBits(43, 32))));
+  XLS_ASSERT_OK(proc->MakeNodeWithName<Next>(
+                        SourceInfo(), state_elem.state_element(), next_value,
+                        /*predicate=*/std::nullopt,
+                        /*label=*/std::nullopt, "second_next")
+                    .status());
+  EXPECT_EQ(state_read->GetNextValues().size(), 2);
+  EXPECT_THAT(state_read->GetNextValues(),
+              UnorderedElementsAre(
+                  m::Next(state_elem.state_element(), m::Add()),
+                  m::Next(state_elem.state_element(), m::Literal(43))));
+}
+
+TEST_F(ProcTest, InsertStateElementDecoupled) {
+  auto p = CreatePackage();
+  ProcBuilder pb("p", p.get());
+  BStateElement b_state_element = pb.StateElement("st", Value(UBits(42, 32)),
+                                                  /*non_synthesizable=*/false);
+  pb.StateRead(b_state_element, std::nullopt);
+  pb.Next(b_state_element, pb.Literal(UBits(1, 32)));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build());
+
+  XLS_ASSERT_OK_AND_ASSIGN(Literal * zero_literal,
+                           proc->MakeNodeWithName<Literal>(
+                               SourceInfo(), Value(UBits(0, 32)), "zero"));
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      StateRead * new_read,
+      proc->AppendStateElement("new_state_element", Value(UBits(100, 32)),
+                               /*read_predicate=*/std::nullopt,
+                               /*next_state=*/zero_literal,
+                               /*non_synthesizable=*/false));
+
+  StateElement* new_state_element = new_read->state_element();
+
+  // Verify that the new Next node is decoupled.
+  EXPECT_EQ(proc->GetStateElementCount(), 2);
+  EXPECT_THAT(proc->next_values(new_state_element),
+              ElementsAre(m::Next(new_state_element, m::Literal(0))));
+}
+
+TEST_F(ProcTest, Clone) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(
+      SingleValueChannel * channel,
+      p->CreateSingleValueChannel("chan", ChannelOps::kSendReceive,
+                                  p->GetBitsType(32)));
+
+  ProcBuilder pb("p", p.get());
+  BValue tkn = pb.ReadStateElement("tkn", Value::Token());
+  BValue state = pb.ReadStateElement("st", Value(UBits(42, 32)));
+  BValue recv = pb.Receive(channel, tkn);
+  BValue add1 = pb.Add(pb.Literal(UBits(1, 32)), state);
+  BValue add2 = pb.Add(add1, pb.TupleIndex(recv, 1));
+  BValue send = pb.Send(channel, pb.TupleIndex(recv, 0), add2);
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build({send, add2}));
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      SingleValueChannel * cloned_channel,
+      p->CreateSingleValueChannel("cloned_chan", ChannelOps::kSendReceive,
+                                  p->GetBitsType(32)));
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Proc * clone, proc->Clone("cloned", p.get(),
+                                /*channel_remapping=*/
+                                {{std::string{channel->name()},
+                                  std::string{cloned_channel->name()}}},
+                                /*call_remapping=*/{},
+                                /*state_name_remapping=*/{{"st", "state"}}));
+
+  EXPECT_FALSE(clone->IsFunction());
+  EXPECT_TRUE(clone->IsProc());
+
+  EXPECT_EQ(clone->DumpIr(),
+            R"(proc cloned(tkn: token, state: bits[32], init={token, 42}) {
+  tkn: token = state_read(state_element=tkn, id=12)
+  literal.13: bits[32] = literal(value=1, id=13)
+  state: bits[32] = state_read(state_element=state, id=14)
+  receive_3: (token, bits[32]) = receive(tkn, channel=cloned_chan, id=15)
+  add.16: bits[32] = add(literal.13, state, id=16)
+  tuple_index.17: bits[32] = tuple_index(receive_3, index=1, id=17)
+  tuple_index.18: token = tuple_index(receive_3, index=0, id=18)
+  add.19: bits[32] = add(add.16, tuple_index.17, id=19)
+  send_9: token = send(tuple_index.18, add.19, channel=cloned_chan, id=20)
+  next_value.21: () = next_value(state_element=tkn, value=send_9, id=21)
+  next_value.22: () = next_value(state_element=state, value=add.19, id=22)
+}
+)");
+}
+
+TEST_F(ProcTest, CloneProcScopedChannel) {
+  auto p = CreatePackage();
+
+  ProcBuilder pb(NewStyleProc(), "p", p.get());
+  BReceiveChannel inp =
+      pb.AddInputChannel("input_chan", p->GetBitsType(32), {});
+  BSendChannel out = pb.AddOutputChannel("chan", p->GetBitsType(32), {});
+  BValue tkn = pb.ReadStateElement("tkn", Value::Token());
+  BValue state = pb.ReadStateElement("st", Value(UBits(42, 32)));
+  BValue recv = pb.Receive(inp, tkn);
+  BValue add1 = pb.Add(pb.Literal(UBits(1, 32)), state);
+  BValue add2 = pb.Add(add1, pb.TupleIndex(recv, 1));
+  BValue send = pb.Send(out, pb.TupleIndex(recv, 0), add2);
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build({send, add2}));
+
+  auto p2 = CreatePackage();
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Proc * clone, proc->Clone("cloned", p2.get(),
+                                /*channel_remapping=*/{},
+                                /*call_remapping=*/{},
+                                /*state_name_remapping=*/{{"st", "state"}}));
+
+  EXPECT_FALSE(clone->IsFunction());
+  EXPECT_TRUE(clone->IsProc());
+
+  RecordProperty("p2", p2->DumpIr());
+
+  EXPECT_EQ(p2->DumpIr(),
+            R"IR(package CloneProcScopedChannel
+
+proc cloned<input_chan: bits[32] in, chan: bits[32] out>(tkn: token, state: bits[32], init={token, 42}) {
+  chan_interface input_chan(direction=receive, kind=streaming, strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none)
+  chan_interface chan(direction=send, kind=streaming, strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none)
+  tkn: token = state_read(state_element=tkn, id=1)
+  literal.2: bits[32] = literal(value=1, id=2)
+  state: bits[32] = state_read(state_element=state, id=3)
+  receive_3: (token, bits[32]) = receive(tkn, channel=input_chan, id=4)
+  add.5: bits[32] = add(literal.2, state, id=5)
+  tuple_index.6: bits[32] = tuple_index(receive_3, index=1, id=6)
+  tuple_index.7: token = tuple_index(receive_3, index=0, id=7)
+  add.8: bits[32] = add(add.5, tuple_index.6, id=8)
+  send_9: token = send(tuple_index.7, add.8, channel=chan, id=9)
+  next_value.10: () = next_value(state_element=tkn, value=send_9, id=10)
+  next_value.11: () = next_value(state_element=state, value=add.8, id=11)
+}
+)IR");
+}
+
+TEST_F(ProcTest, CloneNewStyle) {
+  auto p = CreatePackage();
+  TokenlessProcBuilder pb(NewStyleProc(), "p", "tkn", p.get());
+  BReceiveChannel ch_a = pb.AddInputChannel("a", p->GetBitsType(32));
+  BSendChannel ch_b = pb.AddOutputChannel("b", p->GetBitsType(32));
+  BChannelWithInterfaces ch_c = pb.AddChannel("c", p->GetBitsType(32), {});
+
+  BValue state = pb.ReadStateElement("st", Value(UBits(42, 32)));
+  BValue recv_a = pb.Receive(ch_a);
+  BValue recv_c = pb.Receive(ch_c.receive_interface);
+  pb.Send(ch_b, state);
+  pb.Send(ch_c.send_interface, state);
+  BValue add = pb.Add(recv_a, recv_c);
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build({add}));
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Proc * clone,
+      proc->Clone(
+          "cloned", p.get(),
+          /*channel_remapping=*/{{"a", "foo"}, {"b", "bar"}, {"c", "baz"}},
+          /*call_remapping=*/{},
+          /*state_name_remapping=*/{{"st", "state"}}));
+
+  EXPECT_FALSE(clone->IsFunction());
+  EXPECT_TRUE(clone->IsProc());
+
+  EXPECT_EQ(
+      clone->DumpIr(),
+      R"(proc cloned<foo: bits[32] in, bar: bits[32] out>(state: bits[32], init={42}) {
+  chan_interface foo(direction=receive, kind=streaming, strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none)
+  chan_interface bar(direction=send, kind=streaming, strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none)
+  chan baz(bits[32], id=0, kind=streaming, ops=send_receive, flow_control=ready_valid, strictness=proven_mutually_exclusive)
+  chan_interface baz(direction=send, kind=streaming, strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none)
+  chan_interface baz(direction=receive, kind=streaming, strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none)
+  tkn: token = literal(value=token, id=13)
+  receive_3: (token, bits[32]) = receive(tkn, channel=foo, id=14)
+  tuple_index.15: token = tuple_index(receive_3, index=0, id=15)
+  receive_6: (token, bits[32]) = receive(tuple_index.15, channel=baz, id=16)
+  tuple_index.17: token = tuple_index(receive_6, index=0, id=17)
+  state: bits[32] = state_read(state_element=state, id=18)
+  tuple_index.19: bits[32] = tuple_index(receive_3, index=1, id=19)
+  tuple_index.20: bits[32] = tuple_index(receive_6, index=1, id=20)
+  send_9: token = send(tuple_index.17, state, channel=bar, id=21)
+  add.22: bits[32] = add(tuple_index.19, tuple_index.20, id=22)
+  send_10: token = send(send_9, state, channel=baz, id=23)
+  next_value.24: () = next_value(state_element=state, value=add.22, id=24)
+}
+)");
+}
+
+TEST_F(ProcTest, CloneProcInstantiation) {
+  constexpr std::string_view kIrText = R"(package test
+proc spawnee<>(__state: (), init={()}) {
+}
+
+top proc main<>(__state: (), init={()}) {
+  proc_instantiation spawnee(proc=spawnee)
+}
+)";
+  auto target = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> source,
+                           Parser::ParsePackage(kIrText));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * spawnee, source->GetProc("spawnee"));
+
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * cloned_spawnee,
+                           spawnee->Clone("cloned_spawnee", target.get()));
+
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, source->GetProc("main"));
+  XLS_ASSERT_OK(proc->GetProcInstantiation("spawnee"));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Proc * clone,
+      proc->Clone(
+          "cloned", target.get(),
+          /*channel_remapping=*/{},
+          /*call_remapping=*/{},
+          /*state_name_remapping=*/{},
+          /*original_node_to_clone=*/std::nullopt,
+          /*spawned_proc_name_remapping=*/{{"spawnee", "cloned_spawnee"}}));
+  EXPECT_TRUE(clone->IsProc());
+  EXPECT_FALSE(clone->GetProcInstantiation("spawnee").status().ok());
+  XLS_ASSERT_OK_AND_ASSIGN(ProcInstantiation * instantiation,
+                           clone->GetProcInstantiation("cloned_spawnee"));
+  EXPECT_EQ(instantiation->name(), "cloned_spawnee");
+  EXPECT_EQ(instantiation->proc(), cloned_spawnee);
+}
+
+TEST_F(ProcTest, CloneProcInstantiationWithChannels) {
+  constexpr std::string_view kIrText = R"(package test
+proc spawnee<spin: bits[32] in, spout: bits[32] out>(__state: (), init={()}) {
+  chan_interface spin(direction=receive, kind=streaming, strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none)
+  chan_interface spout(direction=send, kind=streaming, strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none)
+}
+
+top proc main<mainin: bits[32] in, mainout: bits[32] out>(__state: (), init={()}) {
+  chan_interface mainin(direction=receive, kind=streaming, strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none)
+  chan_interface mainout(direction=send, kind=streaming, strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none)
+  chan declared(bits[32], id=0, kind=streaming, ops=send_receive, flow_control=ready_valid, strictness=proven_mutually_exclusive)
+  chan_interface declared(direction=send, kind=streaming, strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none)
+  chan_interface declared(direction=receive, kind=streaming, strictness=proven_mutually_exclusive, flow_control=ready_valid, flop_kind=none)
+  proc_instantiation spawnee(mainin, declared, proc=spawnee)
+}
+)";
+  auto target = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> source,
+                           Parser::ParsePackage(kIrText));
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * spawnee, source->GetProc("spawnee"));
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Proc * cloned_spawnee,
+      spawnee->Clone("cloned_spawnee", target.get(),
+                     /*channel_remapping=*/
+                     {{"spin", "newspin"}, {"spout", "newspout"}}));
+
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * main, source->GetProc("main"));
+  XLS_ASSERT_OK(main->GetProcInstantiation("spawnee"));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Proc * clone,
+      main->Clone(
+          "cloned", target.get(),
+          /*channel_remapping=*/
+          {{"declared", "newdeclared"},
+           {"mainin", "newmainin"},
+           {"mainout", "newmainout"}},
+          /*call_remapping=*/{},
+          /*state_name_remapping=*/{},
+          /*original_node_to_clone=*/std::nullopt,
+          /*spawned_proc_name_remapping=*/{{"spawnee", "cloned_spawnee"}}));
+  EXPECT_TRUE(clone->IsProc());
+  EXPECT_FALSE(clone->GetProcInstantiation("spawnee").status().ok());
+  XLS_ASSERT_OK_AND_ASSIGN(ProcInstantiation * instantiation,
+                           clone->GetProcInstantiation("cloned_spawnee"));
+  EXPECT_EQ(instantiation->name(), "cloned_spawnee");
+  EXPECT_EQ(instantiation->proc(), cloned_spawnee);
+  EXPECT_EQ(instantiation->channel_args().at(0)->name(), "newmainin");
+  EXPECT_EQ(instantiation->channel_args().at(1)->name(), "newdeclared");
+}
+
+TEST_F(ProcTest, TransformStateElementDecoupled) {
+  auto p = CreatePackage();
+  TokenlessProcBuilder pb(TestName(), "tkn", p.get());
+  auto cond = pb.ReadStateElement("cond", UBits(0, 1));
+
+  BStateElement state_element = pb.StateElement("st", Value(UBits(0b1010, 4)),
+                                                /*non_synthesizable=*/false);
+
+  BValue st_read = pb.StateRead(state_element, std::nullopt, "my_read_label");
+
+  // Labeled next node
+  BValue add_st =
+      pb.Next(state_element, pb.Add(st_read, pb.Literal(UBits(1, 4))), cond,
+              /*label=*/"my_next_label");
+  // Unlabeled next node
+  BValue sub_st =
+      pb.Next(state_element, pb.Subtract(st_read, pb.Literal(UBits(1, 4))),
+              pb.Not(cond));
+
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build());
+  // Test transformer that inverts the param.
+  TestTransformer tt;
+  ScopedRecordIr sri(p.get());
+  XLS_ASSERT_OK_AND_ASSIGN(
+      StateElement * new_st_element,
+      proc->TransformStateElement(state_element.state_element(),
+                                  Value(UBits(0b0101, 4)), tt));
+  StateRead* new_st = proc->GetStateReadByStateElement(new_st_element);
+
+  // Make sure the st next has been identity-ified (dummy value Zero is set
+  // for decoupled)
+  EXPECT_THAT(st_read.node(), m::StateRead(testing::Not("st")));
+  EXPECT_THAT(st_read.node()->users(), ::testing::IsEmpty());
+
+  // Verify old next nodes are identity-ified (labeled and unlabeled)
+  EXPECT_THAT(add_st.node(),
+              m::NextWithLabel(state_element.state_element(), m::Literal(0),
+                               cond.node(),
+                               std::optional<std::string>("my_next_label")));
+  EXPECT_THAT(sub_st.node(), m::Next(state_element.state_element(),
+                                     m::Literal(0), m::Not(cond.node())));
+
+  // Make sure that 'new_state_read' takes over the name and everything.
+  EXPECT_THAT(new_st, m::StateReadWithLabel(
+                          "st", std::optional<std::string>("my_read_label")));
+  EXPECT_THAT(new_st->users(), UnorderedElementsAre(m::Neg(new_st)));
+
+  // Verify new next nodes (labeled and unlabeled)
   EXPECT_THAT(
-      proc->ReplaceState("new_state", new_state),
-      StatusIs(absl::StatusCode::kInvalidArgument,
-               HasSubstr("Existing state param \"st\" still has uses")));
+      proc->next_values(new_st_element),
+      UnorderedElementsAre(
+          m::NextWithLabel(
+              new_st_element,
+              m::Neg(m::Add(m::Neg(new_st), m::Literal(UBits(1, 4)))),
+              m::And(m::Literal(UBits(1, 1)), cond.node()),
+              std::optional<std::string>("my_next_label")),
+          m::Next(new_st_element,
+                  m::Neg(m::Sub(m::Neg(new_st), m::Literal(UBits(1, 4)))),
+                  m::And(m::Literal(UBits(1, 1)), m::Not(cond.node())))));
+}
+
+TEST_F(ProcTest, TransformStateElementMultipleReads) {
+  auto p = CreatePackage();
+  TokenlessProcBuilder pb(TestName(), "tkn", p.get());
+  auto cond1 = pb.ReadStateElement("cond1", UBits(0, 1));
+  auto cond2 = pb.ReadStateElement("cond2", UBits(0, 1));
+
+  BStateElement state_element = pb.StateElement("st", Value(UBits(0b1010, 4)),
+                                                /*non_synthesizable=*/false);
+
+  BValue st_read1 = pb.StateRead(state_element, cond1, "read1");
+  BValue st_read2 = pb.StateRead(state_element, cond2, "read2");
+
+  BValue next_val1 = pb.Add(st_read1, pb.Literal(UBits(1, 4)));
+  BValue next_val2 = pb.Subtract(st_read2, pb.Literal(UBits(1, 4)));
+
+  pb.Next(state_element, next_val1, cond1);
+  pb.Next(state_element, next_val2, cond2);
+
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build());
+
+  TestTransformer tt;
+  XLS_ASSERT_OK_AND_ASSIGN(
+      StateElement * new_st_element,
+      proc->TransformStateElement(state_element.state_element(),
+                                  Value(UBits(0b0101, 4)), tt));
+
+  absl::Span<StateRead* const> new_reads =
+      proc->GetStateReadsByStateElement(new_st_element);
+  ASSERT_EQ(new_reads.size(), 2);
+
+  StateRead* new_st1 = new_reads[0];
+  StateRead* new_st2 = new_reads[1];
+
+  EXPECT_THAT(st_read1.node(), m::StateRead(testing::Not("st")));
+  EXPECT_THAT(st_read1.node()->users(), ::testing::IsEmpty());
+  EXPECT_THAT(st_read2.node(), m::StateRead(testing::Not("st")));
+  EXPECT_THAT(st_read2.node()->users(), ::testing::IsEmpty());
+
+  EXPECT_EQ(new_st1->label(), "read1");
+  EXPECT_EQ(new_st2->label(), "read2");
+
+  EXPECT_EQ(new_st1->predicate().value(), cond1.node());
+  EXPECT_EQ(new_st2->predicate().value(), cond2.node());
+
+  EXPECT_THAT(
+      proc->next_values(new_st_element),
+      UnorderedElementsAre(
+          m::Next(new_st_element,
+                  m::Neg(m::Add(m::Neg(new_st1), m::Literal(UBits(1, 4)))),
+                  m::And(m::Literal(UBits(1, 1)), cond1.node())),
+          m::Next(new_st_element,
+                  m::Neg(m::Sub(m::Neg(new_st2), m::Literal(UBits(1, 4)))),
+                  m::And(m::Literal(UBits(1, 1)), cond2.node()))));
+}
+
+class ScheduledProcTest : public IrTestBase {
+ protected:
+  absl::StatusOr<ScheduledProc*> CreateScheduledProc(Package* p) {
+    ScheduledProcBuilder pb("p", p);
+    pb.ReadStateElement("st", Value(UBits(42, 32)));
+    return pb.Build({});
+  }
+};
+
+TEST_F(ScheduledProcTest, StageAddAndClear) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledProc * proc, CreateScheduledProc(p.get()));
+  EXPECT_EQ(proc->stages().size(),
+            1);  // Starts with one stage from CreateScheduledProc
+
+  Stage stage1;
+  proc->AddStage(stage1);
+  EXPECT_EQ(proc->stages().size(), 2);
+
+  Stage stage2;
+  proc->AddStage(stage2);
+  EXPECT_EQ(proc->stages().size(), 3);
+
+  proc->ClearStages();
+  EXPECT_TRUE(proc->stages().empty());
+  // Re-stage the state element to satisfy the verifier.
+  XLS_ASSERT_OK(
+      proc->AddNodeToStage(0, proc->GetStateReads(0).front()).status());
+}
+
+TEST_F(ScheduledProcTest, AddEmptyStages) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledProc * proc, CreateScheduledProc(p.get()));
+  EXPECT_EQ(proc->stages().size(), 1);  // Starts with one stage
+
+  proc->AddEmptyStages(3);
+  EXPECT_EQ(proc->stages().size(), 4);  // 1 initial + 3 empty
+  for (int i = 1; i < proc->stages().size();
+       ++i) {  // Check only the added empty stages
+    EXPECT_TRUE(proc->stages()[i].active_inputs().empty());
+    EXPECT_TRUE(proc->stages()[i].logic().empty());
+    EXPECT_TRUE(proc->stages()[i].active_outputs().empty());
+  }
+
+  proc->AddEmptyStages(0);
+  EXPECT_EQ(proc->stages().size(), 4);
+}
+
+TEST_F(ScheduledProcTest, GetStageIndex) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledProc * proc, CreateScheduledProc(p.get()));
+  // CreateScheduledProc adds "st" to stage 0.
+  proc->AddEmptyStages(2);  // Adds stage 1 and 2
+
+  XLS_ASSERT_OK_AND_ASSIGN(Node * x, proc->MakeNodeInStage<Literal>(
+                                         1, SourceInfo(), Value(UBits(1, 32))));
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Node * y, proc->MakeNode<Literal>(SourceInfo(), Value(UBits(2, 32))));
+  ASSERT_THAT(proc->AddNodeToStage(2, y), IsOkAndHolds(true));
+
+  XLS_ASSERT_OK_AND_ASSIGN(Node * add,
+                           proc->MakeNode<BinOp>(SourceInfo(), x, y, Op::kAdd));
+
+  EXPECT_THAT(proc->GetStageIndex(x), IsOkAndHolds(1));
+  EXPECT_THAT(proc->GetStageIndex(y), IsOkAndHolds(2));
+  EXPECT_THAT(proc->GetStageIndex(add), StatusIs(absl::StatusCode::kNotFound));
+  EXPECT_THAT(proc->GetStageIndex(proc->GetStateReads(0).front()),
+              IsOkAndHolds(0));
+
+  // The verifier requires that every node be in a stage before we finish.
+  ASSERT_THAT(proc->AddNodeToStage(2, add), IsOkAndHolds(true));
+}
+
+TEST_F(ScheduledProcTest, AddNodeToStage) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledProc * proc, CreateScheduledProc(p.get()));
+  // CreateScheduledProc adds "st" to stage 0.
+  proc->AddEmptyStages(1);  // Adds stage 1
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Node * x, proc->MakeNode<Literal>(SourceInfo(), Value(UBits(1, 32))));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Node * y, proc->MakeNode<Literal>(SourceInfo(), Value(UBits(2, 32))));
+
+  XLS_ASSERT_OK_AND_ASSIGN(bool added_x, proc->AddNodeToStage(0, x));
+  EXPECT_TRUE(added_x);
+  EXPECT_THAT(proc->GetStageIndex(x), IsOkAndHolds(0));
+  EXPECT_TRUE(proc->stages()[0].contains(x));
+
+  XLS_ASSERT_OK_AND_ASSIGN(bool added_y, proc->AddNodeToStage(1, y));
+  EXPECT_TRUE(added_y);
+  EXPECT_EQ(proc->stages().size(), 2);
+  EXPECT_THAT(proc->GetStageIndex(y), IsOkAndHolds(1));
+  EXPECT_TRUE(proc->stages()[1].contains(y));
+
+  // Adding an existing node should return false.
+  EXPECT_THAT(proc->AddNodeToStage(0, x), IsOkAndHolds(false));
+}
+
+TEST_F(ScheduledProcTest, MakeNodeInStage) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledProc * proc, CreateScheduledProc(p.get()));
+  proc->AddEmptyStages(1);
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Literal * literal,
+      proc->MakeNodeInStage<Literal>(0, SourceInfo(), Value(UBits(42, 32))));
+  EXPECT_THAT(proc->GetStageIndex(literal), IsOkAndHolds(0));
+}
+
+TEST_F(ScheduledProcTest, MakeNodeWithNameInStage) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledProc * proc, CreateScheduledProc(p.get()));
+  proc->AddEmptyStages(1);
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Literal * literal, proc->MakeNodeWithNameInStage<Literal>(
+                             0, SourceInfo(), Value(UBits(42, 32)), "my_lit"));
+  EXPECT_THAT(proc->GetStageIndex(literal), IsOkAndHolds(0));
+  EXPECT_EQ(literal->GetName(), "my_lit");
+}
+
+// RebuildStageSideTables is implicitly tested by CloneScheduledProc.
+
+TEST_F(ScheduledProcTest, CloneScheduledProc) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(ScheduledProc * proc, CreateScheduledProc(p.get()));
+  // CreateScheduledProc adds "st" to stage 0.
+
+  proc->AddEmptyStages(2);  // Adds stage 1 and 2
+
+  XLS_ASSERT_OK(proc->MakeNodeWithNameInStage<Literal>(
+      0, SourceInfo(), Value(UBits(1, 32)), "my_x"));
+  XLS_ASSERT_OK(proc->MakeNodeWithNameInStage<Literal>(
+      0, SourceInfo(), Value(UBits(2, 32)), "my_y"));
+  XLS_ASSERT_OK(proc->MakeNodeWithNameInStage<Literal>(
+      1, SourceInfo(), Value(UBits(3, 32)), "my_z"));
+
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * cloned_proc,
+                           proc->Clone("cloned", p.get(),
+                                       /*channel_remapping=*/{},
+                                       /*call_remapping=*/{},
+                                       /*state_name_remapping=*/{}));
+
+  EXPECT_EQ(cloned_proc->stages().size(), 3);  // 1 initial + 2 added
+  EXPECT_TRUE(cloned_proc->IsScheduled());
+
+  Node* cloned_st = FindNode("st", cloned_proc);
+  Node* cloned_x = FindNode("my_x", cloned_proc);
+  Node* cloned_y = FindNode("my_y", cloned_proc);
+  Node* cloned_z = FindNode("my_z", cloned_proc);
+
+  EXPECT_THAT(cloned_proc->GetStageIndex(cloned_st), IsOkAndHolds(0));
+  EXPECT_THAT(cloned_proc->GetStageIndex(cloned_x), IsOkAndHolds(0));
+  EXPECT_THAT(cloned_proc->GetStageIndex(cloned_y), IsOkAndHolds(0));
+  EXPECT_THAT(cloned_proc->GetStageIndex(cloned_z), IsOkAndHolds(1));
+
+  // Verify Stage contents
+  EXPECT_TRUE(cloned_proc->stages()[0].contains(cloned_st));
+  EXPECT_TRUE(cloned_proc->stages()[0].contains(cloned_x));
+  EXPECT_TRUE(cloned_proc->stages()[0].contains(cloned_y));
+  EXPECT_FALSE(cloned_proc->stages()[0].contains(cloned_z));
+  EXPECT_FALSE(cloned_proc->stages()[1].contains(cloned_st));
+  EXPECT_FALSE(cloned_proc->stages()[1].contains(cloned_x));
+  EXPECT_FALSE(cloned_proc->stages()[1].contains(cloned_y));
+  EXPECT_TRUE(cloned_proc->stages()[1].contains(cloned_z));
 }
 
 }  // namespace

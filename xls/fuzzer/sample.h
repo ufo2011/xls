@@ -15,169 +15,284 @@
 #ifndef XLS_FUZZER_SAMPLE_H_
 #define XLS_FUZZER_SAMPLE_H_
 
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <ostream>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/string_view.h"
-#include "absl/types/optional.h"
-#include "libs/json11/json11.hpp"
+#include "absl/types/span.h"
+#include "re2/re2.h"
 #include "xls/dslx/interp_value.h"
+#include "xls/fuzzer/sample.pb.h"
+#include "xls/tests/testvector.pb.h"
 
 namespace xls {
-
-// Parses a semicolon-delimited list of values.
-//
-// Example input:
-//  bits[32]:6; (bits[8]:2, bits[16]:4)
-//
-// Returned bits values are always unsigned.
-//
-// Note: these values are parsed to InterpValues, but really they are just IR
-// values that we're converting into InterpValues. Things like enums or structs
-// (via named tuples) can't be parsed via this mechanism, it's fairly
-// specialized for the scenario we've created in our fuzzing process.
-absl::StatusOr<std::vector<dslx::InterpValue>> ParseArgs(
-    absl::string_view args_text);
-
-// Parses a batch of arguments, one ParseArgs() per line.
-absl::StatusOr<std::vector<std::vector<dslx::InterpValue>>> ParseArgsBatch(
-    absl::string_view args_text);
 
 // Returns a string representation of the args_batch.
 std::string ArgsBatchToText(
     const std::vector<std::vector<dslx::InterpValue>>& args_batch);
+// Returns a string representation of the ir_channel_names.
+std::string IrChannelNamesToText(
+    const std::vector<std::string>& ir_channel_names);
+// Returns a list of ir channel names.
+std::vector<std::string> ParseIrChannelNames(
+    std::string_view ir_channel_names_text);
+
+struct KnownFailure {
+  // We use shared_ptr here because it's extremely difficult to get things to
+  // compile if we use unique_ptr... these get stored & passed around in a
+  // std::vector, which has a lot of restrictions on its use if storing a
+  // non-copyable struct. (RE2 itself is neither copyable nor movable, which
+  // causes its own set of problems.)
+  std::shared_ptr<RE2> tool;
+  std::shared_ptr<RE2> stderr_regex;
+};
 
 // Options describing how to run a code sample. See member comments for details.
 class SampleOptions {
  public:
-  // Parses a JSON-encoded string and returns a SampleOptions object.
-  //
-  // Recognized field keys / expected types are those in the members of
-  // SampleOptions.
-  //
-  // TODO(https://github.com/google/xls/issues/341): 2021-03-12 Rework to be
-  // (schemaful) prototext instead.
-  static absl::StatusOr<SampleOptions> FromJson(absl::string_view json_text);
+  SampleOptions() : proto_(DefaultOptionsProto()) {}
 
-  // Returns a JSON-encoded string describing this object.
-  //
-  // TODO(https://github.com/google/xls/issues/341): 2021-03-12 Rework to be
-  // (schemaful) prototext instead.
-  std::string ToJsonText() const { return ToJson().dump(); }
+  // Convert to/from text serialized SampleOptionsProto.
+  static absl::StatusOr<SampleOptions> FromPbtxt(std::string_view text);
+  static absl::StatusOr<SampleOptions> FromProto(
+      fuzzer::SampleOptionsProto proto);
 
-  // As above, but returns the JSON object.
-  json11::Json ToJson() const;
+  bool input_is_dslx() const { return proto_.input_is_dslx(); }
+  void set_input_is_dslx(bool value) { proto_.set_input_is_dslx(value); }
 
-  bool input_is_dslx() const { return input_is_dslx_; }
-  bool convert_to_ir() const { return convert_to_ir_; }
-  bool optimize_ir() const { return optimize_ir_; }
-  bool use_jit() const { return use_jit_; }
-  bool codegen() const { return codegen_; }
-  bool simulate() const { return simulate_; }
-  const absl::optional<std::string>& simulator() const { return simulator_; }
-  const absl::optional<std::vector<std::string>>& codegen_args() {
-    return codegen_args_;
+  fuzzer::SampleType sample_type() const { return proto_.sample_type(); }
+  bool IsProcSample() const {
+    return proto_.sample_type() == fuzzer::SAMPLE_TYPE_PROC;
   }
-  bool use_system_verilog() const { return use_system_verilog_; }
-
-  void set_input_is_dslx(bool value) { input_is_dslx_ = value; }
-  void set_codegen_args(const std::vector<std::string>& value) {
-    codegen_args_ = value;
+  bool IsFunctionSample() const {
+    return proto_.sample_type() == fuzzer::SAMPLE_TYPE_FUNCTION;
+  }
+  void set_sample_type(fuzzer::SampleType value) {
+    proto_.set_sample_type(value);
   }
 
-  bool operator==(const SampleOptions& other) const {
-    return ToJson() == other.ToJson();
+  std::vector<std::string> ir_converter_args() const {
+    return std::vector<std::string>(proto_.ir_converter_args().begin(),
+                                    proto_.ir_converter_args().end());
   }
+  void set_ir_converter_args(absl::Span<const std::string> args) {
+    for (const std::string& arg : args) {
+      proto_.add_ir_converter_args(arg);
+    }
+  }
+
+  bool convert_to_ir() const { return proto_.convert_to_ir(); }
+  void set_convert_to_ir(bool value) { proto_.set_convert_to_ir(value); }
+
+  bool optimize_ir() const { return proto_.optimize_ir(); }
+  void set_optimize_ir(bool value) { proto_.set_optimize_ir(value); }
+
+  bool use_jit() const { return proto_.use_jit(); }
+  void set_use_jit(bool value) { proto_.set_use_jit(value); }
+
+  bool codegen() const { return proto_.codegen(); }
+  void set_codegen(bool value) { proto_.set_codegen(value); }
+
+  bool codegen_ng() const { return proto_.codegen_ng(); }
+  void set_codegen_ng(bool value) { proto_.set_codegen_ng(value); }
+
+  bool simulate() const { return proto_.simulate(); }
+  void set_simulate(bool value) { proto_.set_simulate(value); }
+
+  bool with_valid_holdoff() const { return proto_.with_valid_holdoff(); }
+  void set_with_valid_holdoff(bool value) {
+    proto_.set_with_valid_holdoff(value);
+  }
+
+  const std::string& simulator() const { return proto_.simulator(); }
+  void set_simulator(std::string_view value) { proto_.set_simulator(value); }
+
+  std::vector<std::string> codegen_args() const {
+    return std::vector<std::string>(proto_.codegen_args().begin(),
+                                    proto_.codegen_args().end());
+  }
+  void set_codegen_args(absl::Span<const std::string> args) {
+    for (const std::string& arg : args) {
+      proto_.add_codegen_args(arg);
+    }
+  }
+
+  bool use_system_verilog() const { return proto_.use_system_verilog(); }
+  void set_use_system_verilog(bool value) {
+    proto_.set_use_system_verilog(value);
+  }
+
+  std::optional<int64_t> timeout_seconds() const {
+    return proto_.has_timeout_seconds()
+               ? std::optional<int64_t>(proto_.timeout_seconds())
+               : std::nullopt;
+  }
+  void set_timeout_seconds(int64_t value) { proto_.set_timeout_seconds(value); }
+
+  int64_t calls_per_sample() const { return proto_.calls_per_sample(); }
+  void set_calls_per_sample(int64_t value) {
+    proto_.set_calls_per_sample(value);
+  }
+
+  int64_t proc_ticks() const { return proto_.proc_ticks(); }
+  void set_proc_ticks(int64_t value) { proto_.set_proc_ticks(value); }
+
+  bool disable_unopt_interpreter() const {
+    return proto_.disable_unopt_interpreter();
+  }
+  void set_disable_unopt_interpreter(bool value = true) {
+    proto_.set_disable_unopt_interpreter(value);
+  }
+
+  bool lower_to_proc_scoped_channels() const {
+    return proto_.lower_to_proc_scoped_channels();
+  }
+  void set_lower_to_proc_scoped_channels(bool value) {
+    proto_.set_lower_to_proc_scoped_channels(value);
+  }
+
+  const std::vector<KnownFailure>& known_failures() const {
+    if (known_failures_.empty() && proto_.known_failure_size() > 0) {
+      known_failures_.reserve(proto_.known_failure_size());
+      for (const auto& fail : proto_.known_failure()) {
+        KnownFailure compiled_fail;
+        if (fail.has_tool()) {
+          compiled_fail.tool = std::make_shared<RE2>(fail.tool());
+        }
+        if (fail.has_stderr_regex()) {
+          compiled_fail.stderr_regex =
+              std::make_shared<RE2>(fail.stderr_regex());
+        }
+        known_failures_.push_back(std::move(compiled_fail));
+      }
+    }
+    return known_failures_;
+  }
+  void clear_known_failures() {
+    proto_.clear_known_failure();
+    known_failures_.clear();
+  }
+  void add_known_failure(std::string_view re) {
+    *proto_.mutable_known_failure()->Add()->mutable_stderr_regex() = re;
+    known_failures_.clear();
+  }
+  void add_known_failure(std::string_view tool, std::string_view re) {
+    auto* fail = proto_.add_known_failure();
+    *fail->mutable_tool() = tool;
+    *fail->mutable_stderr_regex() = re;
+    known_failures_.clear();
+  }
+  void set_known_failures(absl::Span<const fuzzer::KnownFailure> fails) {
+    for (const auto& arg : fails) {
+      *proto_.add_known_failure() = arg;
+    }
+    known_failures_.clear();
+  }
+
+  bool operator==(const SampleOptions& other) const;
   bool operator!=(const SampleOptions& other) const {
     return !((*this) == other);
   }
 
+  SampleOptions ReplaceInputIsDslx(bool enabled) const {
+    auto clone = *this;
+    clone.set_input_is_dslx(enabled);
+    return clone;
+  }
+
+  // Return a proto with with default option values.
+  static fuzzer::SampleOptionsProto DefaultOptionsProto();
+
+  const fuzzer::SampleOptionsProto& proto() const { return proto_; }
+
  private:
-  // Whether code sample is DSLX. Otherwise assumed to be XLS IR.
-  bool input_is_dslx_ = true;
-  // Convert the input code sample to XLS IR. Only meaningful if input_is_dslx
-  // is true.
-  bool convert_to_ir_ = true;
-  // Optimize the XLS IR.
-  bool optimize_ir_ = true;
-  // Use LLVM JIT when evaluating the XLS IR.
-  //
-  // TODO(leary): 2021-03-16 Currently we run the unopt IR interpretation
-  // unconditionally, and the opt IR interpretation conditionally. Should we
-  // also run the opt IR interpretation unconditionally?
-  bool use_jit_ = true;
-  // Generate Verilog from the optimized IR. Requires optimize_ir to be true.
-  bool codegen_ = false;
-  // Arguments to pass to codegen_main. Requires codegen to be true.
-  absl::optional<std::vector<std::string>> codegen_args_;
-  // Run the Verilog simulator on the generated Verilog. Requires codegen to be
-  // true.
-  bool simulate_ = false;
-  // Verilog simulator to use; e.g. "iverilog".
-  absl::optional<std::string> simulator_;
-  // Whether to use SystemVerilog or Verilog in codegen.
-  bool use_system_verilog_ = true;
+  fuzzer::SampleOptionsProto proto_ = DefaultOptionsProto();
+
+  mutable std::vector<KnownFailure> known_failures_;
 };
+bool AbslParseFlag(std::string_view text, SampleOptions* sample_options,
+                   std::string* error);
+std::string AbslUnparseFlag(const SampleOptions& sample_options);
 
 // Abstraction describing a fuzzer code sample and how to run it.
 class Sample {
  public:
   // Serializes/deserializes a sample to/from a text representation. Used for
-  // pickling/unpickling for use in Python. ToCrasher includes this
-  // serialization as a substring.
-  // TODO(meheff): 2021-03-19 Remove this when we no longer need to
-  // pickle/depickle Samples for Python. Deserialize can be replaced with a
-  // method FromCrasher.
-  static absl::StatusOr<Sample> Deserialize(absl::string_view s);
-  std::string Serialize() const;
+  // generating crashers and pickling/unpickling for use in Python. ToCrasher
+  // includes this serialization as a substring.
+  //
+  // A serialization has the following format:
+  //  // BEGIN_CONFIG
+  //  // <CrasherConfigProto serialization>
+  //  // END_CONFIG
+  //  <code sample>
+  static absl::StatusOr<Sample> Deserialize(std::string_view s);
+
+  // Utility function to convert testvector::SampleInputsProto to
+  // args batch and channel names used in this object.
+  // TODO(google/xls#1645) remove.
+  static absl::Status ExtractArgsBatch(
+      const SampleOptions& options,
+      const testvector::SampleInputsProto& testvector,
+      std::vector<std::vector<dslx::InterpValue>>& args_batch,
+      std::vector<std::string>* ir_channel_names = nullptr);
+
+  std::string Serialize(
+      std::optional<std::string_view> error_message = std::nullopt) const;
 
   // Returns "crasher" text serialization.
   //
   // A crasher is a text serialization of the sample along with a copyright
-  // message and the error message from the crash in the comments. As such, it
-  // is a valid text serialization of the sample. Crashers enable easy
-  // reproduction from a single text file. Crashers may be checked in as tests
-  // in `xls/fuzzer/crashers/`.
-  //
-  // A crasher has the following format:
-  //  // <copyright notice>
-  //  // <error message>
-  //  // options: <JSON-serialized SampleOptions>
-  //  // args: <argument set 0>
-  //  // ...
-  //  // args: <argument set 1>
-  //  <code sample>
-  std::string ToCrasher(absl::string_view error_message) const;
+  // message. Crashers enable easy reproduction from a single text
+  // file. Crashers may be checked in as tests in `xls/fuzzer/crashers/`.
+  std::string ToCrasher(std::string_view error_message) const;
 
   Sample(std::string input_text, SampleOptions options,
-         std::vector<std::vector<dslx::InterpValue>> args_batch)
+         testvector::SampleInputsProto testvector)
       : input_text_(std::move(input_text)),
         options_(std::move(options)),
-        args_batch_(std::move(args_batch)) {}
+        testvector_(std::move(testvector)) {}
+
+  // Legacy constructor for compatibility, but to be removed. Use above instead.
+  [[deprecated("Use constructor taking testvector instead")]] Sample(
+      std::string input_text, SampleOptions options,
+      const std::vector<std::vector<dslx::InterpValue>>& args_batch,
+      const std::vector<std::string>& ir_channel_names = {});
 
   const SampleOptions& options() const { return options_; }
-  const std::string& input_text() const { return input_text_; }
-  const std::vector<std::vector<dslx::InterpValue>>& args_batch() const {
-    return args_batch_;
+  const testvector::SampleInputsProto& testvector() const {
+    return testvector_;
   }
+
+  const std::string& input_text() const { return input_text_; }
 
   bool operator==(const Sample& other) const {
     return input_text_ == other.input_text_ && options_ == other.options_ &&
-           ArgsBatchEqual(other);
+           TestVectorEqual(other.testvector_);
   }
-  bool operator!=(const Sample& other) const { return !((*this) == other); }
+  bool operator!=(const Sample& other) const = default;
+
+  // Get legacy representations.
+  absl::Status GetArgsAndChannels(
+      std::vector<std::vector<dslx::InterpValue>>& args_batch,
+      std::vector<std::string>* ir_channel_names = nullptr) const;
 
  private:
-  // Returns whether the argument batch is the same as in "other".
-  bool ArgsBatchEqual(const Sample& other) const;
+  bool TestVectorEqual(const testvector::SampleInputsProto& tv) const;
 
-  std::string input_text_;  // Code sample as text.
-  SampleOptions options_;   // How to run the sample.
-
-  // Argument values to use for interpretation and simulation.
-  std::vector<std::vector<dslx::InterpValue>> args_batch_;
+  std::string input_text_;                    // Code sample as text.
+  SampleOptions options_;                     // How to run the sample.
+  testvector::SampleInputsProto testvector_;  // Input data.
 };
+
+std::ostream& operator<<(std::ostream& os, const Sample& sample);
 
 }  // namespace xls
 

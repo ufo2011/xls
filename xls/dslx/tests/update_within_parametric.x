@@ -12,13 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-fn main<N: u32>(x: u32[N]) -> u32[N] {
-  update(x, u32:0, N)
-}
+fn main<N: u32>(x: u32[N]) -> u32[N] { update(x, u32:0, N) }
 
-#![test]
+#[test]
 fn test_main() {
-  let _ = assert_eq(main(u32[2]:[0, 0]), u32[2]:[2, 0]);
-  let _ = assert_eq(main(u32[3]:[0, 0, 0]), u32[3]:[3, 0, 0]);
-  ()
+    assert_eq(main(u32[2]:[0, 0]), u32[2]:[2, 0]);
+    assert_eq(main(u32[3]:[0, 0, 0]), u32[3]:[3, 0, 0]);
 }

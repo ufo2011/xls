@@ -14,44 +14,43 @@
 
 #include "xls/ir/bits.h"
 
+#include <algorithm>
+#include <bit>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "benchmark/benchmark.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "xls/common/fuzzing/fuzztest.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
+#include "absl/types/span.h"
+#include "xls/common/bits_util.h"
 #include "xls/common/math_util.h"
 #include "xls/common/status/matchers.h"
+#include "xls/data_structures/inline_bitmap.h"
+#include "xls/ir/bit_push_buffer.h"
+#include "xls/ir/bits_ops.h"
+#include "xls/ir/bits_test_utils.h"
+#include "xls/ir/format_preference.h"
 #include "xls/ir/number_parser.h"
 #include "xls/ir/value.h"
 
 namespace xls {
 namespace {
 
-using status_testing::IsOkAndHolds;
-using status_testing::StatusIs;
+using ::absl_testing::IsOkAndHolds;
+using ::absl_testing::StatusIs;
 using ::testing::ElementsAre;
+using ::testing::ElementsAreArray;
 using ::testing::HasSubstr;
-
-// Create a Bits of the given bit count with the prime number index bits set to
-// one.
-Bits PrimeBits(int64_t bit_count) {
-  auto is_prime = [](int64_t n) {
-    if (n < 2) {
-      return false;
-    }
-    for (int64_t i = 2; i * i < n; ++i) {
-      if (n % i == 0) {
-        return false;
-      }
-    }
-    return true;
-  };
-
-  std::vector<uint8_t> bytes(CeilOfRatio(bit_count, int64_t{8}), 0);
-  for (int64_t i = 0; i < bit_count; ++i) {
-    if (is_prime(i)) {
-      bytes[bytes.size() - 1 - i / 8] |= 1 << (i % 8);
-    }
-  }
-  return Bits::FromBytes(bytes, bit_count);
-}
 
 TEST(BitsTest, BitsConstructor) {
   Bits empty(0);
@@ -73,50 +72,51 @@ TEST(BitsTest, BitsVectorConstructor) {
 
   EXPECT_EQ(Bits::FromBytes({42}, 6), UBits(42, 6));
   EXPECT_EQ(Bits::FromBytes({42}, 8), UBits(42, 8));
-  EXPECT_EQ(Bits::FromBytes({0, 0, 0, 0, 0, 0, 0, 0, 0, 42}, 80),
+  EXPECT_EQ(Bits::FromBytes({42, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 80),
             UBits(42, 80));
-  EXPECT_EQ(Bits::FromBytes({0, 0, 0, 0, 0, 0, 0, 0, 0, 42}, 73),
+  EXPECT_EQ(Bits::FromBytes({42, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 73),
             UBits(42, 73));
 
-  EXPECT_EQ(Bits::FromBytes({0xde, 0xad, 0xbe, 0xef}, 32),
+  EXPECT_EQ(Bits::FromBytes({0xef, 0xbe, 0xad, 0xde}, 32),
             UBits(0xdeadbeefULL, 32));
 
-  EXPECT_EQ(Bits::FromBytes({0x1, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78,
-                             0x90, 0xfe, 0xdc, 0xba},
-                            89)
-                .ToString(FormatPreference::kHex),
+  std::vector<uint8_t> bytes = {0x1,  0xab, 0xcd, 0xef, 0x12, 0x34,
+                                0x56, 0x78, 0x90, 0xfe, 0xdc, 0xba};
+  std::reverse(bytes.begin(), bytes.end());
+  EXPECT_EQ(BitsToString(Bits::FromBytes(bytes, 89), FormatPreference::kHex),
             "0x1ab_cdef_1234_5678_90fe_dcba");
+}
+
+TEST(BitsTest, SetRange) {
+  Bits bits = Bits::FromBytes({0}, 6);
+  EXPECT_TRUE(bits.IsZero());
+
+  bits.SetRange(1, 3);
+
+  EXPECT_EQ(bits, Bits({false, true, true, false, false, false}));
 }
 
 TEST(BitsTest, BitsToBytes) {
   EXPECT_TRUE(Bits().ToBytes().empty());
   EXPECT_THAT(UBits(42, 6).ToBytes(), ElementsAre(42));
-  EXPECT_THAT(UBits(123, 16).ToBytes(), ElementsAre(0, 123));
+  EXPECT_THAT(UBits(123, 16).ToBytes(), ElementsAre(123, 0));
   EXPECT_THAT(UBits(42, 80).ToBytes(),
-              ElementsAre(0, 0, 0, 0, 0, 0, 0, 0, 0, 42));
+              ElementsAre(42, 0, 0, 0, 0, 0, 0, 0, 0, 0));
   EXPECT_THAT(UBits(42, 77).ToBytes(),
-              ElementsAre(0, 0, 0, 0, 0, 0, 0, 0, 0, 42));
-  EXPECT_THAT(Bits::FromBytes({0x1, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78,
-                               0x90, 0xfe, 0xdc, 0xba},
-                              89)
-                  .ToBytes(),
-              ElementsAre(0x1, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90,
-                          0xfe, 0xdc, 0xba));
-
+              ElementsAre(42, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+  std::vector<uint8_t> bytes = {0x1,  0xab, 0xcd, 0xef, 0x12, 0x34,
+                                0x56, 0x78, 0x90, 0xfe, 0xdc, 0xba};
+  std::reverse(bytes.begin(), bytes.end());
+  EXPECT_THAT(Bits::FromBytes(bytes, 89).ToBytes(),
+              ElementsAre(0xba, 0xdc, 0xfe, 0x90, 0x78, 0x56, 0x34, 0x12, 0xef,
+                          0xcd, 0xab, 0x1));
   EXPECT_THAT(
       Bits::AllOnes(65).ToBytes(),
-      ElementsAre(0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
+      ElementsAre(0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01));
   {
     Bits wide_bits = Bits::AllOnes(75);
     std::vector<uint8_t> bytes(CeilOfRatio(wide_bits.bit_count(), int64_t{8}));
-    wide_bits.ToBytes(absl::MakeSpan(bytes), /*big_endian=*/true);
-    EXPECT_THAT(bytes, ElementsAre(0x07, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                                   0xff, 0xff, 0xff));
-  }
-  {
-    Bits wide_bits = Bits::AllOnes(75);
-    std::vector<uint8_t> bytes(CeilOfRatio(wide_bits.bit_count(), int64_t{8}));
-    wide_bits.ToBytes(absl::MakeSpan(bytes), /*big_endian=*/false);
+    wide_bits.ToBytes(absl::MakeSpan(bytes));
     EXPECT_THAT(bytes, ElementsAre(0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
                                    0xff, 0xff, 0x07));
   }
@@ -126,17 +126,7 @@ TEST(BitsTest, BitsToBytes) {
         Bits wide_bits,
         ParseNumber("0x4ff_ffff_0000_1111_2222_3333_4444_ffff_0000_cc31"));
     std::vector<uint8_t> bytes(CeilOfRatio(wide_bits.bit_count(), int64_t{8}));
-    wide_bits.ToBytes(absl::MakeSpan(bytes), /*big_endian=*/true);
-    EXPECT_THAT(bytes, ElementsAre(0x4, 0xff, 0xff, 0xff, 0x00, 0x00, 0x11,
-                                   0x11, 0x22, 0x22, 0x33, 0x33, 0x44, 0x44,
-                                   0xff, 0xff, 0x00, 0x00, 0xcc, 0x31));
-  }
-  {
-    XLS_ASSERT_OK_AND_ASSIGN(
-        Bits wide_bits,
-        ParseNumber("0x4ff_ffff_0000_1111_2222_3333_4444_ffff_0000_cc31"));
-    std::vector<uint8_t> bytes(CeilOfRatio(wide_bits.bit_count(), int64_t{8}));
-    wide_bits.ToBytes(absl::MakeSpan(bytes), /*big_endian=*/false);
+    wide_bits.ToBytes(absl::MakeSpan(bytes));
     EXPECT_THAT(bytes, ElementsAre(0x31, 0xcc, 0x00, 0x00, 0xff, 0xff, 0x44,
                                    0x44, 0x33, 0x33, 0x22, 0x22, 0x11, 0x11,
                                    0x00, 0x00, 0xff, 0xff, 0xff, 0x4));
@@ -297,82 +287,7 @@ TEST(BitsTest, ToUint64OrInt64) {
   EXPECT_THAT(wide_minus_2.ToInt64(), IsOkAndHolds(-2));
 }
 
-TEST(BitsTest, ToString) {
-  Bits empty_bits(0);
-  EXPECT_EQ(empty_bits.ToString(FormatPreference::kDecimal), "0");
-  EXPECT_EQ(empty_bits.ToString(FormatPreference::kHex), "0x0");
-  EXPECT_EQ(empty_bits.ToString(FormatPreference::kBinary), "0b0");
-  EXPECT_EQ(empty_bits.ToString(FormatPreference::kDecimal,
-                                /*include_bit_count=*/true),
-            "0 [0 bits]");
-
-  Bits b1 = UBits(1, 1);
-  EXPECT_EQ(b1.ToString(FormatPreference::kDecimal), "1");
-  EXPECT_EQ(b1.ToString(FormatPreference::kHex), "0x1");
-  EXPECT_EQ(b1.ToString(FormatPreference::kBinary), "0b1");
-
-  EXPECT_EQ(UBits(1, 16).ToString(FormatPreference::kBinary), "0b1");
-  EXPECT_EQ(UBits(1, 16).ToString(FormatPreference::kHex), "0x1");
-
-  Bits b42 = UBits(42, 7);
-  EXPECT_EQ(b42.ToString(FormatPreference::kDecimal), "42");
-  EXPECT_EQ(b42.ToString(FormatPreference::kHex), "0x2a");
-  EXPECT_EQ(b42.ToString(FormatPreference::kBinary), "0b10_1010");
-
-  Bits prime64 = PrimeBits(64);
-  EXPECT_EQ(prime64.ToString(FormatPreference::kDecimal),
-            "2892025783495830204");
-  EXPECT_EQ(prime64.ToString(FormatPreference::kHex), "0x2822_8a20_a28a_2abc");
-  EXPECT_EQ(prime64.ToString(FormatPreference::kBinary),
-            "0b10_1000_0010_0010_1000_1010_0010_0000_1010_0010_1000_1010_0010_"
-            "1010_1011_1100");
-
-  // Test widths wider than 64. Decimal output for wide bit counts is not
-  // supported.
-  EXPECT_EQ(PrimeBits(65).ToString(FormatPreference::kHex),
-            "0x2822_8a20_a28a_2abc");
-  EXPECT_EQ(PrimeBits(65).ToString(FormatPreference::kBinary),
-            "0b10_1000_0010_0010_1000_1010_0010_0000_1010_0010_1000_1010_0010_"
-            "1010_1011_1100");
-
-  EXPECT_EQ(PrimeBits(96).ToString(FormatPreference::kHex),
-            "0x208_8288_2822_8a20_a28a_2abc");
-  EXPECT_EQ(PrimeBits(96).ToString(FormatPreference::kBinary),
-            "0b10_0000_1000_1000_0010_1000_1000_0010_1000_0010_0010_1000_1010_"
-            "0010_0000_1010_0010_1000_1010_0010_1010_1011_1100");
-}
-
-TEST(BitsTest, ToRawString) {
-  Bits empty_bits(0);
-  EXPECT_EQ(empty_bits.ToRawDigits(FormatPreference::kDecimal), "0");
-  EXPECT_EQ(empty_bits.ToRawDigits(FormatPreference::kHex), "0");
-  EXPECT_EQ(empty_bits.ToRawDigits(FormatPreference::kBinary), "0");
-  EXPECT_EQ(empty_bits.ToRawDigits(FormatPreference::kHex,
-                                   /*emit_leading_zeros=*/true),
-            "0");
-  EXPECT_EQ(empty_bits.ToRawDigits(FormatPreference::kBinary,
-                                   /*emit_leading_zeros=*/true),
-            "0");
-
-  EXPECT_EQ(UBits(1, 16).ToRawDigits(FormatPreference::kBinary), "1");
-  EXPECT_EQ(UBits(1, 16).ToRawDigits(FormatPreference::kHex), "1");
-  EXPECT_EQ(UBits(1, 16).ToRawDigits(FormatPreference::kBinary,
-                                     /*emit_leading_zeros=*/true),
-            "0000_0000_0000_0001");
-  EXPECT_EQ(UBits(1, 16).ToRawDigits(FormatPreference::kHex,
-                                     /*emit_leading_zeros=*/true),
-            "0001");
-
-  EXPECT_EQ(UBits(0x1b, 13).ToRawDigits(FormatPreference::kBinary), "1_1011");
-  EXPECT_EQ(UBits(0x1b, 13).ToRawDigits(FormatPreference::kHex), "1b");
-  EXPECT_EQ(UBits(0x1b, 13).ToRawDigits(FormatPreference::kBinary,
-                                        /*emit_leading_zeros=*/true),
-            "0_0000_0001_1011");
-  EXPECT_EQ(UBits(0x1b, 13).ToRawDigits(FormatPreference::kHex,
-                                        /*emit_leading_zeros=*/true),
-            "001b");
-}
-
+// Remove 0x or 0b prefix and separators to get plain output.
 TEST(BitsTest, UBitsFactory) {
   Bits b0 = UBits(0, 1);
   EXPECT_THAT(b0.ToInt64(), IsOkAndHolds(0));
@@ -561,7 +476,7 @@ TEST(BitsTest, Slice) {
   EXPECT_EQ(big_prime, big_prime.Slice(0, big_prime.bit_count()));
   // Random primes in some range: 2377 2381 2383 2389 2393
   // Slice out this range and verify the appropriate 5 bits are set.
-  EXPECT_EQ(big_prime.Slice(2377, 17).ToString(FormatPreference::kBinary),
+  EXPECT_EQ(BitsToString(big_prime.Slice(2377, 17), FormatPreference::kBinary),
             "0b1_0001_0000_0101_0001");
 }
 
@@ -623,6 +538,208 @@ TEST(BitsTest, ToBitVectorAndBack) {
   EXPECT_EQ(Bits(UBits(1, 1).ToBitVector()), UBits(1, 1));
   EXPECT_EQ(Bits(UBits(0b11001, 5).ToBitVector()), UBits(0b11001, 5));
   EXPECT_EQ(Bits(UBits(0b11001, 1234).ToBitVector()), UBits(0b11001, 1234));
+}
+
+static void BinFormatter(std::string* out, uint8_t value) {
+  absl::StrAppend(out, "0b");
+  for (int64_t i = 0; i < 8; ++i) {
+    bool bit = (value >> (7 - i)) & 1;
+    absl::StrAppend(out, bit ? "1" : "0");
+  }
+}
+
+TEST(BitsTest, FlattenToWithinOneByte) {
+  Bits b4 = UBits(0b100, 3);
+  BitPushBuffer buffer;
+  b4.FlattenTo(&buffer);
+  EXPECT_EQ(buffer.ToString(), "0b100");
+  EXPECT_EQ(buffer.size_in_bits(), 3);
+  {
+    const std::vector<uint8_t> expected_lsb_padded = {0b100'00000};
+    std::vector<uint8_t> actual = buffer.GetUint8DataWithLsbPadding();
+    EXPECT_EQ(actual, expected_lsb_padded)
+        << "Expected: "
+        << absl::StrJoin(expected_lsb_padded, ", ", BinFormatter)
+        << "\nActual: " << absl::StrJoin(actual, ", ", BinFormatter);
+  }
+  {
+    const std::vector<uint8_t> expected_msb_padded = {0b00000'100};
+    std::vector<uint8_t> actual = buffer.GetUint8DataWithMsbPadding();
+    EXPECT_EQ(actual, expected_msb_padded)
+        << "Expected: "
+        << absl::StrJoin(expected_msb_padded, ", ", BinFormatter)
+        << "\nActual: " << absl::StrJoin(actual, ", ", BinFormatter);
+  }
+}
+
+TEST(BitsType, FlattenTwoAcrossTwoBytes) {
+  Bits b9 = UBits(0b101'0000'0011, /*bit_count=*/11);
+  BitPushBuffer buffer;
+  b9.FlattenTo(&buffer);
+  EXPECT_EQ(buffer.ToString(), "0b10100000011");
+  // Note that the LSB padded version is always just a left shifted version
+  // of the MSB padded version.
+  {
+    const std::vector<uint8_t> expected = {0b1010'0000, 0b0110'0000};
+    std::vector<uint8_t> actual = buffer.GetUint8DataWithLsbPadding();
+    EXPECT_EQ(actual, expected)
+        << "Expected: " << absl::StrJoin(expected, ", ", BinFormatter)
+        << "\nActual: " << absl::StrJoin(actual, ", ", BinFormatter);
+  }
+  {
+    const std::vector<uint8_t> expected = {0b0000'0101, 0b0000'0011};
+    std::vector<uint8_t> actual = buffer.GetUint8DataWithMsbPadding();
+    EXPECT_EQ(actual, expected)
+        << "Expected: " << absl::StrJoin(expected, ", ", BinFormatter)
+        << "\nActual: " << absl::StrJoin(actual, ", ", BinFormatter);
+  }
+}
+
+TEST(BitsType, FlattenMultiByteExactByteAlignment) {
+  Bits b16 = UBits(0b0000'1111'1000'0000, /*bit_count=*/16);
+  BitPushBuffer buffer;
+  b16.FlattenTo(&buffer);
+  EXPECT_EQ(buffer.ToString(), "0b0000111110000000");
+  {
+    const std::vector<uint8_t> expected = {0b0000'1111, 0b1000'0000};
+    std::vector<uint8_t> actual = buffer.GetUint8DataWithLsbPadding();
+    EXPECT_EQ(actual, expected)
+        << "Expected: " << absl::StrJoin(expected, ", ", BinFormatter)
+        << "\nActual: " << absl::StrJoin(actual, ", ", BinFormatter);
+  }
+  {
+    const std::vector<uint8_t> expected = {0b0000'1111, 0b1000'0000};
+    std::vector<uint8_t> actual = buffer.GetUint8DataWithMsbPadding();
+    EXPECT_EQ(actual, expected)
+        << "Expected: " << absl::StrJoin(expected, ", ", BinFormatter)
+        << "\nActual: " << absl::StrJoin(actual, ", ", BinFormatter);
+  }
+}
+
+void RoundtripOneByte(uint8_t byte, int64_t bit_count) {
+  EXPECT_THAT(Bits::FromBytes(std::vector<uint8_t>{byte}, bit_count).ToBytes(),
+              ElementsAre(byte & Mask(bit_count)));
+}
+FUZZ_TEST(BitsFuzzTest, RoundtripOneByte)
+    .WithDomains(fuzztest::Arbitrary<uint8_t>(), fuzztest::InRange(1, 8));
+
+void RoundtripTwoBytes(uint8_t b0, uint8_t b1, int64_t bit_count) {
+  EXPECT_THAT(
+      Bits::FromBytes(std::vector<uint8_t>{b0, b1}, bit_count).ToBytes(),
+      ElementsAre(b0, b1 & Mask(bit_count - int64_t{8} * 1)));
+}
+FUZZ_TEST(BitsFuzzTest, RoundtripTwoBytes)
+    .WithDomains(fuzztest::Arbitrary<uint8_t>(), fuzztest::Arbitrary<uint8_t>(),
+                 fuzztest::InRange(8 * 1 + 1, 8 * 1 + 8));
+
+void RoundtripThreeBytes(uint8_t b0, uint8_t b1, uint8_t b2,
+                         int64_t bit_count) {
+  EXPECT_THAT(
+      Bits::FromBytes(std::vector<uint8_t>{b0, b1, b2}, bit_count).ToBytes(),
+      ElementsAre(b0, b1, b2 & Mask(bit_count - int64_t{8} * 2)));
+}
+FUZZ_TEST(BitsFuzzTest, RoundtripThreeBytes)
+    .WithDomains(fuzztest::Arbitrary<uint8_t>(), fuzztest::Arbitrary<uint8_t>(),
+                 fuzztest::Arbitrary<uint8_t>(),
+                 fuzztest::InRange(8 * 2 + 1, 8 * 2 + 8));
+
+void RoundtripNBytes(const std::vector<uint8_t>& bytes, int64_t excess_bits) {
+  if (bytes.empty() && excess_bits > 0) {
+    // Can't have excess bits if there aren't any bits to start with...
+    return;
+  }
+  const int64_t bit_count = 8 * bytes.size() - excess_bits;
+  std::vector<uint8_t> expected = bytes;
+  if (!expected.empty()) {
+    expected.back() &= Mask(bit_count - int64_t{8} * (expected.size() - 1));
+  }
+  EXPECT_THAT(Bits::FromBytes(bytes, bit_count).ToBytes(),
+              ElementsAreArray(expected));
+}
+FUZZ_TEST(BitsFuzzTest, RoundtripNBytes)
+    .WithDomains(fuzztest::Arbitrary<std::vector<uint8_t>>(),
+                 fuzztest::InRange(0, 7));
+
+void RoundtripBitVectorThroughBitmap(
+    const absl::InlinedVector<bool, 64>& bit_vector) {
+  EXPECT_THAT(
+      Bits::FromBitmap(InlineBitmap::FromBitsLsbIs0(bit_vector)).ToBitVector(),
+      ElementsAreArray(bit_vector));
+}
+FUZZ_TEST(BitsFuzzTest, RoundtripBitVectorThroughBitmap);
+
+void CompareBitsAndPushBufferData(
+    const absl::InlinedVector<bool, 64>& bit_vector) {
+  // Create a `Bits` object from the source `bit_vector`.
+  Bits bits = Bits::FromBitmap(InlineBitmap::FromBitsLsbIs0(bit_vector));
+
+  // Build the push buffer from those bits -- we push from the most significant
+  // bit to the least significant bit.
+  BitPushBuffer buffer;
+  for (int64_t i = 0; i < bits.bit_count(); ++i) {
+    buffer.PushBit(bits.GetFromMsb(i));
+  }
+
+  EXPECT_EQ(bits.ToDebugString(), buffer.ToString());
+
+  // Count the number of set bits in the exported bytes.
+  auto count_ones = [](const std::vector<uint8_t>& bytes) {
+    int64_t count = 0;
+    for (uint8_t byte : bytes) {
+      count += std::popcount(byte);
+    }
+    return count;
+  };
+  int64_t ones_count_lsb_padding =
+      count_ones(buffer.GetUint8DataWithLsbPadding());
+  int64_t ones_count_msb_padding =
+      count_ones(buffer.GetUint8DataWithMsbPadding());
+  int64_t ones_count_from_bits = count_ones(bits.ToBytes());
+  EXPECT_EQ(ones_count_lsb_padding, ones_count_from_bits);
+  EXPECT_EQ(ones_count_msb_padding, ones_count_from_bits);
+
+  // Check this is also the same as the direct count of the original source bit
+  // vector.
+  int64_t set_in_bit_vector = std::count_if(
+      bit_vector.begin(), bit_vector.end(), [](bool bit) { return bit; });
+  EXPECT_EQ(ones_count_from_bits, set_in_bit_vector);
+}
+FUZZ_TEST(BitsFuzzTest, CompareBitsAndPushBufferData);
+
+void BM_BitsRopePushBack(benchmark::State& state) {
+  int64_t add_cnt = state.range(0);
+  Bits to_add = Bits::FromBytes(
+      std::vector<uint8_t>(CeilOfRatio<int64_t>(state.range(1), 8), 0b10101010),
+      state.range(1));
+  for (auto s : state) {
+    BitsRope rope(state.range(0) * state.range(1));
+    for (int64_t i = 0; i < add_cnt; ++i) {
+      rope.push_back(to_add);
+    }
+    Bits res = std::move(rope).Build();
+    state.PauseTiming();
+    benchmark::DoNotOptimize(res);
+    state.ResumeTiming();
+  }
+}
+
+// First pair is the number of elements to push second is the number of bits in
+// each element.
+BENCHMARK(BM_BitsRopePushBack)->RangePair(5, 500, 10, 2000);
+
+TEST(BitsTest, FuzzTestPrintSourceCode) {
+  auto to_src = [](const Bits& bits) {
+    std::string s;
+    FuzzTestPrintSourceCode(s, bits);
+    return s;
+  };
+  EXPECT_EQ(to_src(UBits(0, 0)), "UBits(0, 0)");
+  EXPECT_EQ(to_src(UBits(10, 8)), "UBits(10, 8)");
+  EXPECT_EQ(to_src(SBits(-1, 8)), "UBits(255, 8)");
+  Bits b65 = bits_ops::Concat({UBits(1, 1), UBits(0, 64)});
+  EXPECT_EQ(to_src(b65),
+            "Bits::FromBitmap(InlineBitmap::FromBytes(65, {0x00, 0x00, 0x00, "
+            "0x00, 0x00, 0x00, 0x00, 0x00, 0x01}))");
 }
 
 }  // namespace

@@ -19,10 +19,16 @@
 #include <queue>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
+#include "xls/common/status/status_macros.h"
 #include "xls/noc/simulation/common.h"
+#include "xls/noc/simulation/flit.h"
 #include "xls/noc/simulation/global_routing_table.h"
 #include "xls/noc/simulation/parameters.h"
+#include "xls/noc/simulation/simulator_shims.h"
 
 // This file contains classes used to store, access, and define simulation
 // objects.  Each network object (defined network_graph.h) is associated
@@ -32,41 +38,12 @@
 namespace xls {
 namespace noc {
 
-// Represents a phit being sent from a source to a sink (forward).
-struct DataPhit {
-  // TODO(tedhong) : 2020-01-24 - Convert to use Bits/DSLX structs.
-  // TODO(tedhong) : 2020-02-20 - Add fluent phit builder to initialize struct.
-  bool valid;
-  int16_t destination_index;
-  int16_t vc;
-  int64_t data;
-};
-
-// Associates a phit with a time (cycle).
-struct TimedDataPhit {
-  int64_t cycle;
-  DataPhit phit;
-};
-
-// Represents a phit being used for metadata (i.e. credits).
-struct MetadataPhit {
-  // TODO(tedhong) : 2020-01-24 - Convert to use Bits/DSLX structs.
-  bool valid;
-  int64_t data;
-};
-
-// Associates a metadata phit with a time (cycle).
-struct TimedMetadataPhit {
-  int64_t cycle;
-  MetadataPhit phit;
-};
-
 // Used to store the state of phits in-flight for a network.
 // It is associated with a ConnectionId which connects two ports.
 struct SimConnectionState {
   ConnectionId id;
-  TimedDataPhit forward_channels;
-  std::vector<TimedMetadataPhit> reverse_channels;
+  TimedDataFlit forward_channels;
+  std::vector<TimedMetadataFlit> reverse_channels;
 };
 
 // Used to store the valid credit available at a certain time.
@@ -75,17 +52,18 @@ struct CreditState {
   int64_t credit;
 };
 
+struct DataFlitQueueElement {
+  DataFlit flit;
+  TimedDataFlitInfo metadata;
+};
+
 // Represents a fifo/buffer used to store phits.
 struct DataFlitQueue {
-  std::queue<DataPhit> queue;
+  std::queue<DataFlitQueueElement> queue;
   int64_t max_queue_size;
 };
 
 // Represents a fifo/buffer used to store metadata phits.
-struct MetadataFlitQueue {
-  std::queue<MetadataPhit> queue;
-  int64_t max_queue_size;
-};
 
 class NocSimulator;
 
@@ -104,7 +82,7 @@ class SimNetworkComponentBase {
   bool Tick(NocSimulator& simulator);
 
   // Returns the associated NetworkComponentId.
-  NetworkComponentId GetId() { return id_; }
+  NetworkComponentId GetId() const { return id_; }
 
   virtual ~SimNetworkComponentBase() = default;
 
@@ -161,7 +139,7 @@ class SimNetworkComponentBase {
 
 // A pair of pipeline stages connecting two ports/network components.
 //
-// DataPhits are propagated forward, while MetaDataPhits are propagated
+// DataFlits are propagated forward, while MetaDataFlits are propagated
 // backwards.
 class SimLink : public SimNetworkComponentBase {
  public:
@@ -171,6 +149,11 @@ class SimLink : public SimNetworkComponentBase {
     XLS_RETURN_IF_ERROR(ret.Initialize(nc_id, simulator));
     return ret;
   }
+
+  // Get the source connection index that in used in the simulator.
+  int64_t GetSourceConnectionIndex() const;
+
+  // Get the sink connection index that in used in the simulator.
 
  private:
   SimLink() = default;
@@ -189,9 +172,11 @@ class SimLink : public SimNetworkComponentBase {
   int64_t src_connection_index_;
   int64_t sink_connection_index_;
 
-  std::queue<DataPhit> forward_data_stages_;
+  std::queue<TimedDataFlit> forward_data_stages_;
+  int64_t internal_forward_propagated_cycle_;
 
-  std::vector<std::queue<MetadataPhit>> reverse_credit_stages_;
+  std::vector<std::queue<TimedMetadataFlit>> reverse_credit_stages_;
+  std::vector<int64_t> internal_reverse_propagated_cycle_;
 };
 
 // Source - injects traffic into the network.
@@ -204,8 +189,8 @@ class SimNetworkInterfaceSrc : public SimNetworkComponentBase {
     return ret;
   }
 
-  // Register a phit to be sent at a specific time.
-  absl::Status SendPhitAtTime(TimedDataPhit phit);
+  // Register a flit to be sent at a specific time.
+  absl::Status SendFlitAtTime(TimedDataFlit flit);
 
  private:
   SimNetworkInterfaceSrc() = default;
@@ -217,7 +202,7 @@ class SimNetworkInterfaceSrc : public SimNetworkComponentBase {
   int64_t sink_connection_index_;
   std::vector<int64_t> credit_;
   std::vector<CreditState> credit_update_;
-  std::vector<std::queue<TimedDataPhit>> data_to_send_;
+  std::vector<std::queue<TimedDataFlit>> data_to_send_;
 };
 
 // Sink - traffic leaves the network via a sink.
@@ -232,8 +217,37 @@ class SimNetworkInterfaceSink : public SimNetworkComponentBase {
 
   // Returns all traffic received by this sink from the beginning
   // of the simulation.
-  absl::Span<const TimedDataPhit> GetReceivedTraffic() {
+  absl::Span<const TimedDataFlit> GetReceivedTraffic() {
     return received_traffic_;
+  }
+
+  // Returns the observed rate of traffic in MebiBytes Per Second from the
+  // beginning of simulation to the last flit processed by this sink.
+  //
+  // VC is used to filter out the traffic as received on a specific vc index.
+  // Negative VC is used to match any vc.
+  double MeasuredTrafficRateInMiBps(int64_t cycle_time_ps, int64_t vc = -1) {
+    // TODO(tedhong): 2021-07-01 Factor this logic out into common library.
+    int64_t num_bits = 0;
+    int64_t max_cycle = 0;
+    for (TimedDataFlit& f : received_traffic_) {
+      if (vc < 0) {
+        num_bits += f.flit.data_bit_count;
+      } else {
+        if (f.flit.vc == vc) {
+          num_bits += f.flit.data_bit_count;
+        }
+      }
+
+      if (max_cycle < f.cycle) {
+        max_cycle = f.cycle;
+      }
+    }
+
+    double total_sec = static_cast<double>(max_cycle + 1) *
+                       static_cast<double>(cycle_time_ps) * 1.0e-12;
+    double bits_per_sec = static_cast<double>(num_bits) / total_sec;
+    return bits_per_sec / 1024.0 / 1024.0 / 8.0;
   }
 
  private:
@@ -245,31 +259,31 @@ class SimNetworkInterfaceSink : public SimNetworkComponentBase {
 
   int64_t src_connection_index_;
   std::vector<DataFlitQueue> input_buffers_;
-  std::vector<TimedDataPhit> received_traffic_;
+  std::vector<TimedDataFlit> received_traffic_;
 };
 
-// Represents a input-buffered, fixed priority, credit-based, virtual-channel
+// Represents an input-buffered, fixed priority, credit-based, virtual-channel
 // router.
 //
-// This router implements a spcific type of router used by the simulator.
-// Additional routers are implemented ether as a separate class or
+// This router implements a specific type of router used by the simulator.
+// Additional routers are implemented either as a separate class or
 // by configuring this class.
 //
 // Specific features include
 //   - Input buffered - phits are buffered at the input.
-//   - Input bypass - a phit can enter the router and leave on the same cycle.
+//   - Input bypass - a flit can enter the router and leave on the same cycle.
 //   - Credits - the router keeps track of the absolute credit count and
 //               expects incremental updates from the components downstream.
 //             - credits are registered so there is a one-cycle delay
 //               from when the credit is received and the credit count
 //               updated.
 //             - the router likewise sends credit updates upstream.
-//   - Dedicated credit channels - Each vc is associated with an indepenendent
+//   - Dedicated credit channels - Each vc is associated with an independent
 //                                 channel for credit updates.
-//   - Output bufferless - once a phit is arbitrated for, the phit is
-//                         immediately transfered downstream.
+//   - Output bufferless - once a flit is arbitrated for, the flit is
+//                         immediately transferred downstream.
 //   - Fixed priority - a fixed priority scheme is implemented.
-// TODO(tedhong): 2021-01-31 - Add support for alternative prority scheme.
+// TODO(tedhong): 2021-01-31 - Add support for alternative priority scheme.
 class SimInputBufferedVCRouter : public SimNetworkComponentBase {
  public:
   static absl::StatusOr<SimInputBufferedVCRouter> Create(
@@ -278,6 +292,8 @@ class SimInputBufferedVCRouter : public SimNetworkComponentBase {
     XLS_RETURN_IF_ERROR(ret.Initialize(nc_id, simulator));
     return ret;
   }
+
+  int64_t GetUtilizationCycleCount() const;
 
  private:
   SimInputBufferedVCRouter() = default;
@@ -304,8 +320,8 @@ class SimInputBufferedVCRouter : public SimNetworkComponentBase {
   // Perform the routing function of this router.
   //
   // Returns a pair of <output_port_index, output_vc_index> -- the
-  // output port and vc a phit should go out on given the input port and vc
-  // along with the eventual phit destination.
+  // output port and vc a flit should go out on given the input port and vc
+  // along with the eventual flit destination.
   absl::StatusOr<PortIndexAndVCIndex> GetDestinationPortIndexAndVcIndex(
       NocSimulator& simulator, PortIndexAndVCIndex input,
       int64_t destination_index);
@@ -341,6 +357,9 @@ class SimInputBufferedVCRouter : public SimNetworkComponentBase {
   // Used by forward propagation to store the number of phits that left
   // the input buffers and hence credits that can be sent back upstream.
   std::vector<std::vector<int64_t>> input_credit_to_send_;
+
+  // The number of cycles that a transfer from input to output occurred.
+  int64_t utilization_cycle_count_;
 };
 
 // Main simulator class that drives the simulation and stores simulation
@@ -404,17 +423,9 @@ class NocSimulator {
 
   // Allocates and returns an index that can be used with
   // GetPortIdStore to retreive an array of size)
-  int64_t GetNewPortIdStore(int64_t size) {
-    int64_t next_start = port_id_store_.size();
-    port_id_store_.resize(next_start + size);
-    return next_start;
-  }
 
   // Returns a reference to the store previously reserved with
   // GetNewConnectionIndicesStore.
-  absl::Span<PortId> GetPortIdStore(int64_t start, int64_t size = 1) {
-    return absl::Span<PortId>(port_id_store_.data() + start, size);
-  }
 
   // Returns current/in-progress cycle;
   int64_t GetCurrentCycle() { return cycle_; }
@@ -428,6 +439,18 @@ class NocSimulator {
   // Runs a single tick of the simulator.
   bool Tick();
 
+  // Register a service to run once at the beginning of each cycle.
+  // TODO(tedhong): 2021-07-27 Add a scheme to provide a total order
+  //                of services.
+  void RegisterPreCycleService(NocSimulatorServiceShim& svc) {
+    pre_cycle_services_.push_back(&svc);
+  }
+
+  // Register a service to run once at the end of each cycle.
+  void RegisterPostCycleService(NocSimulatorServiceShim& svc) {
+    post_cycle_services_.push_back(&svc);
+  }
+
   // Returns corresponding simulation object for a src network component.
   absl::StatusOr<SimNetworkInterfaceSrc*> GetSimNetworkInterfaceSrc(
       NetworkComponentId src);
@@ -435,6 +458,12 @@ class NocSimulator {
   // Returns corresponding simulation object for a sink network component.
   absl::StatusOr<SimNetworkInterfaceSink*> GetSimNetworkInterfaceSink(
       NetworkComponentId sink);
+
+  // Returns the routers of the simulator.
+  absl::Span<const SimInputBufferedVCRouter> GetRouters() const;
+
+  // Returns the links of the simulator.
+  absl::Span<const SimLink> GetLinks() const;
 
  private:
   absl::Status CreateSimulationObjects(NetworkId network);
@@ -480,6 +509,12 @@ class NocSimulator {
   std::vector<SimNetworkInterfaceSrc> network_interface_sources_;
   std::vector<SimNetworkInterfaceSink> network_interface_sinks_;
   std::vector<SimInputBufferedVCRouter> routers_;
+
+  // Shims to services to run at the beginning of each cycle.
+  std::vector<NocSimulatorServiceShim*> pre_cycle_services_;
+
+  // Shims to services to run at the end of each cycle.
+  std::vector<NocSimulatorServiceShim*> post_cycle_services_;
 };
 
 }  // namespace noc

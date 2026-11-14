@@ -15,24 +15,21 @@
 // A module that imports a module with public module-level-constants and uses
 // those in expressions to bind new constants.
 
-import xls.dslx.tests.constexpr
+import xls.dslx.tests.constexpr;
 
 const CONST_1 = constexpr::CONST_1;
+
 const CONST_2 = constexpr::CONST_1 + constexpr::CONST_2;
+
 const CONST_3 = CONST_2 + constexpr::CONST_2;
 
-fn main() -> bits[32] {
-  CONST_1 + CONST_2 + CONST_3
-}
+fn main() -> bits[32] { CONST_1 + CONST_2 + CONST_3 }
 
-#![test]
+#[test]
 fn can_reference_constants_test() {
-  let _ = assert_eq(CONST_1, constexpr::CONST_1);
-  let _ = assert_eq(bits[32]:666, constexpr::CONST_1);
-  ()
+    assert_eq(CONST_1, constexpr::CONST_1);
+    assert_eq(bits[32]:666, constexpr::CONST_1);
 }
 
-#![test]
-fn can_add_constants_test() {
-  assert_eq(bits[32]:1332, constexpr::CONST_1 + CONST_1)
-}
+#[test]
+fn can_add_constants_test() { assert_eq(bits[32]:1332, constexpr::CONST_1 + CONST_1) }

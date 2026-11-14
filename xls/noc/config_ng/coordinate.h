@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef XLS_NOC_CONFIG_COORDINATE_H_
-#define XLS_NOC_CONFIG_COORDINATE_H_
+#ifndef XLS_NOC_CONFIG_NG_COORDINATE_H_
+#define XLS_NOC_CONFIG_NG_COORDINATE_H_
 
+#include <cstdint>
+#include <initializer_list>
+#include <optional>
 #include <vector>
 
-#include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "xls/data_structures/inline_bitmap.h"
 #include "xls/noc/config_ng/dimension_bounds.h"
@@ -60,7 +62,7 @@ class Coordinate {
   // coordinates [0, 2, 0] and [1, 2, 0], returns [true, false, false]. If the
   // number of dimension differ between the instance and the other coordinate,
   // nullopt is returned.
-  absl::optional<InlineBitmap> GetDifferentDimensionLocationsWith(
+  std::optional<InlineBitmap> GetDifferentDimensionLocationsWith(
       const Coordinate& coordinate) const;
 
   // Returns the sum of dimension indices that differ between the instance and
@@ -69,7 +71,7 @@ class Coordinate {
   // other coordinate differ along a dimension. For example, coordinates [0, 2,
   // 0] and [1, 2, 0], returns 1. If the number of dimension differ between the
   // instance and the other coordinate, nullopt is returned.
-  absl::optional<int64_t> GetNumDifferentDimensionLocationsWith(
+  std::optional<int64_t> GetNumDifferentDimensionLocationsWith(
       const Coordinate& coordinate) const;
 
   // Returns the index of the dimension that differs between the instance and
@@ -77,7 +79,7 @@ class Coordinate {
   // instance and the other coordinate. If one dimension index does not differ
   // between the instance and the other coordinate or if the dimension count
   // differs between the instance and the other coordinate, nullopt is returned.
-  absl::optional<int64_t> GetUniqueDifferentDimensionIndex(
+  std::optional<int64_t> GetUniqueDifferentDimensionIndex(
       const Coordinate& coordinate) const;
 
   // Returns true if the coordinates are equal. Otherwise, returns false.
@@ -96,4 +98,4 @@ class Coordinate {
 
 }  // namespace xls::noc
 
-#endif  // XLS_NOC_CONFIG_COORDINATE_H_
+#endif  // XLS_NOC_CONFIG_NG_COORDINATE_H_

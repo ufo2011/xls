@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef XLS_NOC_CONFIG_NETWORK_COMPONENT_H_
-#define XLS_NOC_CONFIG_NETWORK_COMPONENT_H_
+#ifndef XLS_NOC_CONFIG_NG_NETWORK_COMPONENT_H_
+#define XLS_NOC_CONFIG_NG_NETWORK_COMPONENT_H_
 
 #include <cstdint>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include "absl/status/status.h"
@@ -95,4 +97,4 @@ class NetworkComponent {
 
 }  // namespace xls::noc
 
-#endif  // XLS_NOC_CONFIG_NETWORK_COMPONENT_PORT_H_
+#endif  // XLS_NOC_CONFIG_NG_NETWORK_COMPONENT_H_

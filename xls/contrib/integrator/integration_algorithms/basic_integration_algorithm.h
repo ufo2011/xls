@@ -13,10 +13,22 @@
 // limitations under the License.
 // A abstract class for an algorithm to integrate multiple functions.
 
-#ifndef XLS_INTEGRATOR_BASIC_INTEGRATION_ALGORITHM_
-#define XLS_INTEGRATOR_BASIC_INTEGRATION_ALGORITHM_
+#ifndef XLS_CONTRIB_INTEGRATOR_INTEGRATION_ALGORITHMS_BASIC_INTEGRATION_ALGORITHM_H_
+#define XLS_CONTRIB_INTEGRATOR_INTEGRATION_ALGORITHMS_BASIC_INTEGRATION_ALGORITHM_H_
 
+#include <cstdint>
+#include <list>
+#include <memory>
+
+#include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "xls/contrib/integrator/integration_algorithms/integration_algorithm.h"
+#include "xls/contrib/integrator/integration_options.h"
+#include "xls/contrib/integrator/ir_integrator.h"
+#include "xls/ir/function.h"
+#include "xls/ir/node.h"
 
 namespace xls {
 
@@ -66,15 +78,15 @@ class BasicIntegrationAlgorithm
   }
 
   // Initialize member fields.
-  absl::Status Initialize();
+  absl::Status Initialize() override;
 
   // Returns a function that integrates the functions in source_functions_.
   // Runs after Initialize.
-  absl::StatusOr<std::unique_ptr<IntegrationFunction>> Run();
+  absl::StatusOr<std::unique_ptr<IntegrationFunction>> Run() override;
 
   // Get the IntegrationOptions::Algorithm value corresponding to
   // this algoirthm.
-  IntegrationOptions::Algorithm get_corresponding_algorithm_option() {
+  IntegrationOptions::Algorithm get_corresponding_algorithm_option() override {
     return IntegrationOptions::Algorithm::kBasicIntegrationAlgorithm;
   }
 
@@ -95,4 +107,4 @@ class BasicIntegrationAlgorithm
 
 }  // namespace xls
 
-#endif  // XLS_INTEGRATOR_BASIC_INTEGRATION_ALGORITHM_
+#endif  // XLS_CONTRIB_INTEGRATOR_INTEGRATION_ALGORITHMS_BASIC_INTEGRATION_ALGORITHM_H_

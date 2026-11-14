@@ -1,4 +1,3 @@
-# Lint as: python3
 #
 # Copyright 2020 The XLS Authors
 #
@@ -22,7 +21,8 @@ from xls.common import runfiles
 from xls.common import test_base
 
 RUN_FUZZ_MULTIPROCESS_PATH = runfiles.get_path(
-    'xls/fuzzer/run_fuzz_multiprocess')
+    'xls/fuzzer/run_fuzz_multiprocess'
+)
 
 
 class RunFuzzMultiprocessTest(test_base.TestCase):
@@ -32,21 +32,27 @@ class RunFuzzMultiprocessTest(test_base.TestCase):
     samples_path = self.create_tempdir().full_path
 
     subprocess.check_call([
-        RUN_FUZZ_MULTIPROCESS_PATH, '--seed=42', '--crash_path=' + crasher_path,
-        '--save_temps_path=' + samples_path, '--sample_count=2',
-        '--calls_per_sample=3', '--worker_count=1'
+        RUN_FUZZ_MULTIPROCESS_PATH,
+        '--seed=42',
+        '--crash_path=' + crasher_path,
+        '--save_temps_path=' + samples_path,
+        '--sample_count=2',
+        '--calls_per_sample=3',
+        '--worker_count=1',
     ])
     # Crasher path should contain a single file 'test'.
     self.assertSequenceEqual(os.listdir(crasher_path), ('test',))
 
     # Sample path should have two samples in it.
-    self.assertSequenceEqual(sorted(os.listdir(samples_path)), ('0', '1'))
+    self.assertSequenceEqual(
+        sorted(os.listdir(samples_path)), ('worker0-sample0', 'worker0-sample1')
+    )
 
-    # Sanity check sample 1 directory.
-    sample1_contents = os.listdir(os.path.join(samples_path, '1'))
+    # Validate sample 1 directory.
+    sample1_contents = os.listdir(os.path.join(samples_path, 'worker0-sample0'))
     self.assertIn('sample.x', sample1_contents)
     self.assertIn('sample.x.results', sample1_contents)
-    self.assertIn('args.txt', sample1_contents)
+    self.assertIn('testvector.pbtxt', sample1_contents)
     self.assertIn('sample.ir', sample1_contents)
     self.assertIn('sample.ir.results', sample1_contents)
     self.assertIn('sample.opt.ir', sample1_contents)
@@ -54,40 +60,139 @@ class RunFuzzMultiprocessTest(test_base.TestCase):
 
     # Codegen was not enabled so there should be no Verilog file.
     self.assertNotIn('sample.v', sample1_contents)
-
-    # Args file should have three lines in it.
-    with open(os.path.join(samples_path, '1', 'args.txt')) as f:
-      self.assertEqual(len(f.read().strip().splitlines()), 3)
+    self.assertNotIn('sample.sv', sample1_contents)
 
   def test_multiple_workers(self):
     crasher_path = self.create_tempdir().full_path
     samples_path = self.create_tempdir().full_path
 
     subprocess.check_call([
-        RUN_FUZZ_MULTIPROCESS_PATH, '--seed=42', '--crash_path=' + crasher_path,
-        '--save_temps_path=' + samples_path, '--sample_count=20',
-        '--calls_per_sample=3', '--worker_count=10'
+        RUN_FUZZ_MULTIPROCESS_PATH,
+        '--seed=42',
+        '--crash_path=' + crasher_path,
+        '--save_temps_path=' + samples_path,
+        '--sample_count=25',
+        '--calls_per_sample=3',
+        '--worker_count=10',
     ])
 
-    # Sample path should have 20 samples in it.
-    self.assertSequenceEqual(
-        sorted(os.listdir(samples_path)), sorted((str(i) for i in range(20))))
+    sample_dirs = os.listdir(samples_path)
+
+    # Sample directory should have 25 samples in it.
+    self.assertEqual(len(sample_dirs), 25)
+
+    # Should be samples from each worker.
+    for i in range(10):
+      self.assertTrue(
+          any(d.startswith('worker{}'.format(i)) for d in sample_dirs)
+      )
+
+    # Crasher path should contain a single file 'test'.
+    self.assertSequenceEqual(os.listdir(crasher_path), ('test',))
+
+  def test_crashers_on_failure(self):
+    crasher_path = self.create_tempdir().full_path
+
+    subprocess.check_call([
+        RUN_FUZZ_MULTIPROCESS_PATH,
+        '--seed=42',
+        '--crash_path=' + crasher_path,
+        '--sample_count=5',
+        '--calls_per_sample=3',
+        '--worker_count=3',
+        '--force_failure',
+    ])
+
+    # Crasher directory should have 5 samples in it plus the `test` file.
+    self.assertEqual(len(os.listdir(crasher_path)), 6)
+
+  def test_duration(self):
+    samples_path = self.create_tempdir().full_path
+    crasher_path = self.create_tempdir().full_path
+
+    subprocess.check_call([
+        RUN_FUZZ_MULTIPROCESS_PATH,
+        '--seed=42',
+        '--crash_path=' + crasher_path,
+        '--save_temps_path=' + samples_path,
+        '--duration=30s',
+        '--calls_per_sample=3',
+        '--worker_count=3',
+    ])
+
+    # Samples directory should have at least one sample in it.
+    self.assertGreater(len(os.listdir(samples_path)), 0)
 
   def test_codegen_and_simulate(self):
     crasher_path = self.create_tempdir().full_path
     samples_path = self.create_tempdir().full_path
 
     subprocess.check_call([
-        RUN_FUZZ_MULTIPROCESS_PATH, '--seed=42', '--crash_path=' + crasher_path,
-        '--save_temps_path=' + samples_path, '--sample_count=2',
-        '--calls_per_sample=3', '--worker_count=1', '--codegen', '--simulate',
-        '--nouse_system_verilog'
+        RUN_FUZZ_MULTIPROCESS_PATH,
+        '--seed=42',
+        '--crash_path=' + crasher_path,
+        '--save_temps_path=' + samples_path,
+        '--sample_count=2',
+        '--calls_per_sample=3',
+        '--worker_count=1',
+        '--codegen',
+        '--simulate',
+        '--nouse_system_verilog',
     ])
-    # Sanity check sample 1 directory.
-    sample1_contents = os.listdir(os.path.join(samples_path, '1'))
+    # Validate sample 1 directory.
+    sample1_contents = os.listdir(os.path.join(samples_path, 'worker0-sample0'))
     self.assertIn('sample.x', sample1_contents)
     self.assertIn('sample.x.results', sample1_contents)
-    self.assertIn('args.txt', sample1_contents)
+    self.assertIn('testvector.pbtxt', sample1_contents)
+    self.assertIn('sample.ir', sample1_contents)
+    self.assertIn('sample.ir.results', sample1_contents)
+    self.assertIn('sample.opt.ir', sample1_contents)
+    self.assertIn('sample.opt.ir.results', sample1_contents)
+    # Directory should have verilog and simulation results.
+    self.assertIn('sample.v', sample1_contents)
+    self.assertIn('sample.v.results', sample1_contents)
+
+  def test_codegen_systemverilog(self):
+    crasher_path = self.create_tempdir().full_path
+    samples_path = self.create_tempdir().full_path
+
+    subprocess.check_call([
+        RUN_FUZZ_MULTIPROCESS_PATH,
+        '--seed=42',
+        '--crash_path=' + crasher_path,
+        '--save_temps_path=' + samples_path,
+        '--sample_count=2',
+        '--calls_per_sample=3',
+        '--worker_count=1',
+        '--codegen',
+        '--use_system_verilog',
+    ])
+    # Directory should a system verilog file.
+    sample1_contents = os.listdir(os.path.join(samples_path, 'worker0-sample0'))
+    self.assertIn('sample.sv', sample1_contents)
+
+  def test_codegen_and_simulate_with_proc(self):
+    crasher_path = self.create_tempdir().full_path
+    samples_path = self.create_tempdir().full_path
+
+    subprocess.check_call([
+        RUN_FUZZ_MULTIPROCESS_PATH,
+        '--seed=42',
+        '--crash_path=' + crasher_path,
+        '--save_temps_path=' + samples_path,
+        '--sample_count=2',
+        '--generate_proc',
+        '--proc_ticks=3',
+        '--worker_count=1',
+        '--codegen',
+        '--simulate',
+        '--nouse_system_verilog',
+    ])
+    # Validate sample 1 directory.
+    sample1_contents = os.listdir(os.path.join(samples_path, 'worker0-sample0'))
+    self.assertIn('sample.x', sample1_contents)
+    self.assertIn('sample.x.results', sample1_contents)
+    self.assertIn('testvector.pbtxt', sample1_contents)
     self.assertIn('sample.ir', sample1_contents)
     self.assertIn('sample.ir.results', sample1_contents)
     self.assertIn('sample.opt.ir', sample1_contents)

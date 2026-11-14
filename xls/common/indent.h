@@ -17,13 +17,15 @@
 
 #include <cstdint>
 #include <string>
-
-#include "absl/strings/string_view.h"
+#include <string_view>
 
 namespace xls {
 
+constexpr int kDefaultIndentSpaces = 2;
+
 // Indents every line in "text" by the given number of spaces.
-std::string Indent(absl::string_view text, int64_t spaces = 2);
+std::string Indent(std::string_view text,
+                   int64_t spaces = kDefaultIndentSpaces);
 
 }  // namespace xls
 

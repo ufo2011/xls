@@ -14,15 +14,31 @@
 
 #include "xls/ir/value.h"
 
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
 #include "absl/algorithm/container.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
-#include "xls/common/logging/logging.h"
+#include "absl/types/span.h"
+#include "xls/common/math_util.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
-#include "re2/re2.h"
+#include "xls/data_structures/inline_bitmap.h"
+#include "xls/ir/bit_push_buffer.h"
+#include "xls/ir/bits.h"
+#include "xls/ir/bits_ops.h"
+#include "xls/ir/format_preference.h"
+#include "xls/ir/xls_type.pb.h"
+#include "xls/ir/xls_value.pb.h"
 
 namespace xls {
 
@@ -138,33 +154,38 @@ std::string ValueKindToString(ValueKind kind) {
 int64_t Value::GetFlatBitCount() const {
   if (kind() == ValueKind::kBits) {
     return bits().bit_count();
-  } else if (kind() == ValueKind::kTuple) {
+  }
+  if (kind() == ValueKind::kToken) {
+    return 0;
+  }
+  if (kind() == ValueKind::kTuple) {
     int64_t total_size = 0;
     for (const Value& e : elements()) {
       total_size += e.GetFlatBitCount();
     }
     return total_size;
-  } else if (kind() == ValueKind::kArray) {
+  }
+  if (kind() == ValueKind::kArray) {
     if (empty()) {
       return 0;
     }
     return size() * element(0).GetFlatBitCount();
-  } else {
-    XLS_LOG(FATAL) << "Invalid value kind: " << kind();
   }
+  LOG(FATAL) << "Invalid value kind: " << kind();
 }
 
 bool Value::IsAllZeros() const {
   if (kind() == ValueKind::kBits) {
     return bits().IsZero();
-  } else if (kind() == ValueKind::kTuple || kind() == ValueKind::kArray) {
+  }
+  if (kind() == ValueKind::kTuple || kind() == ValueKind::kArray) {
     for (const Value& e : elements()) {
       if (!e.IsAllZeros()) {
         return false;
       }
     }
   } else {
-    XLS_LOG(FATAL) << "Invalid value kind: " << kind();
+    LOG(FATAL) << "Invalid value kind: " << kind();
   }
   return true;
 }
@@ -172,14 +193,15 @@ bool Value::IsAllZeros() const {
 bool Value::IsAllOnes() const {
   if (kind() == ValueKind::kBits) {
     return bits().IsAllOnes();
-  } else if (kind() == ValueKind::kTuple || kind() == ValueKind::kArray) {
+  }
+  if (kind() == ValueKind::kTuple || kind() == ValueKind::kArray) {
     for (const Value& e : elements()) {
       if (!e.IsAllOnes()) {
         return false;
       }
     }
   } else {
-    XLS_LOG(FATAL) << "Invalid value kind: " << kind();
+    LOG(FATAL) << "Invalid value kind: " << kind();
   }
   return true;
 }
@@ -190,7 +212,7 @@ std::string Value::ToString(FormatPreference preference) const {
       return "<invalid value>";
     case ValueKind::kBits:
       return absl::StrFormat("bits[%d]:%s", bits().bit_count(),
-                             bits().ToString(preference));
+                             BitsToString(bits(), preference));
     case ValueKind::kTuple:
       return absl::StrCat(
           "(",
@@ -210,7 +232,7 @@ std::string Value::ToString(FormatPreference preference) const {
     case ValueKind::kToken:
       return "token";
   }
-  XLS_LOG(FATAL) << "Value has invalid kind: " << static_cast<int>(kind_);
+  LOG(FATAL) << "Value has invalid kind: " << static_cast<int>(kind_);
 }
 
 void Value::FlattenTo(BitPushBuffer* buffer) const {
@@ -225,14 +247,50 @@ void Value::FlattenTo(BitPushBuffer* buffer) const {
       }
       return;
     case ValueKind::kToken:
+      // Zero-bit encoding.
+      return;
     case ValueKind::kInvalid:
       break;
   }
-  XLS_LOG(FATAL) << "Invalid value kind: " << ValueKindToString(kind_);
+  LOG(FATAL) << "Invalid value kind: " << ValueKindToString(kind_);
+}
+
+absl::Status Value::PopulateFrom(BitmapView bitmap) {
+  switch (kind_) {
+    case ValueKind::kBits:
+      payload_ = Bits::FromBitmapView(bitmap);
+      return absl::OkStatus();
+    case ValueKind::kTuple:
+    case ValueKind::kArray: {
+      // Note: when we were pushing bits into the BitPushBuffer in FlattenTo()
+      // we were making the 0th element the most significant bits. That means
+      // that here we have to slice from the most significant bits for element 0
+      // and least significant bits for the last element.
+      //
+      // Here we iterate through values in reverse order so that the bit slicing
+      // can ascend from least significant bit up to most significant bit.
+      auto& values = std::get<std::vector<Value>>(payload_);
+      int64_t bit_index = 0;
+      for (int64_t i = values.size() - 1; i >= 0; --i) {
+        int64_t element_bit_count = values[i].GetFlatBitCount();
+        XLS_RETURN_IF_ERROR(
+            values[i].PopulateFrom(bitmap.Slice(bit_index, element_bit_count)));
+        bit_index += element_bit_count;
+      }
+      XLS_RET_CHECK_EQ(bit_index, bitmap.bit_count());
+      return absl::OkStatus();
+    }
+    case ValueKind::kToken:
+      // No information encoded in the bitmap for a token.
+      return absl::OkStatus();
+    case ValueKind::kInvalid:
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Cannot populate value of kind: %s", ValueKindToString(kind_)));
+  }
 }
 
 absl::StatusOr<std::vector<Value>> Value::GetElements() const {
-  if (!absl::holds_alternative<std::vector<Value>>(payload_)) {
+  if (!std::holds_alternative<std::vector<Value>>(payload_)) {
     return absl::InvalidArgumentError("Value does not hold elements.");
   }
   return std::vector<Value>(elements().begin(), elements().end());
@@ -251,7 +309,7 @@ std::string Value::ToHumanString(FormatPreference preference) const {
     case ValueKind::kInvalid:
       return "<invalid value>";
     case ValueKind::kBits:
-      return bits().ToString(preference);
+      return BitsToString(bits(), preference);
     case ValueKind::kArray:
       return absl::StrCat("[",
                           absl::StrJoin(elements(), ", ",
@@ -271,7 +329,7 @@ std::string Value::ToHumanString(FormatPreference preference) const {
     case ValueKind::kToken:
       return "token";
   }
-  XLS_LOG(FATAL) << "Invalid value kind: " << ValueKindToString(kind_);
+  LOG(FATAL) << "Invalid value kind: " << ValueKindToString(kind_);
 }
 
 bool Value::SameTypeAs(const Value& other) const {
@@ -299,7 +357,109 @@ bool Value::SameTypeAs(const Value& other) const {
     case ValueKind::kInvalid:
       break;
   }
-  XLS_LOG(FATAL) << "Invalid value encountered: " << ValueKindToString(kind());
+  LOG(FATAL) << "Invalid value encountered: " << ValueKindToString(kind());
+}
+
+absl::StatusOr<ValueProto> Value::AsProto() const {
+  ValueProto v;
+  switch (kind()) {
+    case ValueKind::kBits: {
+      ValueProto::Bits* proto_bits = v.mutable_bits();
+      proto_bits->set_bit_count(bits().bit_count());
+      std::vector<uint8_t> bytes = bits().ToBytes();
+      proto_bits->mutable_data()->resize(bytes.size());
+      memcpy(proto_bits->mutable_data()->data(), bytes.data(), bytes.size());
+      break;
+    }
+    case ValueKind::kTuple: {
+      ValueProto::Tuple* tuple = v.mutable_tuple();
+      for (const Value& e : elements()) {
+        XLS_ASSIGN_OR_RETURN(*tuple->add_elements(), e.AsProto());
+      }
+      break;
+    }
+    case ValueKind::kArray: {
+      ValueProto::Array* array = v.mutable_array();
+      for (const Value& e : elements()) {
+        XLS_ASSIGN_OR_RETURN(*array->add_elements(), e.AsProto());
+      }
+      break;
+    }
+    case ValueKind::kToken:
+      v.mutable_token();
+      break;
+    case ValueKind::kInvalid:
+      return absl::InternalError("Cannot serialize an invalid value");
+  }
+  return v;
+}
+
+namespace {
+absl::Span<const uint8_t> StrToU8Span(const std::string& s) {
+  return absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(s.data()),
+                                   s.size());
+}
+}  // namespace
+
+absl::StatusOr<Value> Value::FromProto(const ValueProto& proto,
+                                       int64_t max_bit_size) {
+  switch (proto.variant_case()) {
+    case ValueProto::kBits: {
+      if (proto.bits().bit_count() <= 0) {
+        return absl::InvalidArgumentError(
+            absl::StrFormat("Bit count must be at least 1 but was %d",
+                            proto.bits().bit_count()));
+      }
+      if (proto.bits().bit_count() >= max_bit_size) {
+        return absl::InternalError(absl::StrFormat(
+            "Bit value is too large with %d bits", proto.bits().bit_count()));
+      }
+      std::string data_copy;
+      absl::Span<const uint8_t> data;
+      int64_t byte_size = CeilOfRatio(proto.bits().bit_count(), int64_t{8});
+      if (byte_size == proto.bits().data().size()) {
+        data = StrToU8Span(proto.bits().data());
+      } else {
+        data_copy = proto.bits().data();
+        data_copy.resize(byte_size, '\0');
+        data = StrToU8Span(data_copy);
+      }
+      return Value(Bits::FromBytes(data, proto.bits().bit_count()));
+    }
+    case ValueProto::kTuple: {
+      std::vector<Value> values;
+      values.reserve(proto.tuple().elements_size());
+      for (const ValueProto& e : proto.tuple().elements()) {
+        XLS_ASSIGN_OR_RETURN(Value element, Value::FromProto(e, max_bit_size));
+        values.push_back(element);
+      }
+      return Value::TupleOwned(std::move(values));
+    }
+    case ValueProto::kToken: {
+      return Value::Token();
+    }
+    case ValueProto::kArray: {
+      if (proto.array().elements_size() == 0) {
+        return absl::InvalidArgumentError("empty arrays are not supported.");
+      }
+      std::vector<Value> values;
+      values.reserve(proto.array().elements_size());
+      for (const ValueProto& e : proto.array().elements()) {
+        XLS_ASSIGN_OR_RETURN(Value element, Value::FromProto(e, max_bit_size));
+        values.push_back(element);
+        if (values.size() != 1 && !values.front().SameTypeAs(values.back())) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Multiple different value types in array. Value %s does not "
+              "match %s",
+              values.back().ToString(), values.front().ToString()));
+        }
+      }
+      return Value::ArrayOwned(std::move(values));
+    }
+    case ValueProto::VARIANT_NOT_SET:
+      return absl::InvalidArgumentError(
+          absl::StrFormat("Unpopulated value proto: %v", proto.DebugString()));
+  }
 }
 
 absl::StatusOr<TypeProto> Value::TypeAsProto() const {

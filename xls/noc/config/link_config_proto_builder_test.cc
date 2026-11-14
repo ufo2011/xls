@@ -14,8 +14,11 @@
 
 #include "xls/noc/config/link_config_proto_builder.h"
 
+#include <cstdint>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "xls/noc/config/network_config.pb.h"
 
 namespace xls::noc {
 
@@ -23,7 +26,7 @@ namespace xls::noc {
 // name, the sink port name, the phit bit width, the number of pipeline stage
 // between the source and the sink, and, the number of pipeline stage between
 // the sink and the source.
-LinkConfigProtoBuilder& PopulateFields(LinkConfigProtoBuilder& builder) {
+static LinkConfigProtoBuilder& PopulateFields(LinkConfigProtoBuilder& builder) {
   builder.WithSourcePort("Source");
   builder.WithSinkPort("Sink");
   builder.WithPhitBitWidth(42);

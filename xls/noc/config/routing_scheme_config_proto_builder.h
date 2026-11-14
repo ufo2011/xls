@@ -15,7 +15,7 @@
 #ifndef XLS_NOC_CONFIG_ROUTING_SCHEME_CONFIG_PROTO_BUILDER_H_
 #define XLS_NOC_CONFIG_ROUTING_SCHEME_CONFIG_PROTO_BUILDER_H_
 
-#include "xls/common/logging/logging.h"
+#include "absl/log/die_if_null.h"
 #include "xls/noc/config/network_config.pb.h"
 #include "xls/noc/config/network_config_proto_builder_utils.h"
 
@@ -25,9 +25,9 @@ namespace xls::noc {
 class RoutingSchemeConfigProtoBuilder {
  public:
   // proto cannot be nullptr.
-  RoutingSchemeConfigProtoBuilder(
+  explicit RoutingSchemeConfigProtoBuilder(
       RouterConfigProto::RoutingSchemeConfigProto* proto)
-      : proto_(XLS_DIE_IF_NULL(proto)) {}
+      : proto_(ABSL_DIE_IF_NULL(proto)) {}
 
   // If the distributed routing scheme is not enabled, it enables the
   // distributed routing scheme, and disables any routing scheme enabled. In

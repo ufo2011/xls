@@ -51,10 +51,10 @@ class IrEdge {
     this.id = jsonEdge['id'];
 
     /** @const {string} */
-    this.source = jsonEdge['source'];
+    this.sourceId = jsonEdge['source_id'];
 
     /** @const {string} */
-    this.target = jsonEdge['target'];
+    this.targetId = jsonEdge['target_id'];
 
     /** @const {string} */
     this.type = jsonEdge['type'];
@@ -66,7 +66,7 @@ class IrEdge {
 
 /**
  * Abstract representation of the IR graph of an XLS function. Includes nodes
- * (operations), edges (depencies), and some metadata about each.
+ * (operations), edges (dependencies), and some metadata about each.
  */
 class IrGraph {
   /**
@@ -109,16 +109,17 @@ class IrGraph {
       this.neighborNodeIds_[node.id] = [];
     }
 
-    for (let e of jsonGraph['edges']) {
+    // The graph may have no edges ('edges' property undefined).
+    for (let e of (jsonGraph['edges'] || [])) {
       let edge = new IrEdge(e);
       this.edges_.push(edge);
       this.edgeById_[edge.id] = edge;
 
-      if (!this.neighborNodeIds_[edge.source].includes(edge.target)) {
-        this.neighborNodeIds_[edge.source].push(edge.target);
+      if (!this.neighborNodeIds_[edge.sourceId].includes(edge.targetId)) {
+        this.neighborNodeIds_[edge.sourceId].push(edge.targetId);
       }
-      if (!this.neighborNodeIds_[edge.target].includes(edge.source)) {
-        this.neighborNodeIds_[edge.target].push(edge.source);
+      if (!this.neighborNodeIds_[edge.targetId].includes(edge.sourceId)) {
+        this.neighborNodeIds_[edge.targetId].push(edge.sourceId);
       }
     }
   }

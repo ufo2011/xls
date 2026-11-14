@@ -1,0 +1,486 @@
+// Copyright 2024 The XLS Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "xls/dslx/type_system_v2/import_utils.h"
+
+#include <iterator>
+#include <optional>
+#include <variant>
+#include <vector>
+
+#include "absl/algorithm/container.h"
+#include "absl/base/casts.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_format.h"
+#include "absl/strings/substitute.h"
+#include "absl/types/optional_ref.h"
+#include "xls/common/status/ret_check.h"
+#include "xls/common/status/status_macros.h"
+#include "xls/dslx/errors.h"
+#include "xls/dslx/frontend/ast.h"
+#include "xls/dslx/frontend/ast_node_visitor_with_default.h"
+#include "xls/dslx/frontend/ast_utils.h"
+#include "xls/dslx/frontend/builtin_stubs_utils.h"
+#include "xls/dslx/frontend/module.h"
+#include "xls/dslx/frontend/pos.h"
+#include "xls/dslx/import_data.h"
+#include "xls/dslx/import_routines.h"
+#include "xls/dslx/type_system/type.h"
+#include "xls/dslx/type_system/type_info.h"
+#include "xls/dslx/type_system_v2/type_annotation_utils.h"
+
+namespace xls::dslx {
+namespace {
+
+// Recursive visitor that unwraps a possible chain of type aliasing leading to a
+// struct, impl-style proc, or enum def. After visiting a subtree, the result
+// can be obtained by calling `GetStructOrProcRef` or `GetEnumDef`.
+class TypeRefUnwrapper : public AstNodeVisitorWithDefault {
+ public:
+  explicit TypeRefUnwrapper(const ImportData& import_data,
+                            bool include_generic = false)
+      : mutable_import_data_(nullptr),
+        import_data_(import_data),
+        include_generic_(include_generic) {}
+
+  TypeRefUnwrapper(ImportData& import_data,
+                   const TypecheckModuleFn& typecheck_imported_module,
+                   bool include_generic = false)
+      : mutable_import_data_(&import_data),
+        import_data_(import_data),
+        include_generic_(include_generic),
+        typecheck_imported_module_(typecheck_imported_module) {}
+
+  absl::Status HandleColonRef(const ColonRef* colon_ref) override {
+    XLS_ASSIGN_OR_RETURN(
+        absl::optional_ref<ModuleInfo> import_module,
+        (mutable_import_data_ != nullptr &&
+         typecheck_imported_module_.has_value())
+            ? GetImportedModuleInfo(colon_ref, *mutable_import_data_,
+                                    *typecheck_imported_module_)
+            : GetImportedModuleInfo(colon_ref, import_data_));
+    if (import_module.has_value()) {
+      XLS_ASSIGN_OR_RETURN(
+          ModuleMember member,
+          GetPublicModuleMember(import_module->module(), colon_ref,
+                                import_data_.file_table()));
+      return ToAstNode(member)->Accept(this);
+    }
+    // The entire `ColonRef` is not a struct reference otherwise. We don't want
+    // to produce anything for a `ColonRef` to a member of a struct.
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleTypeAlias(const TypeAlias* alias) override {
+    return alias->type_annotation().Accept(this);
+  }
+
+  absl::Status HandleTypeVariableTypeAnnotation(
+      const TypeVariableTypeAnnotation* annotation) override {
+    type_variable_type_annotation_ = annotation;
+    return annotation->type_variable()->Accept(this);
+  }
+
+  absl::Status HandleTypeRefTypeAnnotation(
+      const TypeRefTypeAnnotation* annotation) override {
+    if (!annotation->parametrics().empty() && !parametrics_.empty()) {
+      return TypeInferenceErrorStatus(
+          annotation->span(), /* type= */ nullptr,
+          absl::StrFormat(
+              "Parametric values defined multiple times for annotation: `%s`",
+              annotation->ToString()),
+          import_data_.file_table());
+    }
+
+    if (!type_ref_type_annotation_.has_value()) {
+      type_ref_type_annotation_ = annotation;
+    }
+    if (!annotation->parametrics().empty()) {
+      parametrics_ = annotation->parametrics();
+    }
+    if (!instantiator_.has_value()) {
+      instantiator_ = annotation->instantiator();
+    }
+    return ToAstNode(annotation->type_ref()->type_definition())->Accept(this);
+  }
+
+  absl::Status HandleGenericTypeAnnotation(
+      const GenericTypeAnnotation* annotation) override {
+    is_generic_ = true;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleSelfTypeAnnotation(
+      const SelfTypeAnnotation* annotation) override {
+    if (annotation->struct_ref() != nullptr) {
+      return annotation->struct_ref()->Accept(this);
+    }
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleProcDef(const ProcDef* def) override {
+    type_def_ = const_cast<ProcDef*>(def);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleStructDef(const StructDef* def) override {
+    type_def_ = const_cast<StructDef*>(def);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleEnumDef(const EnumDef* def) override {
+    type_def_ = const_cast<EnumDef*>(def);
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleNameDef(const NameDef* name_def) override {
+    if (name_def->definer() != nullptr) {
+      return name_def->definer()->Accept(this);
+    }
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleNameRef(const NameRef* name_ref) override {
+    return ToAstNode(name_ref->name_def())->Accept(this);
+  }
+
+  std::optional<const TypeVariableTypeAnnotation*>
+  GetTypeVariableTypeAnnotation() {
+    return type_variable_type_annotation_;
+  }
+
+  std::optional<StructOrProcRef> GetStructOrProcRef() {
+    if (!(include_generic_ && is_generic_) &&
+        (!type_def_.has_value() ||
+         (!std::holds_alternative<StructDef*>(*type_def_) &&
+          !std::holds_alternative<ProcDef*>(*type_def_)))) {
+      return std::nullopt;
+    }
+    return StructOrProcRef{
+        .def = type_def_.has_value()
+                   ? absl::down_cast<StructDefBase*>(ToAstNode(*type_def_))
+                   : nullptr,
+        .parametrics = parametrics_,
+        .instantiator = instantiator_,
+        .type_ref_type_annotation = type_ref_type_annotation_,
+        .is_generic = is_generic_,
+    };
+  }
+
+  std::optional<const EnumDef*> GetEnumDef() {
+    return type_def_.has_value() && std::holds_alternative<EnumDef*>(*type_def_)
+               ? std::make_optional(std::get<EnumDef*>(*type_def_))
+               : std::nullopt;
+  }
+
+ private:
+  ImportData* mutable_import_data_;
+  const ImportData& import_data_;
+  bool include_generic_;
+  std::optional<TypecheckModuleFn> typecheck_imported_module_;
+
+  // These fields get populated as we visit nodes.
+  std::vector<ExprOrType> parametrics_;
+  std::optional<TypeDefinition> type_def_;
+  std::optional<const TypeRefTypeAnnotation*> type_ref_type_annotation_;
+  std::optional<const TypeVariableTypeAnnotation*>
+      type_variable_type_annotation_;
+
+  std::optional<const StructInstanceBase*> instantiator_;
+  bool is_generic_ = false;
+};
+
+}  // namespace
+
+absl::StatusOr<std::optional<StructOrProcRef>> GetStructOrProcRef(
+    const TypeAnnotation* annotation, const ImportData& import_data,
+    bool include_generic) {
+  if (!annotation->IsAnnotation<TypeRefTypeAnnotation>() &&
+      !annotation->IsAnnotation<TypeVariableTypeAnnotation>() &&
+      !annotation->IsAnnotation<SelfTypeAnnotation>()) {
+    return std::nullopt;
+  }
+  TypeRefUnwrapper unwrapper(import_data, include_generic);
+  XLS_RETURN_IF_ERROR(annotation->Accept(&unwrapper));
+  return unwrapper.GetStructOrProcRef();
+}
+
+absl::StatusOr<std::optional<StructOrProcRef>> GetStructOrProcRef(
+    const TypeAnnotation* annotation, ImportData& import_data,
+    const TypecheckModuleFn& typecheck_imported_module, bool include_generic) {
+  if (!annotation->IsAnnotation<TypeRefTypeAnnotation>() &&
+      !annotation->IsAnnotation<TypeVariableTypeAnnotation>() &&
+      !annotation->IsAnnotation<SelfTypeAnnotation>()) {
+    return std::nullopt;
+  }
+  TypeRefUnwrapper unwrapper(import_data, typecheck_imported_module,
+                             include_generic);
+  XLS_RETURN_IF_ERROR(annotation->Accept(&unwrapper));
+  return unwrapper.GetStructOrProcRef();
+}
+
+absl::StatusOr<std::optional<StructOrProcRef>> GetStructOrProcRefForSubject(
+    const ColonRef* ref, const ImportData& import_data) {
+  TypeRefUnwrapper unwrapper(import_data);
+  XLS_RETURN_IF_ERROR(ToAstNode(ref->subject())->Accept(&unwrapper));
+  return unwrapper.GetStructOrProcRef();
+}
+
+absl::StatusOr<std::optional<const TypeVariableTypeAnnotation*>>
+GetTypeVariableTypeAnnotationForSubject(const ColonRef* ref,
+                                        const ImportData& import_data) {
+  TypeRefUnwrapper unwrapper(import_data);
+  XLS_RETURN_IF_ERROR(ToAstNode(ref->subject())->Accept(&unwrapper));
+  return unwrapper.GetTypeVariableTypeAnnotation();
+}
+
+absl::StatusOr<absl::optional_ref<ModuleInfo>> GetImportedModuleInfo(
+    const ColonRef* colon_ref, const ImportData& import_data) {
+  std::optional<ImportSubject> subject = colon_ref->ResolveImportSubject();
+  if (subject.has_value() && std::holds_alternative<Import*>(*subject)) {
+    Import* import = std::get<Import*>(*subject);
+    XLS_ASSIGN_OR_RETURN(ModuleInfo * module_info,
+                         import_data.Get(ImportTokens(import->subject())));
+    return *module_info;
+  }
+  return std::nullopt;
+}
+
+absl::StatusOr<absl::optional_ref<ModuleInfo>> GetImportedModuleInfo(
+    const ColonRef* colon_ref, ImportData& import_data,
+    const TypecheckModuleFn& typecheck_imported_module) {
+  std::optional<ImportSubject> subject = colon_ref->ResolveImportSubject();
+  if (subject.has_value() && std::holds_alternative<Import*>(*subject)) {
+    Import* import = std::get<Import*>(*subject);
+    ImportTokens tokens(import->subject());
+    if (!import_data.Contains(tokens)) {
+      XLS_RETURN_IF_ERROR(DoImport(typecheck_imported_module, tokens,
+                                   &import_data, colon_ref->span(),
+                                   import_data.vfs())
+                              .status());
+    }
+    XLS_ASSIGN_OR_RETURN(ModuleInfo * module_info, import_data.Get(tokens));
+    return *module_info;
+  }
+  return std::nullopt;
+}
+
+absl::StatusOr<ModuleMember> GetPublicModuleMember(
+    const Module& module, const ColonRef* node, const FileTable& file_table) {
+  std::optional<const ModuleMember*> member =
+      module.FindMemberWithName(node->attr());
+  if (!member.has_value()) {
+    return TypeInferenceErrorStatus(
+        node->span(), nullptr,
+        absl::StrFormat("Attempted to refer to a module member %s that "
+                        "doesn't exist",
+                        node->ToString()),
+        file_table);
+  }
+  if (!IsPublic(**member)) {
+    return TypeInferenceErrorStatus(
+        node->span(), nullptr,
+        absl::StrFormat("Attempted to refer to a module member %s that "
+                        "is not public",
+                        node->ToString()),
+        file_table);
+  }
+  return **member;
+}
+
+absl::StatusOr<std::optional<StructOrProcRef>> GetStructOrProcRef(
+    const ColonRef* colon_ref, const ImportData& import_data) {
+  TypeRefUnwrapper unwrapper(import_data);
+  XLS_RETURN_IF_ERROR(colon_ref->Accept(&unwrapper));
+  return unwrapper.GetStructOrProcRef();
+}
+
+absl::StatusOr<std::optional<const StructDefBase*>> GetStructOrProcDef(
+    const TypeAnnotation* annotation, const ImportData& import_data) {
+  XLS_ASSIGN_OR_RETURN(std::optional<StructOrProcRef> ref,
+                       GetStructOrProcRef(annotation, import_data));
+  return ref.has_value() ? std::make_optional(ref->def) : std::nullopt;
+}
+
+absl::StatusOr<std::optional<const StructDefBase*>> GetStructOrProcDef(
+    const TypeAnnotation* annotation, ImportData& import_data,
+    const TypecheckModuleFn& typecheck_imported_module) {
+  XLS_ASSIGN_OR_RETURN(
+      std::optional<StructOrProcRef> ref,
+      GetStructOrProcRef(annotation, import_data, typecheck_imported_module,
+                         /*include_generic=*/false));
+  return ref.has_value() ? std::make_optional(ref->def) : std::nullopt;
+}
+
+absl::StatusOr<std::optional<const StructDefBase*>> GetStructOrProcDef(
+    const Function* f, const ImportData& import_data) {
+  if (!f->impl().has_value()) {
+    return std::nullopt;
+  }
+
+  return GetStructOrProcDef((*f->impl())->struct_ref(), import_data);
+}
+
+absl::StatusOr<std::optional<const StructDefBase*>>
+GetContainingStructOrProcDef(const AstNode* node,
+                             const ImportData& import_data) {
+  std::optional<ModuleMember> member = GetContainingModuleMember(node);
+  if (!member.has_value()) {
+    return std::nullopt;
+  }
+
+  if (std::holds_alternative<Impl*>(*member)) {
+    return GetStructOrProcDef(std::get<Impl*>(*member)->struct_ref(),
+                              import_data);
+  }
+
+  return std::nullopt;
+}
+
+absl::StatusOr<std::optional<const EnumDef*>> GetEnumDef(
+    const TypeAnnotation* annotation, const ImportData& import_data) {
+  if (!annotation->IsAnnotation<TypeRefTypeAnnotation>() &&
+      !annotation->IsAnnotation<TypeVariableTypeAnnotation>()) {
+    return std::nullopt;
+  }
+  TypeRefUnwrapper unwrapper(import_data);
+  XLS_RETURN_IF_ERROR(annotation->Accept(&unwrapper));
+  return unwrapper.GetEnumDef();
+}
+
+bool IsImport(const ColonRef* colon_ref) {
+  if (colon_ref->ResolveImportSubject().has_value()) {
+    return true;
+  }
+  if (std::holds_alternative<ColonRef*>(colon_ref->subject())) {
+    return IsImport(std::get<ColonRef*>(colon_ref->subject()));
+  }
+  return false;
+}
+
+absl::StatusOr<bool> IsProcDefNextFunction(const Function* f,
+                                           const ImportData& import_data) {
+  if (f->identifier() != "next") {
+    return false;
+  }
+
+  XLS_ASSIGN_OR_RETURN(std::optional<const StructDefBase*> def,
+                       GetStructOrProcDef(f, import_data));
+  if (!def.has_value()) {
+    return false;
+  }
+
+  return (*def)->kind() == AstNodeKind::kProcDef;
+}
+
+absl::StatusOr<bool> IsProcDefSpawnFunction(const Function* f) {
+  return f->IsCompilerDerived() && f->identifier() == "spawn";
+}
+
+bool IsProcDefStateType(const Type& type, const ImportData& import_data) {
+  // A state element in a `ProcDef` always uses explicit state access, so should
+  // have been made into a BuiltinProcState<T> by semantics analysis, i.e. it is
+  // always a struct in type inference.
+  if (!type.IsStruct()) {
+    return false;
+  }
+
+  Module* builtin_stubs = *import_data.GetBuiltinStubsModule();
+  const StructDef* state_struct_def =
+      *builtin_stubs->GetMember<StructDef>(kBuiltinProcStateStructName);
+  return &type.AsStruct().struct_def_base() == state_struct_def;
+}
+
+absl::StatusOr<std::vector<StructMemberNode*>> GetProcDefStateMembers(
+    const ProcDef* proc_def, const ImportData& import_data,
+    const TypeInfo& type_info) {
+  std::vector<StructMemberNode*> result;
+  for (StructMemberNode* member : proc_def->members()) {
+    XLS_ASSIGN_OR_RETURN(const Type* type, type_info.GetItemOrError(member));
+    if (IsProcDefStateType(*type, import_data)) {
+      result.push_back(member);
+    }
+  }
+  return result;
+}
+
+absl::StatusOr<std::optional<const ProcDef*>> GetProcConstructedByFunction(
+    const Function* f, const TypeInfo* ti) {
+  if (!f->impl().has_value()) {
+    return std::nullopt;
+  }
+
+  // TODO: https://github.com/google/xls/issues/4125 - We should use
+  // GetItemOrError here, but being able to do this is part of parametric proc
+  // support (we will not have the right `TypeInfo` in all cases currently).
+  std::optional<Type*> fn_type = ti->GetItem(f);
+  if (!fn_type.has_value()) {
+    return std::nullopt;
+  }
+
+  XLS_RET_CHECK((*fn_type)->IsFunction());
+
+  // It's only a constructor if it returns effectively `Self`.
+  const Type& return_type = (*fn_type)->AsFunction().return_type();
+  if (return_type.IsProc()) {
+    return &absl::down_cast<const ProcDef&>(
+        return_type.AsProc().struct_def_base());
+  }
+
+  return std::nullopt;
+}
+
+bool IsProcConstructor(const Function* function, const ProcDef* proc_def,
+                       const FunctionType& function_type) {
+  return function_type.return_type().IsProc() &&
+         &function_type.return_type().AsProc().struct_def_base() == proc_def;
+}
+
+absl::StatusOr<std::vector<ParametricBinding*>>
+GetFunctionAndStructParametricBindings(const ImportData& import_data,
+                                       const Function& f) {
+  std::vector<ParametricBinding*> bindings = f.parametric_bindings();
+  if (f.IsFunctionOnParametricStruct()) {
+    XLS_ASSIGN_OR_RETURN(
+        std::optional<const StructDefBase*> struct_def,
+        GetStructOrProcDef((*f.impl())->struct_ref(), import_data));
+    absl::c_copy((*struct_def)->parametric_bindings(),
+                 std::back_inserter(bindings));
+  }
+  return bindings;
+}
+
+absl::Status CheckFormalParametricConsistency(
+    const ImportData& import_data, const TypeAnnotation* annotation) {
+  XLS_ASSIGN_OR_RETURN(std::optional<const StructDefBase*> struct_def,
+                       GetStructOrProcDef(annotation, import_data));
+  if (struct_def.has_value() &&
+      annotation->AsAnnotation<TypeRefTypeAnnotation>()->parametrics().size() !=
+          (*struct_def)->parametric_bindings().size()) {
+    return TypeInferenceErrorStatus(
+        annotation->span(), /*type=*/nullptr,
+        absl::Substitute(
+            "Formal use of struct `$0` must have the same parametric count as "
+            "the struct ($1). Note that default values in the struct "
+            "definition are only used at the point of instantiation.",
+            (*struct_def)->identifier(),
+            (*struct_def)->parametric_bindings().size()),
+        *annotation->owner()->file_table());
+  }
+  return absl::OkStatus();
+}
+
+}  // namespace xls::dslx

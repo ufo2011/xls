@@ -12,13 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import xls.dslx.tests.mod_imported
+import xls.dslx.tests.mod_imported;
 
-fn main(x: u3) -> u1 {
-  mod_imported::my_lsb(x)
-}
+fn main(x: u3) -> u1 { mod_imported::my_lsb(x) }
 
-#![test]
-fn main_test() {
-  assert_eq(u1:0b1, main(u3:0b001))
-}
+#[test]
+fn main_test() { assert_eq(u1:0b1, main(u3:0b001)) }

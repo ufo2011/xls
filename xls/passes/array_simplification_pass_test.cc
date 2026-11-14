@@ -14,26 +14,43 @@
 
 #include "xls/passes/array_simplification_pass.h"
 
+#include <memory>
+#include <utility>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "xls/common/fuzzing/fuzztest.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "xls/common/status/matchers.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/fuzzer/ir_fuzzer/ir_fuzz_domain.h"
+#include "xls/fuzzer/ir_fuzzer/ir_fuzz_test_library.h"
+#include "xls/ir/bits.h"
 #include "xls/ir/function.h"
 #include "xls/ir/function_builder.h"
 #include "xls/ir/ir_matcher.h"
 #include "xls/ir/ir_parser.h"
 #include "xls/ir/ir_test_base.h"
+#include "xls/ir/nodes.h"
 #include "xls/ir/package.h"
+#include "xls/ir/source_location.h"
+#include "xls/ir/value.h"
 #include "xls/passes/constant_folding_pass.h"
 #include "xls/passes/dce_pass.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/pass_base.h"
+#include "xls/solvers/ir_equivalence_testutils.h"
 
 namespace m = ::xls::op_matchers;
 
 namespace xls {
 namespace {
 
-using status_testing::IsOkAndHolds;
+using ::absl_testing::IsOkAndHolds;
+using ::testing::Each;
+using ::testing::Not;
+using ::xls::solvers::ScopedVerifyEquivalence;
 
 class ArraySimplificationPassTest : public IrTestBase {
  protected:
@@ -42,26 +59,40 @@ class ArraySimplificationPassTest : public IrTestBase {
     bool changed = false;
     bool changed_this_iteration = true;
     while (changed_this_iteration) {
-      XLS_ASSIGN_OR_RETURN(changed_this_iteration,
-                           ArraySimplificationPass().RunOnFunctionBase(
-                               f, PassOptions(), &results));
+      XLS_ASSIGN_OR_RETURN(
+          changed_this_iteration,
+          ArraySimplificationPass().RunOnFunctionBase(
+              f, OptimizationPassOptions(), &results, context_));
       // Run dce and constant folding to clean things up.
       XLS_RETURN_IF_ERROR(ConstantFoldingPass()
-                              .RunOnFunctionBase(f, PassOptions(), &results)
+                              .RunOnFunctionBase(f, OptimizationPassOptions(),
+                                                 &results, context_)
                               .status());
       XLS_RETURN_IF_ERROR(DeadCodeEliminationPass()
-                              .RunOnFunctionBase(f, PassOptions(), &results)
+                              .RunOnFunctionBase(f, OptimizationPassOptions(),
+                                                 &results, context_)
                               .status());
-      changed |= changed_this_iteration;
+      changed = changed || changed_this_iteration;
     }
 
     return changed;
   }
+
+  Package* GetPackage() {
+    if (p_ == nullptr) {
+      p_ = CreatePackage();
+    }
+    return p_.get();
+  }
+
+ private:
+  std::unique_ptr<VerifiedPackage> p_;
+  OptimizationContext context_;
 };
 
 TEST_F(ArraySimplificationPassTest, ArrayWithOOBLiteralIndex) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
   BValue a = fb.Param("a", p->GetArrayType(3, p->GetBitsType(32)));
   BValue index = fb.Literal(Value(UBits(123, 32)));
   fb.ArrayIndex(a, {index});
@@ -73,8 +104,8 @@ TEST_F(ArraySimplificationPassTest, ArrayWithOOBLiteralIndex) {
 }
 
 TEST_F(ArraySimplificationPassTest, ArrayWithWideOOBLiteralIndex) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
   BValue a = fb.Param("a", p->GetArrayType(42, p->GetBitsType(32)));
   BValue index = fb.Literal(Value(Bits::AllOnes(1234)));
   fb.ArrayIndex(a, {index});
@@ -86,8 +117,8 @@ TEST_F(ArraySimplificationPassTest, ArrayWithWideOOBLiteralIndex) {
 }
 
 TEST_F(ArraySimplificationPassTest, ArrayWithWideInBoundsLiteralIndex) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
   BValue a = fb.Param("a", p->GetArrayType(3, p->GetBitsType(32)));
   BValue index = fb.Literal(Value(UBits(1, 1000)));
   fb.ArrayIndex(a, {index});
@@ -97,8 +128,8 @@ TEST_F(ArraySimplificationPassTest, ArrayWithWideInBoundsLiteralIndex) {
 }
 
 TEST_F(ArraySimplificationPassTest, LiteralArrayWithNonLiteralIndex) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
   BValue a = fb.Literal(
       Parser::ParseTypedValue("[bits[32]:2, bits[32]:4, bits[32]:6]").value());
   BValue index = fb.Param("idx", p->GetBitsType(32));
@@ -109,21 +140,90 @@ TEST_F(ArraySimplificationPassTest, LiteralArrayWithNonLiteralIndex) {
 }
 
 TEST_F(ArraySimplificationPassTest, IndexingArrayOperation) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* u16 = p->GetBitsType(16);
+  Type* u32 = p->GetBitsType(32);
+  BValue a = fb.Array(
+      {fb.Param("x", u32), fb.Param("y", u32), fb.Param("z", u32)}, u32);
+  BValue index = fb.Param("i", u16);
+  fb.ArrayIndex(a, {index});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  solvers::ScopedVerifyEquivalence stays_equivalent(f);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::Select(m::Param("i"), {m::Param("x"), m::Param("y")}, m::Param("z")));
+}
+
+TEST_F(ArraySimplificationPassTest, IndexingArrayOperationExactFit) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* u2 = p->GetBitsType(2);
+  Type* u32 = p->GetBitsType(32);
+  BValue a = fb.Array({fb.Param("x", u32), fb.Param("y", u32),
+                       fb.Param("z", u32), fb.Param("w", u32)},
+                      u32);
+  BValue index = fb.Param("i", u2);
+  fb.ArrayIndex(a, {index});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  solvers::ScopedVerifyEquivalence stays_equivalent(f);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Select(m::Param("i"), {m::Param("x"), m::Param("y"),
+                                        m::Param("z"), m::Param("w")}));
+}
+
+TEST_F(ArraySimplificationPassTest, IndexingArrayOperationUndersizedIndex) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* u2 = p->GetBitsType(2);
+  Type* u32 = p->GetBitsType(32);
+  BValue a =
+      fb.Array({fb.Param("x", u32), fb.Param("y", u32), fb.Param("z", u32),
+                fb.Param("w", u32), fb.Param("q", u32)},
+               u32);
+  BValue index = fb.Param("i", u2);
+  fb.ArrayIndex(a, {index});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  solvers::ScopedVerifyEquivalence stays_equivalent(f);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Select(m::Param("i"), {m::Param("x"), m::Param("y"),
+                                        m::Param("z"), m::Param("w")}));
+}
+
+TEST_F(ArraySimplificationPassTest, IndexingArrayOperationWithLiteralIndex) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
   Type* u32 = p->GetBitsType(32);
   BValue a = fb.Array(
       {fb.Param("x", u32), fb.Param("y", u32), fb.Param("z", u32)}, u32);
   BValue index = fb.Literal(Value(UBits(2, 16)));
   fb.ArrayIndex(a, {index});
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  solvers::ScopedVerifyEquivalence stays_equivalent(f);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(), m::Param("z"));
+}
+
+TEST_F(ArraySimplificationPassTest, IndexingArrayOperationWithOobLiteralIndex) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* u32 = p->GetBitsType(32);
+  BValue a = fb.Array(
+      {fb.Param("x", u32), fb.Param("y", u32), fb.Param("z", u32)}, u32);
+  BValue index = fb.Literal(Value(UBits(5, 16)));
+  fb.ArrayIndex(a, {index});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  solvers::ScopedVerifyEquivalence stays_equivalent(f);
   ASSERT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Param("z"));
 }
 
 TEST_F(ArraySimplificationPassTest, IndexingArrayUpdateOperationSameIndex) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
   Type* u32 = p->GetBitsType(32);
   BValue a = fb.Array(
       {fb.Param("x", u32), fb.Param("y", u32), fb.Param("z", u32)}, u32);
@@ -138,8 +238,8 @@ TEST_F(ArraySimplificationPassTest, IndexingArrayUpdateOperationSameIndex) {
 }
 
 TEST_F(ArraySimplificationPassTest, OobArrayIndexOfArrayUpdateSameIndex) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
   Type* u32 = p->GetBitsType(32);
   BValue a = fb.Array(
       {fb.Param("x", u32), fb.Param("y", u32), fb.Param("z", u32)}, u32);
@@ -157,8 +257,8 @@ TEST_F(ArraySimplificationPassTest, OobArrayIndexOfArrayUpdateSameIndex) {
 }
 
 TEST_F(ArraySimplificationPassTest, OobArrayIndexOfArrayUpdateDifferentIndex) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
   Type* u32 = p->GetBitsType(32);
   BValue a = fb.Array(
       {fb.Param("x", u32), fb.Param("y", u32), fb.Param("z", u32)}, u32);
@@ -174,8 +274,8 @@ TEST_F(ArraySimplificationPassTest, OobArrayIndexOfArrayUpdateDifferentIndex) {
 
 TEST_F(ArraySimplificationPassTest,
        IndexingArrayUpdateOperationDifferentIndex) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
   Type* u32 = p->GetBitsType(32);
   BValue a = fb.Array(
       {fb.Param("x", u32), fb.Param("y", u32), fb.Param("z", u32)}, u32);
@@ -190,45 +290,60 @@ TEST_F(ArraySimplificationPassTest,
 }
 
 TEST_F(ArraySimplificationPassTest, IndexingArrayUpdateOperationUnknownIndex) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
   Type* u32 = p->GetBitsType(32);
-  BValue a = fb.Array(
-      {fb.Param("x", u32), fb.Param("y", u32), fb.Param("z", u32)}, u32);
+  BValue a = fb.Array({fb.Param("w", u32), fb.Param("x", u32),
+                       fb.Param("y", u32), fb.Param("z", u32)},
+                      u32);
   BValue update_index = fb.Param("idx", u32);
   BValue array_update = fb.ArrayUpdate(a, fb.Param("q", u32), {update_index});
   BValue index = fb.Literal(Value(UBits(1, 16)));
   fb.ArrayIndex(array_update, {index});
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
 
-  ASSERT_THAT(Run(f), IsOkAndHolds(false));
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
-              m::ArrayIndex(m::ArrayUpdate(), {m::Literal(1)}));
+              m::PrioritySelect(m::Eq(m::Param("idx"), m::Literal(1)),
+                                /*cases=*/{m::Param("q")},
+                                /*default_value=*/m::Param("x")));
 }
 
 TEST_F(ArraySimplificationPassTest,
        IndexingArrayUpdateOperationUnknownButSameIndex) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
   Type* u32 = p->GetBitsType(32);
-  BValue a = fb.Array(
-      {fb.Param("x", u32), fb.Param("y", u32), fb.Param("z", u32)}, u32);
+  BValue a = fb.Array({fb.Param("w", u32), fb.Param("x", u32),
+                       fb.Param("y", u32), fb.Param("z", u32)},
+                      u32);
   BValue index = fb.Param("idx", u32);
   BValue array_update = fb.ArrayUpdate(a, fb.Param("q", u32), {index});
   fb.ArrayIndex(array_update, {index});
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
 
-  // Though this is an array_index of an array_update and they have the same
-  // index, we can't optimize this because of different behaviors of OOB access
-  // for array_index and array_update operations.
-  ASSERT_THAT(Run(f), IsOkAndHolds(false));
-  EXPECT_THAT(f->return_value(), m::ArrayIndex(m::ArrayUpdate(),
-                                               /*indices=*/{m::Param()}));
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::Select(m::Param("idx"), /*cases=*/
+                {m::PrioritySelect(m::Eq(m::Param("idx"), m::Literal(0)),
+                                   /*cases=*/{m::Param("q")},
+                                   /*default_value=*/m::Param("w")),
+                 m::PrioritySelect(m::Eq(m::Param("idx"), m::Literal(1)),
+                                   /*cases=*/{m::Param("q")},
+                                   /*default_value=*/m::Param("x")),
+                 m::PrioritySelect(m::Eq(m::Param("idx"), m::Literal(2)),
+                                   /*cases=*/{m::Param("q")},
+                                   /*default_value=*/m::Param("y"))},
+                /*default_value=*/
+                m::PrioritySelect(m::Eq(m::Param("idx"), m::Literal(3)),
+                                  /*cases=*/{m::Param("q")},
+                                  /*default_value=*/m::Param("z"))));
 }
 
 TEST_F(ArraySimplificationPassTest, IndexingArrayParameter) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
   Type* u32 = p->GetBitsType(32);
   BValue a = fb.Param("a", p->GetArrayType(42, u32));
   BValue index = fb.Literal(Value(UBits(1, 16)));
@@ -242,7 +357,7 @@ TEST_F(ArraySimplificationPassTest, IndexingArrayParameter) {
 }
 
 TEST_F(ArraySimplificationPassTest, SimpleUnboxingArray) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(x: bits[2]) -> bits[2] {
   a: bits[2][1] = array(x)
@@ -250,13 +365,13 @@ TEST_F(ArraySimplificationPassTest, SimpleUnboxingArray) {
   ret array_index.4: bits[2] = array_index(a, indices=[zero])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Param("x"));
 }
 
 TEST_F(ArraySimplificationPassTest, UnboxingTwoElementArray) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(x: bits[2], y: bits[2]) -> bits[2] {
   a: bits[2][2] = array(x, y)
@@ -267,20 +382,20 @@ TEST_F(ArraySimplificationPassTest, UnboxingTwoElementArray) {
   ret sum: bits[2] = add(element_0, element_1)
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Add(m::Param("x"), m::Param("y")));
 }
 
 TEST_F(ArraySimplificationPassTest, SequentialArrayUpdatesToSameLocation) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][7], idx: bits[32], x: bits[32], y: bits[32]) -> bits[32][7] {
   update0: bits[32][7] = array_update(a, x, indices=[idx])
   ret update1: bits[32][7] = array_update(update0, y, indices=[idx])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::ArrayUpdate(m::Param("a"), m::Param("y"),
                                                 /*indices=*/{m::Param("idx")}));
@@ -288,31 +403,31 @@ TEST_F(ArraySimplificationPassTest, SequentialArrayUpdatesToSameLocation) {
 
 TEST_F(ArraySimplificationPassTest,
        SequentialArrayUpdatesToSameLocationWithMultipleUses) {
-  // Cannot squash the first update of seqential updates to the same location if
-  // one of the updates in the chain has multiple uses.
-  auto p = CreatePackage();
+  // Cannot squash the first update of sequential updates to the same location
+  // if one of the updates in the chain has multiple uses.
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
- fn func(a: bits[32][7], idx0: bits[32], idx1: bits[32], x: bits[32], y: bits[32]) -> (bits[32][7], bits[32][7]) {
+ fn func(a: bits[32][7], idx0: bits[32], idx1: bits[32], x: bits[32], y: bits[32]) -> (bits[32][7], bits[32][7], bits[32][7]) {
   update0: bits[32][7] = array_update(a, x, indices=[idx0])
   update1: bits[32][7] = array_update(update0, y, indices=[idx1])
   update2: bits[32][7] = array_update(update1, y, indices=[idx0])
-  ret result: (bits[32][7], bits[32][7]) = tuple(update1, update2)
+  ret result: (bits[32][7], bits[32][7], bits[32][7]) = tuple(update0, update1, update2)
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(false));
 }
 
 TEST_F(ArraySimplificationPassTest,
        SequentialArrayUpdatesToSameLocationMultidimensional) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][7][8][9], i: bits[32], j: bits[32], k: bits[32], x: bits[32], y: bits[32]) -> bits[32][7][8][9] {
   update0: bits[32][7][8][9] = array_update(a, x, indices=[i, j, k])
   ret update1: bits[32][7][8][9] = array_update(update0, y, indices=[i, j, k])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::ArrayUpdate(
@@ -322,20 +437,20 @@ TEST_F(ArraySimplificationPassTest,
 
 TEST_F(ArraySimplificationPassTest,
        SequentialArrayUpdatesToDifferentLocationMultidimensional) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][7][8][9], i: bits[32], j: bits[32], k: bits[32], x: bits[32], y: bits[32]) -> bits[32][7][8][9] {
   update0: bits[32][7][8][9] = array_update(a, x, indices=[j, i, k])
   ret update1: bits[32][7][8][9] = array_update(update0, y, indices=[i, j, k])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(false));
 }
 
 TEST_F(ArraySimplificationPassTest,
        NonSequentialArrayUpdatesToSameLocationMultidimensional) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][7][8][9], i: bits[32], j: bits[32], x: bits[32], y: bits[32]) -> bits[32][7][8][9] {
   one: bits[32] = literal(value=1)
@@ -345,7 +460,7 @@ TEST_F(ArraySimplificationPassTest,
   ret update2: bits[32][7][8][9] = array_update(update1, y, indices=[one, i, j])
  }
   )",
-                                                       p.get()));
+                                                       p));
   // The first update (update0) can be elided because update2 overwrites the
   // same location.
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
@@ -361,7 +476,7 @@ TEST_F(ArraySimplificationPassTest,
 
 TEST_F(ArraySimplificationPassTest,
        NonSequentialArrayUpdatesToSameLocationMultidimensionalDifferentSizes) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][7][8][9], i: bits[32], j: bits[32], x: bits[32], y: bits[32][7]) -> bits[32][7][8][9] {
   one: bits[32] = literal(value=1)
@@ -371,7 +486,7 @@ TEST_F(ArraySimplificationPassTest,
   ret update2: bits[32][7][8][9] = array_update(update1, y, indices=[one, i])
  }
   )",
-                                                       p.get()));
+                                                       p));
   // The first update (update0) can be elided because update2 overwrites the
   // same location.
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
@@ -386,7 +501,7 @@ TEST_F(ArraySimplificationPassTest,
 
 TEST_F(ArraySimplificationPassTest,
        SequentialArrayUpdatesToSameLiteralLocation) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][7], x: bits[32], y: bits[32]) -> bits[32][7] {
   one: bits[4] = literal(value=1)
@@ -395,14 +510,50 @@ TEST_F(ArraySimplificationPassTest,
   ret update1: bits[32][7] = array_update(update0, y, indices=[big_one])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::ArrayUpdate(m::Param("a"), m::Param("y"),
                                                 /*indices=*/{m::Literal(1)}));
 }
 
+TEST_F(ArraySimplificationPassTest,
+       SequentialArrayUpdatesToNonliteralLocations) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(a: bits[32][4], idx0: bits[2], x: bits[32], idx1: bits[8], y: bits[32]) -> bits[32][4] {
+  update0: bits[32][4] = array_update(a, x, indices=[idx0])
+  ret update1: bits[32][4] = array_update(update0, y, indices=[idx1])
+ }
+  )",
+                                                       p));
+  solvers::ScopedVerifyEquivalence stays_equivalent(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::Array(m::PrioritySelect(
+                   m::Concat(m::Eq(m::ZeroExt(m::Param("idx0")), m::Literal(0)),
+                             m::Eq(m::Param("idx1"), m::Literal(0))),
+                   {m::Param("y"), m::Param("x")},
+                   m::ArrayIndex(m::Param("a"), /*indices=*/{m::Literal(0)})),
+               m::PrioritySelect(
+                   m::Concat(m::Eq(m::ZeroExt(m::Param("idx0")), m::Literal(1)),
+                             m::Eq(m::Param("idx1"), m::Literal(1))),
+                   {m::Param("y"), m::Param("x")},
+                   m::ArrayIndex(m::Param("a"), /*indices=*/{m::Literal(1)})),
+               m::PrioritySelect(
+                   m::Concat(m::Eq(m::ZeroExt(m::Param("idx0")), m::Literal(2)),
+                             m::Eq(m::Param("idx1"), m::Literal(2))),
+                   {m::Param("y"), m::Param("x")},
+                   m::ArrayIndex(m::Param("a"), /*indices=*/{m::Literal(2)})),
+               m::PrioritySelect(
+                   m::Concat(m::Eq(m::ZeroExt(m::Param("idx0")), m::Literal(3)),
+                             m::Eq(m::Param("idx1"), m::Literal(3))),
+                   {m::Param("y"), m::Param("x")},
+                   m::ArrayIndex(m::Param("a"), /*indices=*/{m::Literal(3)}))));
+}
+
 TEST_F(ArraySimplificationPassTest, ArrayConstructedBySequenceOfArrayUpdates) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(w: bits[32], x: bits[32], y: bits[32], z: bits[32]) -> bits[32][4] {
   a: bits[32][4] = literal(value=[999, 888, 777, 666])
@@ -416,7 +567,7 @@ TEST_F(ArraySimplificationPassTest, ArrayConstructedBySequenceOfArrayUpdates) {
   ret update3: bits[32][4] = array_update(update2, z, indices=[three])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Array(m::Param("w"), m::Param("x"),
                                           m::Param("y"), m::Param("z")));
@@ -424,7 +575,7 @@ TEST_F(ArraySimplificationPassTest, ArrayConstructedBySequenceOfArrayUpdates) {
 
 TEST_F(ArraySimplificationPassTest,
        ArrayConstructedBySequenceOfArrayUpdatesFromParam) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][4], w: bits[32], x: bits[32], y: bits[32], z: bits[32]) -> bits[32][4] {
   zero: bits[4] = literal(value=0)
@@ -437,7 +588,7 @@ TEST_F(ArraySimplificationPassTest,
   ret update3: bits[32][4] = array_update(update2, z, indices=[three])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Array(m::Param("w"), m::Param("x"),
                                           m::Param("y"), m::Param("z")));
@@ -445,7 +596,7 @@ TEST_F(ArraySimplificationPassTest,
 
 TEST_F(ArraySimplificationPassTest,
        ArrayConstructedBySequenceOfArrayUpdatesDifferentOrder) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(w: bits[32], x: bits[32], y: bits[32], z: bits[32]) -> bits[32][4] {
   a: bits[32][4] = literal(value=[999, 888, 777, 666])
@@ -459,7 +610,7 @@ TEST_F(ArraySimplificationPassTest,
   ret update3: bits[32][4] = array_update(update2, x, indices=[one])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Array(m::Param("w"), m::Param("x"),
                                           m::Param("y"), m::Param("z")));
@@ -467,7 +618,7 @@ TEST_F(ArraySimplificationPassTest,
 
 TEST_F(ArraySimplificationPassTest,
        ArrayConstructedBySequenceOfArrayUpdatesDifferentOrderFromParam) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][4], w: bits[32], x: bits[32], y: bits[32], z: bits[32]) -> bits[32][4] {
   zero: bits[4] = literal(value=0)
@@ -480,7 +631,7 @@ TEST_F(ArraySimplificationPassTest,
   ret update3: bits[32][4] = array_update(update2, x, indices=[one])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Array(m::Param("w"), m::Param("x"),
                                           m::Param("y"), m::Param("z")));
@@ -488,7 +639,7 @@ TEST_F(ArraySimplificationPassTest,
 
 TEST_F(ArraySimplificationPassTest,
        MultidimensionalArrayConstructedBySequenceOfArrayUpdates) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][4][5], w: bits[32], x: bits[32], y: bits[32], z: bits[32]) -> bits[32][4][5] {
   zero: bits[4] = literal(value=0)
@@ -501,7 +652,7 @@ TEST_F(ArraySimplificationPassTest,
   ret update3: bits[32][4][5] = array_update(update2, z, indices=[two, three])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::ArrayUpdate(m::Param("a"),
@@ -513,7 +664,7 @@ TEST_F(ArraySimplificationPassTest,
 TEST_F(
     ArraySimplificationPassTest,
     MultidimensionalArrayConstructedBySequenceOfArrayUpdatesDifferentPrefix) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][5][5], w: bits[32], x: bits[32], y: bits[32], z: bits[32]) -> bits[32][5][5] {
   zero: bits[4] = literal(value=0)
@@ -521,18 +672,18 @@ TEST_F(
   two: bits[4] = literal(value=2)
   three: bits[4] = literal(value=3)
   update0: bits[32][5][5] = array_update(a, w, indices=[two, zero])
-  update1: bits[32][5][5] = array_update(update0, x, indices=[two, one])
-  update2: bits[32][5][5] = array_update(update1, y, indices=[one, two])
-  ret update3: bits[32][5][5] = array_update(update2, z, indices=[two, three])
+  update1: bits[32][5][5] = array_update(update0, x, indices=[one, one])
+  update2: bits[32][5][5] = array_update(update1, y, indices=[two, two])
+  ret update3: bits[32][5][5] = array_update(update2, z, indices=[one, three])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(false));
 }
 
 TEST_F(ArraySimplificationPassTest,
        ArrayConstructedBySequenceOfArrayUpdatesNotDense) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(w: bits[32], x: bits[32], y: bits[32], z: bits[32]) -> bits[32][4] {
   a: bits[32][4] = literal(value=[999, 888, 777, 666])
@@ -544,7 +695,7 @@ TEST_F(ArraySimplificationPassTest,
   ret update2: bits[32][4] = array_update(update1, z, indices=[three])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Array(m::Param("w"), m::Literal(888),
                                           m::Param("y"), m::Param("z")));
@@ -552,7 +703,7 @@ TEST_F(ArraySimplificationPassTest,
 
 TEST_F(ArraySimplificationPassTest,
        ArrayConstructedBySequenceOfArrayUpdatesDuplicateIndices) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(w: bits[32], x: bits[32], y: bits[32], z: bits[32]) -> bits[32][4] {
   a: bits[32][4] = literal(value=[999, 888, 777, 666])
@@ -567,14 +718,14 @@ TEST_F(ArraySimplificationPassTest,
   ret update4: bits[32][4] = array_update(update3, w, indices=[two])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Array(m::Param("w"), m::Param("x"),
                                           m::Param("w"), m::Param("z")));
 }
 
 TEST_F(ArraySimplificationPassTest, SimplifyDecomposedArray) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][3]) -> bits[32][3] {
   zero: bits[4] = literal(value=0)
@@ -586,13 +737,13 @@ TEST_F(ArraySimplificationPassTest, SimplifyDecomposedArray) {
   ret array: bits[32][3] = array(element_0, element_1, element_2)
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Param("a"));
 }
 
 TEST_F(ArraySimplificationPassTest, SimplifyDecomposedNestedArray) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][3][123][55]) -> bits[32][3] {
   zero: bits[4] = literal(value=0)
@@ -608,15 +759,16 @@ TEST_F(ArraySimplificationPassTest, SimplifyDecomposedNestedArray) {
   ret array: bits[32][3] = array(element_0, element_1, element_2)
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::ArrayIndex(m::Param("a"),
-                            /*indices=*/{m::Literal(40), m::Literal(50)}));
+                            /*indices=*/{m::Literal(40), m::Literal(50)},
+                            m::AssumedInBounds()));
 }
 
 TEST_F(ArraySimplificationPassTest, SimplifyDecomposedArraySwizzledElements) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][3]) -> bits[32][3] {
   zero: bits[4] = literal(value=0)
@@ -628,13 +780,13 @@ TEST_F(ArraySimplificationPassTest, SimplifyDecomposedArraySwizzledElements) {
   ret array: bits[32][3] = array(element_0, element_1, element_2)
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(false));
   EXPECT_THAT(f->return_value(), m::Array());
 }
 
 TEST_F(ArraySimplificationPassTest, SimplifyDecomposedArrayMismatchingType) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][5]) -> bits[32][3] {
   zero: bits[4] = literal(value=0)
@@ -646,13 +798,13 @@ TEST_F(ArraySimplificationPassTest, SimplifyDecomposedArrayMismatchingType) {
   ret array: bits[32][3] = array(element_0, element_1, element_2)
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(false));
   EXPECT_THAT(f->return_value(), m::Array());
 }
 
 TEST_F(ArraySimplificationPassTest, ChainedArrayUpdate) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][16][64][256], x: bits[8], y: bits[6], z: bits[4]) -> bits[32][16][64][256] {
   subarray: bits[32][16] = array_index(a, indices=[x,y])
@@ -661,7 +813,7 @@ TEST_F(ArraySimplificationPassTest, ChainedArrayUpdate) {
   ret update2: bits[32][16][64][256] = array_update(a, update, indices=[x,y])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::ArrayUpdate(
@@ -669,8 +821,238 @@ TEST_F(ArraySimplificationPassTest, ChainedArrayUpdate) {
                   /*indices=*/{m::Param("x"), m::Param("y"), m::Param("z")}));
 }
 
+TEST_F(ArraySimplificationPassTest, ChainedArrayUpdateOutOfBoundsSubupdate) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(a0: bits[32][1], a1: bits[32][1], a2: bits[32][1], z: bits[2], v: bits[32]) -> bits[32][1][3] {
+  a: bits[32][1][3] = array(a0, a1, a2)
+  one: bits[2] = literal(value=1)
+  subarray: bits[32][1] = array_index(a, indices=[one])
+  update: bits[32][1] = array_update(subarray, v, indices=[z])
+  ret update2: bits[32][1][3] = array_update(a, update, indices=[one])
+ }
+  )",
+                                                       p));
+  ScopedVerifyEquivalence sve(f);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Array(m::Param("a0"),
+                       m::PrioritySelect(m::Eq(m::Param("z"), m::Literal(0)),
+                                         /*cases=*/{m::Array(m::Param("v"))},
+                                         /*default_value=*/m::Param("a1")),
+                       m::Param("a2")));
+}
+
+TEST_F(ArraySimplificationPassTest,
+       IndexingArrayUpdatePrefixWithOutOfBoundsSuffix) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(a: bits[32][2][3], sub: bits[32][2], z: bits[2], v: bits[32]) -> bits[32] {
+  one: bits[2] = literal(value=1)
+  inner_update: bits[32][2] = array_update(sub, v, indices=[z])
+  outer_update: bits[32][2][3] = array_update(a, inner_update, indices=[one])
+  ret result: bits[32] = array_index(outer_update, indices=[one, z])
+ }
+  )",
+                                                       p));
+  ScopedVerifyEquivalence sve(f);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(), Not(m::Param("v")));
+}
+
+TEST_F(ArraySimplificationPassTest, IndexOfSelect) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(a: bits[32][3][4], b: bits[32][3][4], i: bits[10], j: bits[10], p: bits[1]) -> bits[32] {
+  sel: bits[32][3][4] = sel(p, cases=[a, b])
+  ret result: bits[32] = array_index(sel, indices=[i, j])
+ }
+  )",
+                                                       p));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::Select(
+          m::Param("p"), /*cases=*/{
+              m::ArrayIndex(m::Param("a"), {m::Param("i"), m::Param("j")}),
+              m::ArrayIndex(m::Param("b"), {m::Param("i"), m::Param("j")})}));
+}
+
+TEST_F(ArraySimplificationPassTest, IndexOfLargeSelect) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(a: bits[32][3][4], b: bits[32][3][4], c: bits[32][3][4], d: bits[32][3][4], i: bits[10], j: bits[10], p: bits[3]) -> bits[32] {
+  sel: bits[32][3][4] = sel(p, cases=[a, b, c], default=d)
+  ret result: bits[32] = array_index(sel, indices=[i, j])
+ }
+  )",
+                                                       p));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::Select(m::Param("p"), /*cases=*/
+                {m::ArrayIndex(m::Param("a"), {m::Param("i"), m::Param("j")}),
+                 m::ArrayIndex(m::Param("b"), {m::Param("i"), m::Param("j")}),
+                 m::ArrayIndex(m::Param("c"), {m::Param("i"), m::Param("j")})},
+                /*default_value=*/
+                m::ArrayIndex(m::Param("d"), {m::Param("i"), m::Param("j")})));
+}
+
+TEST_F(ArraySimplificationPassTest, IndexOfPrioritySelect) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(a: bits[32][3][4], b: bits[32][3][4], c: bits[32][3][4], d: bits[32][3][4], i: bits[10], j: bits[10], p: bits[3]) -> bits[32] {
+  sel: bits[32][3][4] = priority_sel(p, cases=[a, b, c], default=d)
+  ret result: bits[32] = array_index(sel, indices=[i, j])
+ }
+  )",
+                                                       p));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::PrioritySelect(
+          m::Param("p"), /*cases=*/
+          {m::ArrayIndex(m::Param("a"), {m::Param("i"), m::Param("j")}),
+           m::ArrayIndex(m::Param("b"), {m::Param("i"), m::Param("j")}),
+           m::ArrayIndex(m::Param("c"), {m::Param("i"), m::Param("j")})},
+          /*default_value=*/
+          m::ArrayIndex(m::Param("d"), {m::Param("i"), m::Param("j")})));
+}
+
+TEST_F(ArraySimplificationPassTest, NestedSelectionOfThreeArrays) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* arr_type = p->GetArrayType(4, p->GetBitsType(32));
+  BValue a = fb.Param("a", arr_type);
+  BValue b = fb.Param("b", arr_type);
+  BValue c = fb.Param("c", arr_type);
+  BValue p1 = fb.Param("p1", p->GetBitsType(1));
+  BValue p2 = fb.Param("p2", p->GetBitsType(1));
+  BValue s = fb.Select(p2, {fb.Select(p1, {a, b}), c});
+  BValue idx0 = fb.Literal(UBits(0, 32));
+  BValue idx1 = fb.Literal(UBits(1, 32));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Function * f, fb.BuildWithReturnValue(fb.Add(fb.ArrayIndex(s, {idx0}),
+                                                   fb.ArrayIndex(s, {idx1}))));
+
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::Add(
+          m::Select(m::Param("p2"),
+                    /*cases=*/
+                    {m::Select(m::Param("p1"),
+                               /*cases=*/
+                               {m::ArrayIndex(m::Param("a"), {m::Literal(0)}),
+                                m::ArrayIndex(m::Param("b"), {m::Literal(0)})}),
+                     m::ArrayIndex(m::Param("c"), {m::Literal(0)})}),
+          m::Select(m::Param("p2"),
+                    /*cases=*/
+                    {m::Select(m::Param("p1"),
+                               /*cases=*/
+                               {m::ArrayIndex(m::Param("a"), {m::Literal(1)}),
+                                m::ArrayIndex(m::Param("b"), {m::Literal(1)})}),
+                     m::ArrayIndex(m::Param("c"), {m::Literal(1)})})));
+}
+
+TEST_F(ArraySimplificationPassTest, PrioritySelectOfThreeArrays) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* arr_type = p->GetArrayType(4, p->GetBitsType(32));
+  BValue a = fb.Param("a", arr_type);
+  BValue b = fb.Param("b", arr_type);
+  BValue d = fb.Param("d", arr_type);
+  BValue p1 = fb.Param("p1", p->GetBitsType(2));
+  BValue idx0 = fb.Literal(UBits(0, 32));
+  BValue idx2 = fb.Literal(UBits(2, 32));
+  BValue ps = fb.PrioritySelect(p1, {a, b}, d);
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Function * f, fb.BuildWithReturnValue(fb.Add(fb.ArrayIndex(ps, {idx0}),
+                                                   fb.ArrayIndex(ps, {idx2}))));
+
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::Add(m::PrioritySelect(m::Param("p1"),
+                               /*cases=*/
+                               {m::ArrayIndex(m::Param("a"), {m::Literal(0)}),
+                                m::ArrayIndex(m::Param("b"), {m::Literal(0)})},
+                               /*default_value=*/
+                               m::ArrayIndex(m::Param("d"), {m::Literal(0)})),
+             m::PrioritySelect(m::Param("p1"),
+                               /*cases=*/
+                               {m::ArrayIndex(m::Param("a"), {m::Literal(2)}),
+                                m::ArrayIndex(m::Param("b"), {m::Literal(2)})},
+                               /*default_value=*/
+                               m::ArrayIndex(m::Param("d"), {m::Literal(2)}))));
+}
+
+TEST_F(ArraySimplificationPassTest, DissolveIntermediateArraysInNestedSelect) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* arr_type = p->GetArrayType(4, p->GetBitsType(8));
+  BValue c0 = fb.Param("c0", p->GetBitsType(1));
+  BValue c1 = fb.Param("c1", p->GetBitsType(1));
+  BValue c2 = fb.Param("c2", p->GetBitsType(1));
+  BValue x = fb.Param("x", arr_type);
+  BValue y0 = fb.Param("y0", p->GetBitsType(8));
+  BValue y1 = fb.Param("y1", p->GetBitsType(8));
+  BValue zero = fb.Literal(UBits(0, 8));
+  BValue arr_c0 = fb.Array({y0, y1, zero, zero}, p->GetBitsType(8));
+  BValue arr_c1 = fb.Array({y0, zero, zero, zero}, p->GetBitsType(8));
+  BValue arr_else = fb.Array({zero, zero, zero, zero}, p->GetBitsType(8));
+  BValue sel_c1 = fb.Select(c1, {fb.Select(c2, {arr_else, x}), arr_c1});
+  BValue sel_c0 = fb.Select(c0, {sel_c1, arr_c0});
+  BValue v0 = fb.ArrayIndex(sel_c0, {zero});
+  BValue v1 = fb.ArrayIndex(sel_c0, {fb.Literal(UBits(1, 32))});
+  BValue v2 = fb.ArrayIndex(sel_c0, {fb.Literal(UBits(2, 32))});
+  BValue v3 = fb.ArrayIndex(sel_c0, {fb.Literal(UBits(3, 32))});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(fb.Add(
+                                             fb.Add(fb.Add(v0, v1), v2), v3)));
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+
+  auto x0 = m::ArrayIndex(m::Param("x"), {m::Literal(0)});
+  auto x1 = m::ArrayIndex(m::Param("x"), {m::Literal(1)});
+  auto x2 = m::ArrayIndex(m::Param("x"), {m::Literal(2)});
+  auto x3 = m::ArrayIndex(m::Param("x"), {m::Literal(3)});
+
+  auto sel_c2_0 = m::Select(m::Param("c2"),
+                            /*cases=*/{m::Literal(0), x0});
+  auto v0_m = m::Select(m::Param("c0"), /*cases=*/{
+                            m::Select(m::Param("c1"),
+                                      /*cases=*/{sel_c2_0, m::Param("y0")}),
+                            m::Param("y0")});
+
+  auto sel_c2_1 = m::Select(m::Param("c2"),
+                            /*cases=*/{m::Literal(0), x1});
+  auto v1_m = m::Select(
+      m::Param("c0"),
+      /*cases=*/{m::Select(m::Param("c1"), /*cases=*/{sel_c2_1, m::Literal(0)}),
+                 m::Param("y1")});
+
+  auto sel_c2_2 = m::Select(m::Param("c2"),
+                            /*cases=*/{m::Literal(0), x2});
+  auto v2_m = m::Select(
+      m::Param("c0"),
+      /*cases=*/{m::Select(m::Param("c1"), /*cases=*/{sel_c2_2, m::Literal(0)}),
+                 m::Literal(0)});
+
+  auto sel_c2_3 = m::Select(m::Param("c2"),
+                            /*cases=*/{m::Literal(0), x3});
+  auto v3_m = m::Select(
+      m::Param("c0"),
+      /*cases=*/{m::Select(m::Param("c1"), /*cases=*/{sel_c2_3, m::Literal(0)}),
+                 m::Literal(0)});
+
+  EXPECT_THAT(f->return_value(),
+              m::Add(m::Add(m::Add(v0_m, v1_m), v2_m), v3_m));
+}
+
 TEST_F(ArraySimplificationPassTest, SelectAmongArrayUpdates) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][5][47], x: bits[10], y: bits[24],
          pred: bits[1], value0: bits[32], value1: bits[32]) -> bits[32][5][47] {
@@ -679,7 +1061,7 @@ TEST_F(ArraySimplificationPassTest, SelectAmongArrayUpdates) {
   ret result: bits[32][5][47] = sel(pred, cases=[update0, update1])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::ArrayUpdate(
@@ -689,8 +1071,72 @@ TEST_F(ArraySimplificationPassTest, SelectAmongArrayUpdates) {
                   /*indices=*/{m::Param("x"), m::Param("y")}));
 }
 
+TEST_F(ArraySimplificationPassTest, SelectOnArrayUpdateWithLiteralIndices) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* u32 = p->GetBitsType(32);
+  BValue sel_cond = fb.Param("p", p->GetBitsType(1));
+  BValue arr = fb.Param("a", p->GetArrayType(3, u32));
+  BValue x = fb.Param("x", u32);
+  BValue y = fb.Param("y", u32);
+  BValue idx_unknown = fb.Param("idx", u32);
+  BValue idx_zero = fb.Literal(UBits(0, 32));
+  BValue update0x = fb.ArrayUpdate(arr, x, {idx_zero});
+  BValue update0y = fb.ArrayUpdate(arr, y, {idx_zero});
+  BValue sel = fb.Select(sel_cond, {update0x}, update0y);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(sel));
+  EXPECT_THAT(Run(f), IsOkAndHolds(false));
+
+  // Then confirm that once the index is NOT known, we do simplify.
+  XLS_ASSERT_OK(idx_zero.node()->ReplaceUsesWith(idx_unknown.node()));
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+}
+
+TEST_F(ArraySimplificationPassTest, SelectOnArrayUpdateWithLiteralValues) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* u32 = p->GetBitsType(32);
+  BValue sel_cond = fb.Param("p", p->GetBitsType(1));
+  BValue arr = fb.Param("a", p->GetArrayType(3, u32));
+  BValue x = fb.Param("x", u32);
+  BValue val_unknown = fb.Param("val", u32);
+  BValue val_zero = fb.Literal(UBits(0, 32));
+  BValue update0x = fb.ArrayUpdate(arr, val_zero, {x});
+  BValue update0y = fb.ArrayUpdate(arr, val_zero, {x});
+  BValue sel = fb.Select(sel_cond, {update0x}, update0y);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(sel));
+  EXPECT_THAT(Run(f), IsOkAndHolds(false));
+
+  // Then confirm that once the value is NOT known, we do simplify.
+  XLS_ASSERT_OK(val_zero.node()->ReplaceUsesWith(val_unknown.node()));
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+}
+
+TEST_F(ArraySimplificationPassTest, PrioritySelectAmongArrayUpdates) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(a: bits[32][5][47], x: bits[10], y: bits[24],
+         pred: bits[1], value0: bits[32], value1: bits[32]) -> bits[32][5][47] {
+  update0: bits[32][5][47] = array_update(a, value0, indices=[x, y])
+  update1: bits[32][5][47] = array_update(a, value1, indices=[x, y])
+  ret result: bits[32][5][47] = priority_sel(pred, cases=[update1], default=update0)
+ }
+  )",
+                                                       p));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::ArrayUpdate(m::Param("a"),
+                     m::PrioritySelect(m::Param("pred"),
+                                       /*cases=*/{m::Param("value1")},
+                                       /*default_value=*/m::Param("value0")),
+                     /*indices=*/{m::Param("x"), m::Param("y")}));
+}
+
 TEST_F(ArraySimplificationPassTest, SelectAmongArrayUpdatesOfDifferentArray) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][5][47], b: bits[32][5][47], x: bits[10], y: bits[24],
          pred: bits[1], value0: bits[32], value1: bits[32]) -> bits[32][5][47] {
@@ -699,24 +1145,39 @@ TEST_F(ArraySimplificationPassTest, SelectAmongArrayUpdatesOfDifferentArray) {
   ret result: bits[32][5][47] = sel(pred, cases=[update0, update1])
  }
   )",
-                                                       p.get()));
+                                                       p));
+  EXPECT_THAT(Run(f), IsOkAndHolds(false));
+}
+
+TEST_F(ArraySimplificationPassTest,
+       PrioritySelectAmongArrayUpdatesOfDifferentArray) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(a: bits[32][5][47], b: bits[32][5][47], x: bits[10], y: bits[24],
+         pred: bits[1], value0: bits[32], value1: bits[32]) -> bits[32][5][47] {
+  update0: bits[32][5][47] = array_update(a, value0, indices=[x, y])
+  update1: bits[32][5][47] = array_update(b, value1, indices=[x, y])
+  ret result: bits[32][5][47] = priority_sel(pred, cases=[update1], default=update0)
+ }
+  )",
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(false));
 }
 
 TEST_F(ArraySimplificationPassTest, NilIndexUpdate) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][4], v: bits[32][4]) -> bits[32][4] {
   ret result: bits[32][4] = array_update(a, v, indices=[])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Param("v"));
 }
 
 TEST_F(ArraySimplificationPassTest, UpdateOfArrayOp) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(x: bits[32], y: bits[32], z: bits[32], v: bits[32]) -> bits[32][3] {
   a: bits[32][3] = array(x, y, z)
@@ -724,14 +1185,14 @@ TEST_F(ArraySimplificationPassTest, UpdateOfArrayOp) {
   ret results: bits[32][3] = array_update(a, v, indices=[one])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::Array(m::Param("x"), m::Param("v"), m::Param("z")));
 }
 
 TEST_F(ArraySimplificationPassTest, UpdateOfArrayOpMultidimensional) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(x: bits[32][6], y: bits[32][6], z: bits[32][6], v: bits[32], i: bits[17]) -> bits[32][6][3] {
   a: bits[32][6][3] = array(x, y, z)
@@ -739,7 +1200,7 @@ TEST_F(ArraySimplificationPassTest, UpdateOfArrayOpMultidimensional) {
   ret results: bits[32][6][3] = array_update(a, v, indices=[one, i])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::Array(m::Param("x"),
@@ -749,7 +1210,7 @@ TEST_F(ArraySimplificationPassTest, UpdateOfArrayOpMultidimensional) {
 }
 
 TEST_F(ArraySimplificationPassTest, NestedArrayUpdate) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][6][7], v: bits[32]) -> bits[32][6][7] {
   one: bits[16] = literal(value=1)
@@ -759,7 +1220,7 @@ TEST_F(ArraySimplificationPassTest, NestedArrayUpdate) {
   ret result: bits[32][6][7] = array_update(a, update0, indices=[one])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::ArrayUpdate(m::Param("a"), m::Param("v"),
@@ -767,7 +1228,7 @@ TEST_F(ArraySimplificationPassTest, NestedArrayUpdate) {
 }
 
 TEST_F(ArraySimplificationPassTest, NestedArrayUpdateDifferentIndices) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][6][7], v: bits[32]) -> bits[32][6][7] {
   one: bits[16] = literal(value=1)
@@ -778,12 +1239,12 @@ TEST_F(ArraySimplificationPassTest, NestedArrayUpdateDifferentIndices) {
   ret result: bits[32][6][7] = array_update(a, update0, indices=[three])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(false));
 }
 
 TEST_F(ArraySimplificationPassTest, NestedArrayUpdateUnknownIndex) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][6][7], v: bits[32], i: bits[16]) -> bits[32][6][7] {
   one: bits[16] = literal(value=1)
@@ -792,12 +1253,12 @@ TEST_F(ArraySimplificationPassTest, NestedArrayUpdateUnknownIndex) {
   ret result: bits[32][6][7] = array_update(a, update0, indices=[i])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(false));
 }
 
 TEST_F(ArraySimplificationPassTest, NestedArrayUpdateMultidimensional) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(a: bits[32][6][7][8][9], v: bits[32][6], i: bits[32]) -> bits[32][6][7][8][9] {
   one: bits[16] = literal(value=1)
@@ -807,7 +1268,7 @@ TEST_F(ArraySimplificationPassTest, NestedArrayUpdateMultidimensional) {
   ret result: bits[32][6][7][8][9] = array_update(a, update0, indices=[one, two])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::ArrayUpdate(
@@ -816,7 +1277,7 @@ TEST_F(ArraySimplificationPassTest, NestedArrayUpdateMultidimensional) {
 }
 
 TEST_F(ArraySimplificationPassTest, UpdateOfLiteralArray) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(v: bits[32]) -> bits[32][3] {
   one: bits[14] = literal(value=1)
@@ -824,14 +1285,14 @@ TEST_F(ArraySimplificationPassTest, UpdateOfLiteralArray) {
   ret update: bits[32][3] = array_update(a, v, indices=[one])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::Array(m::Literal(11), m::Param("v"), m::Literal(33)));
 }
 
 TEST_F(ArraySimplificationPassTest, UpdateOfLiteralArrayNested) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(v: bits[32]) -> bits[32][3][2] {
   zero: bits[14] = literal(value=0)
@@ -840,7 +1301,7 @@ TEST_F(ArraySimplificationPassTest, UpdateOfLiteralArrayNested) {
   ret update: bits[32][3][2] = array_update(a, v, indices=[zero, one])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(
       f->return_value(),
@@ -850,7 +1311,7 @@ TEST_F(ArraySimplificationPassTest, UpdateOfLiteralArrayNested) {
 
 TEST_F(ArraySimplificationPassTest,
        ConditionalAssignmentOfArrayElementUpdatedOnTrue) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(p: bits[1], a: bits[32][4], v: bits[32]) -> bits[32][4] {
   one: bits[14] = literal(value=1)
@@ -858,7 +1319,7 @@ TEST_F(ArraySimplificationPassTest,
   ret result: bits[32][4] = sel(p, cases=[a, updated_a])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(
       f->return_value(),
@@ -866,14 +1327,15 @@ TEST_F(ArraySimplificationPassTest,
           m::Param("a"),
           m::Select(m::Param("p"),
                     /*cases=*/{m::ArrayIndex(m::Param("a"),
-                                             /*indices=*/{m::Literal(1)}),
+                                             /*indices=*/{m::Literal(1)},
+                                             m::AssumedInBounds()),
                                m::Param("v")}),
           /*indices=*/{m::Literal(1)}));
 }
 
 TEST_F(ArraySimplificationPassTest,
        ConditionalAssignmentOfArrayElementWithMultipleUses) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(p: bits[1], a: bits[32][4], v: bits[32]) -> (bits[32][4], bits[32][4]) {
   one: bits[14] = literal(value=1)
@@ -882,21 +1344,21 @@ TEST_F(ArraySimplificationPassTest,
   ret result: (bits[32][4], bits[32][4]) = tuple(updated_a, sel)
  }
   )",
-                                                       p.get()));
+                                                       p));
   // Multiple uses of the updated array prevents the optimization.
   EXPECT_THAT(Run(f), IsOkAndHolds(false));
 }
 
 TEST_F(ArraySimplificationPassTest,
        ConditionalAssignmentOfArrayElementUpdatedOnFalse) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(p: bits[1], a: bits[32][4], v: bits[32], i: bits[16]) -> bits[32][4] {
   updated_a: bits[32][4] = array_update(a, v, indices=[i])
   ret result: bits[32][4] = sel(p, cases=[updated_a, a])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(
       f->return_value(),
@@ -905,12 +1367,236 @@ TEST_F(ArraySimplificationPassTest,
           m::Select(m::Param("p"),
                     /*cases=*/{m::Param("v"),
                                m::ArrayIndex(m::Param("a"),
-                                             /*indices=*/{m::Param("i")})}),
+                                             /*indices=*/{m::Param("i")},
+                                             // NB The value is only actually
+                                             // used by the update if the 'i' is
+                                             // actually in bounds so we can
+                                             // avoid bounds checks here.
+                                             m::AssumedInBounds())}),
+          /*indices=*/{m::Param("i")}, m::NotAssumedInBounds()));
+}
+
+TEST_F(ArraySimplificationPassTest,
+       ConditionalAssignmentOfArrayElementUpdatedOnFalseAssumedInBounds) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(p: bits[1], a: bits[32][4], v: bits[32], i: bits[16]) -> bits[32][4] {
+  updated_a: bits[32][4] = array_update(a, v, indices=[i], assumed_in_bounds=true)
+  ret result: bits[32][4] = sel(p, cases=[updated_a, a])
+ }
+  )",
+                                                       p));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  ScopedRecordIr sri(p);
+  EXPECT_THAT(
+      f->return_value(),
+      m::ArrayUpdate(
+          m::Param("a"),
+          m::Select(m::Param("p"),
+                    /*cases=*/{m::Param("v"),
+                               m::ArrayIndex(m::Param("a"),
+                                             /*indices=*/{m::Param("i")},
+                                             // NB The value is only actually
+                                             // used by the update if the 'i' is
+                                             // actually in bounds so we can
+                                             // avoid bounds checks here.
+                                             m::AssumedInBounds())}),
+          /*indices=*/{m::Param("i")}, m::AssumedInBounds()));
+}
+
+TEST_F(ArraySimplificationPassTest,
+       ConditionalAssignmentOfArrayElementWithMultipleCases) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(p: bits[3], a: bits[32][4], v1: bits[32], v3: bits[32], i: bits[16]) -> bits[32][4] {
+  a_update1: bits[32][4] = array_update(a, v1, indices=[i])
+  a_update3: bits[32][4] = array_update(a, v3, indices=[i])
+  ret result: bits[32][4] = sel(p, cases=[a, a_update1, a, a_update3], default=a)
+ }
+  )",
+                                                       p));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::ArrayUpdate(
+          m::Param("a"),
+          m::Select(m::Param("p"),
+                    /*cases=*/
+                    {m::ArrayIndex(m::Param("a"),
+                                   /*indices=*/{m::Param("i")}),
+                     m::Param("v1"),
+                     m::ArrayIndex(m::Param("a"),
+                                   /*indices=*/{m::Param("i")}),
+                     m::Param("v3")},
+                    /*default_value=*/
+                    m::ArrayIndex(m::Param("a"), /*indices=*/{m::Param("i")})),
           /*indices=*/{m::Param("i")}));
 }
 
+TEST_F(ArraySimplificationPassTest,
+       ConditionalAssignmentOfArrayElementWithMultipleCasesAllChanged) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(p: bits[1], a: bits[32][4], v1: bits[32], v2: bits[32], i: bits[16]) -> bits[32][4] {
+  a_update1: bits[32][4] = array_update(a, v1, indices=[i])
+  a_update2: bits[32][4] = array_update(a, v2, indices=[i])
+  ret result: bits[32][4] = sel(p, cases=[a_update1, a_update2])
+ }
+  )",
+                                                       p));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::ArrayUpdate(m::Param("a"),
+                             m::Select(m::Param("p"),
+                                       /*cases=*/
+                                       {m::Param("v1"), m::Param("v2")}),
+                             /*indices=*/{m::Param("i")}));
+}
+
+TEST_F(ArraySimplificationPassTest,
+       PriorityConditionalAssignmentOfArrayElementUpdatedOnTrue) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(p: bits[1], a: bits[32][4], v: bits[32]) -> bits[32][4] {
+  one: bits[14] = literal(value=1)
+  updated_a: bits[32][4] = array_update(a, v, indices=[one])
+  ret result: bits[32][4] = priority_sel(p, cases=[updated_a], default=a)
+ }
+  )",
+                                                       p));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::ArrayUpdate(
+                  m::Param("a"),
+                  m::PrioritySelect(m::Param("p"),
+                                    /*cases=*/{m::Param("v")},
+                                    /*default_value=*/
+                                    m::ArrayIndex(m::Param("a"),
+                                                  /*indices=*/{m::Literal(1)})),
+                  /*indices=*/{m::Literal(1)}));
+}
+
+TEST_F(ArraySimplificationPassTest,
+       PriorityConditionalAssignmentOfArrayElementWithMultipleUses) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(p: bits[1], a: bits[32][4], v: bits[32]) -> (bits[32][4], bits[32][4]) {
+  one: bits[14] = literal(value=1)
+  updated_a: bits[32][4] = array_update(a, v, indices=[one])
+  sel: bits[32][4] = priority_sel(p, cases=[updated_a], default=a)
+  ret result: (bits[32][4], bits[32][4]) = tuple(updated_a, sel)
+ }
+  )",
+                                                       p));
+  // Multiple uses of the updated array prevents the optimization.
+  EXPECT_THAT(Run(f), IsOkAndHolds(false));
+}
+
+TEST_F(ArraySimplificationPassTest,
+       PriorityConditionalAssignmentOfArrayElementUpdatedOnFalse) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(p: bits[1], a: bits[32][4], v: bits[32], i: bits[16]) -> bits[32][4] {
+  updated_a: bits[32][4] = array_update(a, v, indices=[i])
+  ret result: bits[32][4] = priority_sel(p, cases=[a], default=updated_a)
+ }
+  )",
+                                                       p));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::ArrayUpdate(m::Param("a"),
+                             m::PrioritySelect(
+                                 m::Param("p"),
+                                 /*cases=*/
+                                 {m::ArrayIndex(m::Param("a"),
+                                                /*indices=*/{m::Param("i")})},
+                                 /*default_value=*/m::Param("v")),
+                             /*indices=*/{m::Param("i")}));
+}
+
+TEST_F(ArraySimplificationPassTest,
+       PriorityConditionalAssignmentOfArrayElementWithMultipleCases) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(p: bits[4], a: bits[32][4], v1: bits[32], v3: bits[32], i: bits[16]) -> bits[32][4] {
+  a_update1: bits[32][4] = array_update(a, v1, indices=[i])
+  a_update3: bits[32][4] = array_update(a, v3, indices=[i])
+  ret result: bits[32][4] = priority_sel(p, cases=[a, a_update1, a, a_update3], default=a)
+ }
+  )",
+                                                       p));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::ArrayUpdate(
+                  m::Param("a"),
+                  m::PrioritySelect(m::Param("p"),
+                                    /*cases=*/
+                                    {m::ArrayIndex(m::Param("a"),
+                                                   /*indices=*/{m::Param("i")}),
+                                     m::Param("v1"),
+                                     m::ArrayIndex(m::Param("a"),
+                                                   /*indices=*/{m::Param("i")}),
+                                     m::Param("v3")},
+                                    /*default_value=*/
+                                    m::ArrayIndex(m::Param("a"),
+                                                  /*indices=*/{m::Param("i")})),
+                  /*indices=*/{m::Param("i")}));
+}
+
+TEST_F(ArraySimplificationPassTest,
+       PriorityConditionalAssignmentOfArrayElementWithMultipleCasesInBounds) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(p: bits[4], a: bits[32][4], v1: bits[32], v3: bits[32], i: bits[16]) -> bits[32][4] {
+  a_update1: bits[32][4] = array_update(a, v1, indices=[i], assumed_in_bounds=true)
+  a_update3: bits[32][4] = array_update(a, v3, indices=[i], assumed_in_bounds=true)
+  ret result: bits[32][4] = priority_sel(p, cases=[a, a_update1, a, a_update3], default=a)
+ }
+  )",
+                                                       p));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::ArrayUpdate(
+          m::Param("a"),
+          m::PrioritySelect(
+              m::Param("p"),
+              /*cases=*/
+              {m::ArrayIndex(m::Param("a"),
+                             /*indices=*/{m::Param("i")}, m::AssumedInBounds()),
+               m::Param("v1"),
+               m::ArrayIndex(m::Param("a"),
+                             /*indices=*/{m::Param("i")}, m::AssumedInBounds()),
+               m::Param("v3")},
+              /*default_value=*/
+              m::ArrayIndex(m::Param("a"),
+                            /*indices=*/{m::Param("i")}, m::AssumedInBounds())),
+          /*indices=*/{m::Param("i")}, m::AssumedInBounds()));
+}
+
+TEST_F(ArraySimplificationPassTest,
+       PriorityConditionalAssignmentOfArrayElementWithMultipleCasesAllChanged) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(p: bits[1], a: bits[32][4], v1: bits[32], v2: bits[32], i: bits[16]) -> bits[32][4] {
+  a_update1: bits[32][4] = array_update(a, v1, indices=[i])
+  a_update2: bits[32][4] = array_update(a, v2, indices=[i])
+  ret result: bits[32][4] = priority_sel(p, cases=[a_update1], default=a_update2)
+ }
+  )",
+                                                       p));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::ArrayUpdate(m::Param("a"),
+                     m::PrioritySelect(m::Param("p"),
+                                       /*cases=*/{m::Param("v1")},
+                                       /*default_value=*/m::Param("v2")),
+                     /*indices=*/{m::Param("i")}));
+}
+
 TEST_F(ArraySimplificationPassTest, SimplifySelectOfArrays) {
-  auto p = CreatePackage();
+  Package* p = GetPackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
  fn func(p: bits[1], w: bits[32], x: bits[32], y: bits[32], z: bits[32]) -> bits[32][2] {
   a: bits[32][2] = array(w, x)
@@ -918,7 +1604,7 @@ TEST_F(ArraySimplificationPassTest, SimplifySelectOfArrays) {
   ret result: bits[32][2] = sel(p, cases=[a, b])
  }
   )",
-                                                       p.get()));
+                                                       p));
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::Array(m::Select(m::Param("p"),
@@ -927,9 +1613,29 @@ TEST_F(ArraySimplificationPassTest, SimplifySelectOfArrays) {
                                  /*cases=*/{m::Param("x"), m::Param("z")})));
 }
 
+TEST_F(ArraySimplificationPassTest, SimplifyPrioritySelectOfArrays) {
+  Package* p = GetPackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+ fn func(p: bits[1], w: bits[32], x: bits[32], y: bits[32], z: bits[32]) -> bits[32][2] {
+  a: bits[32][2] = array(w, x)
+  d: bits[32][2] = array(y, z)
+  ret result: bits[32][2] = priority_sel(p, cases=[a], default=d)
+ }
+  )",
+                                                       p));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Array(m::PrioritySelect(m::Param("p"),
+                                         /*cases=*/{m::Param("w")},
+                                         /*default_value=*/m::Param("y")),
+                       m::PrioritySelect(m::Param("p"),
+                                         /*cases=*/{m::Param("x")},
+                                         /*default_value=*/m::Param("z"))));
+}
+
 TEST_F(ArraySimplificationPassTest, IndexingArrayConcat) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
   Type* subarray_type = p->GetArrayType(42, p->GetBitsType(10));
   BValue a = fb.Param("A", p->GetArrayType(10, subarray_type));
   BValue b = fb.Param("B", p->GetArrayType(20, subarray_type));
@@ -945,9 +1651,30 @@ TEST_F(ArraySimplificationPassTest, IndexingArrayConcat) {
               m::ArrayIndex(m::Param("B"), {m::Literal(5), m::Param("x")}));
 }
 
+TEST_F(ArraySimplificationPassTest, IndexingArrayConcatInBounds) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* subarray_type = p->GetArrayType(42, p->GetBitsType(10));
+  BValue a = fb.Param("A", p->GetArrayType(10, subarray_type));
+  BValue b = fb.Param("B", p->GetArrayType(20, subarray_type));
+  BValue c = fb.Param("C", p->GetArrayType(30, subarray_type));
+  BValue concat = fb.ArrayConcat({a, b, c});
+  fb.ArrayIndex(
+      concat,
+      /*indices=*/
+      {fb.Literal(Value(UBits(15, 32))), fb.Param("x", p->GetBitsType(32))},
+      /*assumed_in_bounds=*/true);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::ArrayIndex(m::Param("B"), {m::Literal(5), m::Param("x")},
+                            m::AssumedInBounds()));
+}
+
 TEST_F(ArraySimplificationPassTest, IndexingArrayConcatNonConstant) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
   Type* subarray_type = p->GetArrayType(42, p->GetBitsType(10));
   BValue a = fb.Param("A", p->GetArrayType(10, subarray_type));
   BValue b = fb.Param("B", p->GetArrayType(20, subarray_type));
@@ -962,6 +1689,337 @@ TEST_F(ArraySimplificationPassTest, IndexingArrayConcatNonConstant) {
   EXPECT_THAT(f->return_value(),
               m::ArrayIndex(m::ArrayConcat(), {m::Param(), m::Param()}));
 }
+
+TEST_F(ArraySimplificationPassTest, BasicRemoval) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  BValue arr = fb.Array(
+      {fb.Param("v1", p->GetBitsType(32)), fb.Param("v2", p->GetBitsType(32))},
+      p->GetBitsType(32));
+  fb.ArrayIndex(arr, {fb.Param("idx", p->GetBitsType(32))});
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  ScopedVerifyEquivalence sve(f);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Select(m::Param("idx"), {m::Param("v1")}, m::Param("v2")));
+}
+
+TEST_F(ArraySimplificationPassTest, RemovalOfUpdateIndexLiteral) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  BValue arr = fb.Array(
+      {fb.Param("v1", p->GetBitsType(32)), fb.Param("v2", p->GetBitsType(32))},
+      p->GetBitsType(32));
+  BValue updated = fb.ArrayUpdate(arr, fb.Param("v3", p->GetBitsType(32)),
+                                  {fb.Param("idx", p->GetBitsType(32))});
+  fb.ArrayIndex(updated, {fb.Literal(UBits(0, 32))});
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  ScopedVerifyEquivalence sve(f);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::PrioritySelect(testing::A<const Node*>(), {m::Param("v3")},
+                                m::Param("v1")));
+  EXPECT_THAT(f->nodes(), Each(Not(m::Array())));
+}
+
+TEST_F(ArraySimplificationPassTest, RemovalOfUpdate) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  BValue arr = fb.Array(
+      {fb.Param("v1", p->GetBitsType(32)), fb.Param("v2", p->GetBitsType(32))},
+      p->GetBitsType(32), SourceInfo(), "arr");
+  BValue updated = fb.ArrayUpdate(arr, fb.Param("v3", p->GetBitsType(32)),
+                                  {fb.Param("idx", p->GetBitsType(32))},
+                                  SourceInfo(), "updated_arr");
+  fb.ArrayIndex(updated, {fb.Param("idx2", p->GetBitsType(32))}, SourceInfo(),
+                "arr_read");
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  ScopedVerifyEquivalence sve(f);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  auto original_value =
+      m::Select(m::Param("idx2"), {m::Param("v1")}, m::Param("v2"));
+  EXPECT_THAT(f->return_value(),
+              m::PrioritySelect(testing::A<const Node*>(), {m::Param("v3")},
+                                original_value));
+  EXPECT_THAT(f->nodes(), Each(Not(m::Array())));
+}
+
+TEST_F(ArraySimplificationPassTest, NoOpArrayUpdate) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  BValue arr = fb.Param("array", p->GetArrayType(10, p->GetBitsType(32)));
+  BValue idx = fb.Param("upd_idx", p->GetBitsType(32));
+  BValue val_at_idx = fb.ArrayIndex(arr, {idx});
+  BValue update_arr = fb.ArrayUpdate(arr, val_at_idx, {idx});
+  fb.ArrayIndex(update_arr, {fb.Param("second_idx", p->GetBitsType(32))});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  ScopedVerifyEquivalence sve(f);
+  ScopedRecordIr sri(p);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::ArrayIndex(m::Param("array"), {m::Param("second_idx")}));
+}
+
+TEST_F(ArraySimplificationPassTest, UnitArrayIndex) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* u32 = p->GetBitsType(32);
+  BValue arr = fb.Param("array", p->GetArrayType(1, u32));
+  BValue idx = fb.Param("idx", u32);
+  fb.ArrayIndex(arr, {idx});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  ScopedVerifyEquivalence sve(f);
+  ScopedRecordIr sri(p);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::ArrayIndex(m::Param("array"), {m::Literal(0)}));
+}
+
+TEST_F(ArraySimplificationPassTest, MultidimensionalUnitArrayIndex) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* u32 = p->GetBitsType(32);
+  BValue arr = fb.Param(
+      "array",
+      p->GetArrayType(
+          1, p->GetArrayType(
+                 2, p->GetArrayType(
+                        1, p->GetArrayType(2, p->GetArrayType(1, u32))))));
+  BValue idx = fb.Param("idx", u32);
+  fb.ArrayIndex(arr, {idx, idx, idx, idx, idx});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  ScopedVerifyEquivalence sve(f);
+  ScopedRecordIr sri(p);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::ArrayIndex(m::Param("array"),
+                            {m::Literal(0), m::Param("idx"), m::Literal(0),
+                             m::Param("idx"), m::Literal(0)}));
+}
+
+TEST_F(ArraySimplificationPassTest, UnitArrayUpdate) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* u32 = p->GetBitsType(32);
+  BValue arr = fb.Param("array", p->GetArrayType(1, u32));
+  BValue idx = fb.Param("idx", u32);
+  BValue val = fb.Param("val", u32);
+  fb.ArrayUpdate(arr, val, {idx});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  ScopedVerifyEquivalence sve(f);
+  ScopedRecordIr sri(p);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::PrioritySelect(m::Eq(m::Param("idx"), m::Literal(0)),
+                                {m::Array(m::Param("val"))},
+                                /*default_value=*/m::Param("array")));
+}
+
+TEST_F(ArraySimplificationPassTest, MultidimensionalUnitArrayUpdate) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* u32 = p->GetBitsType(32);
+  BValue arr = fb.Param(
+      "array",
+      p->GetArrayType(
+          1, p->GetArrayType(
+                 1, p->GetArrayType(
+                        2, p->GetArrayType(2, p->GetArrayType(1, u32))))));
+  BValue idx = fb.Param("idx", u32);
+  BValue val = fb.Param("val", u32);
+  fb.ArrayUpdate(arr, val, {idx, idx, idx, idx, idx});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  ScopedVerifyEquivalence sve(f);
+  ScopedRecordIr sri(p);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::PrioritySelect(
+          m::And(m::Eq(m::Param("idx"), m::Literal(0)),
+                 m::Eq(m::Param("idx"), m::Literal(0))),
+          {m::Array(m::Array(m::ArrayUpdate(
+              m::ArrayIndex(m::Param("array"), {m::Literal(0), m::Literal(0)},
+                            m::AssumedInBounds()),
+              m::Param("val"),
+              {m::Param("idx"), m::Param("idx"), m::Param("idx")})))},
+          /*default_value=*/m::Param("array")));
+}
+
+TEST_F(ArraySimplificationPassTest, ArrayUpdateIndexInBounds) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  BValue arr = fb.Param("array", p->GetArrayType(10, p->GetBitsType(32)));
+  BValue idx = fb.Param("upd_idx", p->GetBitsType(32));
+  // NB This sort of selector requires context-sensitive range analysis to see.
+  BValue idx_bound = fb.Select(fb.ULt(idx, fb.Literal(UBits(10, 32))), {idx},
+                               fb.Literal(UBits(0, 32)));
+  BValue val = fb.Param("val", p->GetBitsType(32));
+  BValue update_arr =
+      fb.ArrayUpdate(arr, val, {idx_bound}, /*assumed_in_bounds=*/true);
+  fb.ArrayIndex(update_arr, {idx_bound}, /*assumed_in_bounds=*/true);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  ScopedVerifyEquivalence sve(f);
+  ScopedRecordIr sri(p);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(), m::Param("val"));
+}
+
+TEST_F(ArraySimplificationPassTest, ArraySliceLiteral) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  BValue arr = fb.Param("array", p->GetArrayType(10, p->GetBitsType(32)));
+  BValue start = fb.Literal(UBits(5, 32));
+  fb.ArraySlice(arr, {start}, 3);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  ScopedVerifyEquivalence sve(f);
+  ScopedRecordIr sri(p);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Array(m::ArrayIndex(m::Param("array"), {m::Literal(5)}),
+                       m::ArrayIndex(m::Param("array"), {m::Literal(6)}),
+                       m::ArrayIndex(m::Param("array"), {m::Literal(7)})));
+}
+
+TEST_F(ArraySimplificationPassTest, ArraySliceLiteralOOB) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  BValue arr = fb.Param("array", p->GetArrayType(10, p->GetBitsType(32)));
+  BValue start = fb.Literal(UBits(8, 32));
+  fb.ArraySlice(arr, {start}, 3);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  ScopedVerifyEquivalence sve(f);
+  ScopedRecordIr sri(p);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Array(m::ArrayIndex(m::Param("array"), {m::Literal(8)}),
+                       m::ArrayIndex(m::Param("array"), {m::Literal(9)}),
+                       m::ArrayIndex(m::Param("array"), {m::Literal(9)})));
+}
+
+TEST_F(ArraySimplificationPassTest, ArraySliceLiteralOOBAll) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  BValue arr = fb.Param("array", p->GetArrayType(10, p->GetBitsType(32)));
+  BValue start = fb.Literal(UBits(12, 32));
+  fb.ArraySlice(arr, {start}, 3);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  ScopedVerifyEquivalence sve(f);
+  ScopedRecordIr sri(p);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Array(m::ArrayIndex(m::Param("array"), {m::Literal(9)}),
+                       m::ArrayIndex(m::Param("array"), {m::Literal(9)}),
+                       m::ArrayIndex(m::Param("array"), {m::Literal(9)})));
+}
+
+TEST_F(ArraySimplificationPassTest, IndexOfOneHotSelect) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* u32 = p->GetBitsType(32);
+  BValue a = fb.Param("a", p->GetArrayType(3, p->GetArrayType(4, u32)));
+  BValue b = fb.Param("b", p->GetArrayType(3, p->GetArrayType(4, u32)));
+  BValue sel = fb.Param("p", p->GetBitsType(2));
+  BValue one_hot = fb.OneHotSelect(sel, {a, b});
+  BValue i = fb.Param("i", p->GetBitsType(10));
+  BValue j = fb.Param("j", p->GetBitsType(10));
+  fb.ArrayIndex(one_hot, {i, j});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  solvers::ScopedVerifyEquivalence stays_equivalent(f);
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::OneHotSelect(
+          m::Param("p"), /*cases=*/{
+              m::ArrayIndex(m::Param("a"), {m::Param("i"), m::Param("j")}),
+              m::ArrayIndex(m::Param("b"), {m::Param("i"), m::Param("j")})}));
+}
+
+TEST_F(ArraySimplificationPassTest,
+       SimplifyConditionalAssignWithOneHotSelectAndOneHotSelector) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* u32 = p->GetBitsType(32);
+  BValue a_param = fb.Param("a", u32);
+  BValue b_param = fb.Param("b", u32);
+  BValue c_param = fb.Param("c", u32);
+  BValue A = fb.Array({a_param, b_param, c_param}, u32);
+
+  BValue x = fb.Param("x", p->GetBitsType(1));
+  BValue selector = fb.Concat({x, fb.Not(x)});
+
+  BValue v = fb.Param("v", u32);
+  BValue idx = fb.Literal(UBits(1, 32));
+  BValue A_updated = fb.ArrayUpdate(A, v, {idx});
+
+  BValue ohs = fb.OneHotSelect(selector, {A, A_updated});
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(ohs));
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+
+  EXPECT_THAT(
+      f->return_value(),
+      m::Array(m::Param("a"),
+               m::OneHotSelect(m::Concat(m::Param("x"), m::Not(m::Param("x"))),
+                               {m::Param("b"), m::Param("v")}),
+               m::Param("c")));
+}
+
+TEST_F(ArraySimplificationPassTest,
+       NoSimplifyConditionalAssignWithOneHotSelectAndNonOneHotSelector) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* u32 = p->GetBitsType(32);
+  BValue a_param = fb.Param("a", u32);
+  BValue b_param = fb.Param("b", u32);
+  BValue c_param = fb.Param("c", u32);
+  BValue A = fb.Array({a_param, b_param, c_param}, u32);
+
+  BValue selector = fb.Param("selector", p->GetBitsType(2));
+
+  BValue v = fb.Param("v", u32);
+  BValue idx = fb.Literal(UBits(1, 32));
+  BValue A_updated = fb.ArrayUpdate(A, v, {idx});
+
+  BValue ohs = fb.OneHotSelect(selector, {A, A_updated});
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(ohs));
+  ASSERT_THAT(Run(f), IsOkAndHolds(false));
+}
+
+TEST_F(ArraySimplificationPassTest, SimplifySelectOfArraysWithOneHotSelect) {
+  Package* p = GetPackage();
+  FunctionBuilder fb(TestName(), p);
+  Type* u32 = p->GetBitsType(32);
+  BValue a = fb.Param("a", u32);
+  BValue b = fb.Param("b", u32);
+  BValue c = fb.Param("c", u32);
+  BValue d = fb.Param("d", u32);
+
+  BValue A = fb.Array({a, b}, u32);
+  BValue B = fb.Array({c, d}, u32);
+
+  BValue selector = fb.Param("selector", p->GetBitsType(2));
+  BValue ohs = fb.OneHotSelect(selector, {A, B});
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(ohs));
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+
+  EXPECT_THAT(f->return_value(),
+              m::Array(m::OneHotSelect(m::Param("selector"),
+                                       {m::Param("a"), m::Param("c")}),
+                       m::OneHotSelect(m::Param("selector"),
+                                       {m::Param("b"), m::Param("d")})));
+}
+
+void IrFuzzArraySimplification(FuzzPackageWithArgs fuzz_package_with_args) {
+  ArraySimplificationPass pass;
+  OptimizationPassChangesOutputs(std::move(fuzz_package_with_args), pass);
+}
+FUZZ_TEST(IrFuzzTest, IrFuzzArraySimplification)
+    .WithDomains(IrFuzzDomainWithArgs(/*arg_set_count=*/10));
 
 }  // namespace
 }  // namespace xls

@@ -20,16 +20,23 @@
 #ifndef XLS_NETLIST_LIB_PARSER_H_
 #define XLS_NETLIST_LIB_PARSER_H_
 
+#include <cctype>
+#include <cstdint>
 #include <fstream>
+#include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
-#include "absl/strings/string_view.h"
-#include "absl/types/optional.h"
-#include "xls/common/logging/logging.h"
 #include "xls/common/status/status_macros.h"
 
 namespace xls {
@@ -50,7 +57,7 @@ struct Pos {
 // interface.
 class CharStream {
  public:
-  static absl::StatusOr<CharStream> FromPath(absl::string_view path);
+  static absl::StatusOr<CharStream> FromPath(std::string_view path);
   static absl::StatusOr<CharStream> FromText(std::string text);
 
   ~CharStream() {
@@ -70,10 +77,10 @@ class CharStream {
   }
   char PeekCharOrDie() {
     if (if_.has_value()) {
-      XLS_DCHECK(!if_->eof());
+      DCHECK(!if_->eof());
       return if_->peek();
     }
-    XLS_DCHECK_LT(cursor_, text_.size());
+    DCHECK_LT(cursor_, text_.size());
     return text_[cursor_];
   }
   char PopCharOrDie() {
@@ -110,8 +117,9 @@ class CharStream {
   }
 
  private:
-  CharStream(std::ifstream file_stream) : if_(std::move(file_stream)) {}
-  CharStream(std::string text) : text_(std::move(text)) {}
+  explicit CharStream(std::ifstream file_stream)
+      : if_(std::move(file_stream)) {}
+  explicit CharStream(std::string text) : text_(std::move(text)) {}
 
   void Unget(char c) {
     cursor_--;
@@ -142,7 +150,7 @@ class CharStream {
   // We have both ifstream mode and text mode data, we store both inline.
 
   // ifstream mode
-  absl::optional<std::ifstream> if_;
+  std::optional<std::ifstream> if_;
 
   // text mode
   std::string text_;
@@ -180,30 +188,19 @@ class Token {
   static Token Simple(Pos pos, TokenKind kind) { return Token(kind, pos); }
 
   Token(TokenKind kind, Pos pos,
-        absl::optional<std::string> payload = absl::nullopt)
+        std::optional<std::string> payload = std::nullopt)
       : kind_(kind), pos_(pos), payload_(payload) {}
-
-  std::string ToString() const {
-    return absl::StrFormat("Token(%s, %s, \"%s\")", pos_.ToHumanString(),
-                           TokenKindToString(kind_),
-                           payload_.has_value() ? payload_.value() : "null");
-  }
 
   TokenKind kind() const { return kind_; }
   const Pos& pos() const { return pos_; }
-  absl::string_view payload() const { return payload_.value(); }
+  std::string_view payload() const { return payload_.value(); }
   std::string PopPayload() { return std::move(payload_.value()); }
 
  private:
   TokenKind kind_;
   Pos pos_;
-  absl::optional<std::string> payload_;
+  std::optional<std::string> payload_;
 };
-
-inline std::ostream& operator<<(std::ostream& os, const Token& token) {
-  os << token.ToString();
-  return os;
-}
 
 // Converts a stream of characters to a stream of tokens.
 class Scanner {
@@ -214,7 +211,7 @@ class Scanner {
   absl::StatusOr<Token> Pop() {
     XLS_RETURN_IF_ERROR(Peek().status());
     Token result = std::move(lookahead_.value());
-    lookahead_ = absl::nullopt;
+    lookahead_ = std::nullopt;
     return result;
   }
 
@@ -238,11 +235,11 @@ class Scanner {
  private:
   static bool IsIdentifierStart(char c) { return std::isalpha(c); }
   static bool IsIdentifierRest(char c) {
-    return std::isalpha(c) || std::isdigit(c) || c == '_';
+    return std::isalpha(c) != 0 || std::isdigit(c) != 0 || c == '_';
   }
   static bool IsWhitespace(char c) { return c == ' ' || c == '\n'; }
   static bool IsNumberRest(char c) {
-    return std::isdigit(c) || c == '.' || c == 'e' || c == '-';
+    return std::isdigit(c) != 0 || c == '.' || c == 'e' || c == '-';
   }
 
   // Scans an identifier token.
@@ -281,7 +278,7 @@ class Scanner {
   // Peeks at a token and populates it as lookahead_.
   absl::Status PeekInternal();
 
-  absl::optional<Token> lookahead_;
+  std::optional<Token> lookahead_;
   CharStream* cs_;
 };
 
@@ -320,7 +317,7 @@ struct KVEntry {
 struct Block;
 
 // Inside of a block there are either key/value items or sub-blocks.
-using BlockEntry = absl::variant<KVEntry, std::unique_ptr<Block>>;
+using BlockEntry = std::variant<KVEntry, std::unique_ptr<Block>>;
 
 // Represents a hierarchical entity in the cell library description, as shown in
 // the grammar above.
@@ -340,15 +337,15 @@ struct Block {
   // If target_kind is provided it is used as a filter (the only blocks returned
   // have subblock->kind == target_kind).
   std::vector<const Block*> GetSubBlocks(
-      absl::optional<absl::string_view> target_kind = absl::nullopt) const;
+      std::optional<std::string_view> target_kind = std::nullopt) const;
 
   // Retrieves the first key/value pair in this block that corresponds to
   // target_key.
-  const std::string& GetKVOrDie(absl::string_view target_key) const;
+  const std::string& GetKVOrDie(std::string_view target_key) const;
 
   // Counts the number of entries with either the key of "target" for a
   // key/value entry or a kind of "target" for a block entry.
-  int64_t CountEntries(absl::string_view target) const;
+  int64_t CountEntries(std::string_view target) const;
 
   // Helper used for converting entries contained within the block into strings.
   static std::string EntryToString(const BlockEntry& entry);
@@ -361,8 +358,8 @@ class Parser {
  public:
   // See comment on kind_allowlist_ member below for details.
   explicit Parser(Scanner* scanner,
-                  absl::optional<absl::flat_hash_set<std::string>>
-                      kind_allowlist = absl::nullopt)
+                  std::optional<absl::flat_hash_set<std::string>>
+                      kind_allowlist = std::nullopt)
       : scanner_(scanner), kind_allowlist_(std::move(kind_allowlist)) {}
 
   absl::StatusOr<std::unique_ptr<Block>> ParseLibrary() {
@@ -373,7 +370,7 @@ class Parser {
  private:
   absl::StatusOr<bool> TryDropToken(TokenKind target, Pos* pos = nullptr);
   absl::Status DropTokenOrError(TokenKind kind);
-  absl::Status DropIdentifierOrError(absl::string_view target);
+  absl::Status DropIdentifierOrError(std::string_view target);
 
   // Pops an identifier token and returns its payload, or errors.
   absl::StatusOr<std::string> PopIdentifierOrError();
@@ -408,7 +405,7 @@ class Parser {
   //
   // This is very useful for minimizing memory usage when we're interested in
   // just a subset of particular fields, e.g. as part of a query.
-  absl::optional<absl::flat_hash_set<std::string>> kind_allowlist_;
+  std::optional<absl::flat_hash_set<std::string>> kind_allowlist_;
 };
 
 }  // namespace cell_lib

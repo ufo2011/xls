@@ -14,11 +14,36 @@
 
 #include "xls/passes/inlining_pass.h"
 
+#include <cstdint>
+#include <iterator>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/algorithm/container.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
+#include "xls/common/module_initializer.h"
+#include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
-#include "xls/ir/node_iterator.h"
+#include "xls/ir/call_graph.h"
+#include "xls/ir/function_base.h"
+#include "xls/ir/node.h"
+#include "xls/ir/node_util.h"
+#include "xls/ir/nodes.h"
+#include "xls/ir/package.h"
+#include "xls/ir/source_location.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/optimization_pass_registry.h"
+#include "xls/passes/pass_base.h"
 
 namespace xls {
 namespace {
@@ -30,9 +55,9 @@ namespace {
 // generated using the respective operand name of 'invoke' substituted for the
 // parameter name. If no meaningful name could be determined then nullopt is
 // returned.
-absl::optional<std::string> GetInlinedNodeName(Node* node, Invoke* invoke) {
+std::optional<std::string> GetInlinedNodeName(Node* node, Invoke* invoke) {
   if (!node->HasAssignedName()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   // Find the parameter in the invoked function whose name is a prefix of the
@@ -52,18 +77,36 @@ absl::optional<std::string> GetInlinedNodeName(Node* node, Invoke* invoke) {
          matching_param->GetName().size() < param->GetName().size())) {
       matching_param = param;
       std::string suffix = node->GetName().substr(param->GetName().size());
-      derived_name = absl::StrCat(operand->GetName(), suffix);
+      derived_name = NodeNameConcat(operand, suffix);
     }
   }
   if (matching_param == nullptr) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   return derived_name;
 }
 
+// Inlining can cause coverpoints to be duplicated, which will then conflict, as
+// a Verilog cover property must have a unique name. To handle this, we prepend
+// the original node ID to an inlined coverpoint. Post-processing will be needed
+// to re-aggregate coverpoints disaggregated in this method.
+std::string GetPrefixedLabel(Invoke* invoke, std::string_view label,
+                             int inline_count) {
+  FunctionBase* caller = invoke->function_base();
+  return absl::StrCat(caller->name(), "_", inline_count, "_",
+                      invoke->to_apply()->name(), "_", label);
+}
+
+static bool IsInlineable(const Invoke* invoke) {
+  // Foreign functions can not and should not be inlined.
+  return !invoke->to_apply()->ForeignFunctionData().has_value();
+}
+
 // Inlines the node "invoke" by replacing it with the contents of the called
 // function.
-absl::Status InlineInvoke(Invoke* invoke) {
+template <bool kCheckNoSubInvokes = true>
+absl::Status InlineInvoke(Invoke* invoke, OptimizationContext& context,
+                          int inline_count) {
   Function* invoked = invoke->to_apply();
   absl::flat_hash_map<Node*, Node*> invoked_node_to_replacement;
   for (int64_t i = 0; i < invoked->params().size(); ++i) {
@@ -71,14 +114,18 @@ absl::Status InlineInvoke(Invoke* invoke) {
     invoked_node_to_replacement[param] = invoke->operand(i);
   }
 
-  for (Node* node : TopoSort(invoked)) {
+  XLS_ASSIGN_OR_RETURN(std::vector<Node*> topo_sort_nodes,
+                       context.TopoSort(invoked));
+  for (Node* node : topo_sort_nodes) {
     if (invoked_node_to_replacement.contains(node)) {
       // Already taken care of (e.g. parameters above).
       continue;
     }
-    XLS_RET_CHECK(!node->Is<Invoke>())
-        << "No invokes should remain in function to inline: "
-        << node->GetName();
+    XLS_RET_CHECK(!kCheckNoSubInvokes ||
+                  // All invokes before us should've been inlined (except ffi)
+                  !node->Is<Invoke>() || !IsInlineable(node->As<Invoke>()))
+        << "No invokes that are not FFI should remain in function to inline: "
+        << node->GetName() << ": " << node->As<Invoke>()->to_apply()->name();
     std::vector<Node*> new_operands;
     for (Node* operand : node->operands()) {
       new_operands.push_back(invoked_node_to_replacement.at(operand));
@@ -86,10 +133,19 @@ absl::Status InlineInvoke(Invoke* invoke) {
     XLS_ASSIGN_OR_RETURN(
         Node * new_node,
         node->CloneInNewFunction(new_operands, invoke->function_base()));
+    if (new_node->loc().Empty()) {
+      new_node->SetLoc(invoke->loc());
+    } else {
+      std::vector<SourceLocation> locs(new_node->loc().locations);
+      locs.reserve(new_node->loc().locations.size() +
+                   invoke->loc().locations.size());
+      absl::c_copy(invoke->loc().locations, std::back_inserter(locs));
+      new_node->SetLoc(SourceInfo(std::move(locs)));
+    }
     invoked_node_to_replacement[node] = new_node;
   }
 
-  // Generate meaningful names for each of the newly inlined nodes. For example,
+  // Update names for each of the newly inlined nodes. For example,
   // if the callsite looks like:
   //
   //   invoke.1: invoke(foo, to_apply=f)
@@ -103,7 +159,9 @@ absl::Status InlineInvoke(Invoke* invoke) {
   //   }
   //
   // Then 'x_negated' when inlined at the invoke callsite will have the name
-  // 'foo_negated'.
+  // 'foo_negated'. Coverpoint and assert names are also updated to include the
+  // call stack to differentiate in case inlining would otherwise result in
+  // multiple statements with the same labels.
   for (Node* node : invoked->nodes()) {
     if (node->Is<Param>()) {
       continue;
@@ -115,9 +173,41 @@ absl::Status InlineInvoke(Invoke* invoke) {
       invoked_node_to_replacement.at(node)->ClearName();
       continue;
     }
-    absl::optional<std::string> new_name = GetInlinedNodeName(node, invoke);
+    std::optional<std::string> new_name = GetInlinedNodeName(node, invoke);
     if (new_name.has_value()) {
       invoked_node_to_replacement.at(node)->SetName(new_name.value());
+    }
+
+    if (node->Is<Cover>()) {
+      Cover* c = node->As<Cover>();
+      std::string original_label = c->original_label().value_or(c->label());
+      std::string new_label =
+          GetPrefixedLabel(invoke, node->As<Cover>()->label(), inline_count);
+      Cover* cover = invoked_node_to_replacement.at(node)->As<Cover>();
+      Node* condition = cover->condition();
+      XLS_ASSIGN_OR_RETURN(auto new_cover,
+                           cover->function_base()->MakeNodeWithName<Cover>(
+                               cover->loc(), condition, new_label,
+                               std::move(original_label), cover->GetName()));
+      XLS_RETURN_IF_ERROR(cover->ReplaceUsesWith(new_cover));
+      XLS_RETURN_IF_ERROR(cover->function_base()->RemoveNode(cover));
+      invoked_node_to_replacement.at(node) = new_cover;
+    } else if (node->Is<Assert>() && node->As<Assert>()->label().has_value()) {
+      Assert* a = node->As<Assert>();
+      std::optional<std::string> original_label =
+          a->original_label().has_value() ? a->original_label() : a->label();
+      std::string new_label = GetPrefixedLabel(
+          invoke, node->As<Assert>()->label().value(), inline_count);
+      Assert* asrt = invoked_node_to_replacement.at(node)->As<Assert>();
+      Node* token = asrt->token();
+      Node* condition = asrt->condition();
+      XLS_ASSIGN_OR_RETURN(auto new_assert,
+                           asrt->function_base()->MakeNodeWithName<Assert>(
+                               asrt->loc(), token, condition, asrt->message(),
+                               new_label, original_label, asrt->GetName()));
+      XLS_RETURN_IF_ERROR(asrt->ReplaceUsesWith(new_assert));
+      XLS_RETURN_IF_ERROR(asrt->function_base()->RemoveNode(asrt));
+      invoked_node_to_replacement.at(node) = new_assert;
     }
   }
 
@@ -126,86 +216,94 @@ absl::Status InlineInvoke(Invoke* invoke) {
   return invoke->function_base()->RemoveNode(invoke);
 }
 
-// Returns the functions invoked by the given function via Invoke instructions.
-std::vector<FunctionBase*> InvokedFunctions(FunctionBase* f) {
-  absl::flat_hash_set<FunctionBase*> invoked_set;
-  std::vector<FunctionBase*> invoked;
-  for (Node* node : f->nodes()) {
-    if (node->Is<Invoke>()) {
-      FunctionBase* to_apply = node->As<Invoke>()->to_apply();
-      auto [_, inserted] = invoked_set.insert(to_apply);
-      if (inserted) {
-        invoked.push_back(to_apply);
-      }
+std::vector<FunctionBase*> GetFunctionsToInlineByLeaf(Package* p,
+                                                      const CallGraph& cg) {
+  std::vector<FunctionBase*> functions = FunctionsInPostOrder(p);
+  std::vector<FunctionBase*> functions_to_inline;
+  functions_to_inline.reserve(functions.size());
+  absl::flat_hash_set<FunctionBase*> to_inline_set;
+  to_inline_set.reserve(functions.size());
+  for (FunctionBase* f : functions) {
+    if (cg.FunctionsCalledBy(f).empty()) {
+      // No invokes at all.
+      continue;
+    }
+    // Inline function if all of the functions it calls are either leafs or
+    // the single call of a non-leaf which transitively only calls leafs.
+    if (absl::c_all_of(cg.FunctionsCalledBy(f), [&](Node* n) {
+          CHECK(n->Is<Invoke>()) << "all maps and for-loops must be cleared "
+                                    "before inlining. Found: "
+                                 << n;
+          Invoke* called = n->As<Invoke>();
+          int64_t to_inline_cnt = absl::c_count_if(
+              cg.FunctionsCalledBy(called->to_apply()), [](Node* n) {
+                CHECK(n->Is<Invoke>()) << "all maps and for-loops must be "
+                                          "cleared before inlining. Found: "
+                                       << n;
+                // Need to avoid counting FFI functions.
+                return IsInlineable(n->As<Invoke>());
+              });
+          // Also inline the invoke if the callee is only called by the invoke
+          // and the callee is also being inlined.
+          return to_inline_cnt == 0 ||
+                 (to_inline_cnt == 1 &&
+                  to_inline_set.contains(called->to_apply()));
+        })) {
+      functions_to_inline.push_back(f);
+      to_inline_set.insert(f);
     }
   }
-  return invoked;
-}
-
-// Returns the functions (and procs) which are roots in the call graph, that is,
-// the functions which are not called by any other functions.
-std::vector<FunctionBase*> GetRootFunctions(Package* p) {
-  absl::flat_hash_set<FunctionBase*> invoked_functions;
-  for (FunctionBase* f : p->GetFunctionsAndProcs()) {
-    for (FunctionBase* invoked : InvokedFunctions(f)) {
-      invoked_functions.insert(invoked);
-    }
-  }
-  std::vector<FunctionBase*> roots;
-  for (FunctionBase* f : p->GetFunctionsAndProcs()) {
-    if (!invoked_functions.contains(f)) {
-      roots.push_back(f);
-    }
-  }
-  return roots;
-}
-
-// Recursive DFS visitor of the call graph induced by invoke
-// instructions. Builds a post order of functions in the post_order vector.
-void DfsVisit(FunctionBase* f, absl::flat_hash_set<FunctionBase*>* visited,
-              std::vector<FunctionBase*>* post_order) {
-  visited->insert(f);
-  for (FunctionBase* invoked : InvokedFunctions(f)) {
-    if (!visited->contains(invoked)) {
-      DfsVisit(invoked, visited, post_order);
-    }
-  }
-  post_order->push_back(f);
-}
-
-// Returns the functions and procs in package 'p' in a DFS post order traversal
-// of the call graph induced by invoke nodes.
-std::vector<FunctionBase*> FunctionsInPostOrder(Package* p) {
-  absl::flat_hash_set<FunctionBase*> visited;
-  std::vector<FunctionBase*> post_order;
-  for (FunctionBase* f : GetRootFunctions(p)) {
-    DfsVisit(f, &visited, &post_order);
-  }
-  return post_order;
+  return functions_to_inline;
 }
 
 }  // namespace
 
-absl::StatusOr<bool> InliningPass::RunInternal(Package* p,
-                                               const PassOptions& options,
-                                               PassResults* results) const {
+absl::Status InliningPass::InlineOneInvoke(Invoke* invoke) {
+  OptimizationContext context;
+  return InlineInvoke</*kCheckNoSubInvokes=*/false>(invoke, context,
+                                                    /*inline_count=*/0);
+}
+
+absl::StatusOr<bool> InliningPass::RunInternal(
+    Package* p, const OptimizationPassOptions& options, PassResults* results,
+    OptimizationContext& context) const {
   bool changed = false;
+  XLS_ASSIGN_OR_RETURN(CallGraph cg, CallGraph::Create(p));
   // Inline all the invokes of each function where functions are processed in a
   // post order of the call graph (leaves first). This ensures that when a
   // function Foo is inlined into its callsites, no invokes remain in Foo. This
-  // avoid duplicate work.
-  for (FunctionBase* f : FunctionsInPostOrder(p)) {
+  // avoid duplicate work. We also inline all function which have a single
+  // caller and only call leaf funcs.
+  int inline_count = 0;
+  std::vector<FunctionBase*> functions_to_inline;
+  if (depth_ == InlineDepth::kFull) {
+    functions_to_inline = FunctionsInPostOrder(p);
+  } else {
+    functions_to_inline = GetFunctionsToInlineByLeaf(p, cg);
+  }
+  for (FunctionBase* f : functions_to_inline) {
+    // Skip functions we don't want to inline into.
+    if (!ShouldInlineInto(f)) {
+      continue;
+    }
     // Create copy of nodes() because we will be adding and removing nodes
     // during inlining.
-    std::vector<Node*> nodes(f->nodes().begin(), f->nodes().end());
-    for (Node* node : nodes) {
-      if (node->Is<Invoke>()) {
-        XLS_RETURN_IF_ERROR(InlineInvoke(node->As<Invoke>()));
+    for (Node* node : cg.FunctionsCalledBy(f)) {
+      if (node->Is<Invoke>() && IsInlineable(node->As<Invoke>())) {
+        XLS_RETURN_IF_ERROR(
+            InlineInvoke(node->As<Invoke>(), context, inline_count++));
         changed = true;
       }
     }
   }
   return changed;
 }
+
+REGISTER_OPT_PASS(InliningPass, InliningPass::InlineDepth::kFull);
+XLS_REGISTER_MODULE_INITIALIZER(inlining_pass, {
+  CHECK_OK(RegisterOptimizationPass<InliningPass>(
+      "leaf-inlining", InliningPass::InlineDepth::kLeafOnly));
+  RegisterOptimizationPassInfoFor({"leaf-inlining"}, "InliningPass");
+});
 
 }  // namespace xls

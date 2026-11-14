@@ -14,39 +14,40 @@
 
 #include "xls/common/math_util.h"
 
+#include <cstdint>
+#include <functional>
+#include <vector>
+
+#include "absl/types/span.h"
+
 namespace xls {
-namespace {
 
-// Returns the number of leading zeros in the given value.
-int64_t Clz(uint64_t value) {
-  for (int64_t i = 0; i < 64; ++i) {
-    if ((value >> (64 - i - 1)) & 1) {
-      return i;
+bool MixedRadixIterate(absl::Span<const int64_t> radix,
+                       std::function<bool(const std::vector<int64_t>&)> f) {
+  std::vector<int64_t> number;
+  number.resize(radix.size(), 0);
+
+  // Returns `true` if there was an overflow or `false` otherwise
+  auto increment_number = [&]() -> bool {
+    int64_t i = 0;
+    while ((i < number.size()) && ((number[i] + 1) >= radix[i])) {
+      number[i] = 0;
+      ++i;
     }
-  }
-  return 64;
-}
+    if (i < number.size()) {
+      ++number[i];
+      return false;
+    }
+    return true;
+  };
 
-}  // namespace
+  do {
+    if (f(number)) {
+      return true;
+    }
+  } while (!increment_number());
 
-int64_t CeilOfLog2(uint64_t value) {
-  if (value == 0) {
-    return 0;
-  }
-  int64_t floor = FloorOfLog2(value);
-  if ((value & (value - 1)) == 0) {
-    // Power of two.
-    return floor;
-  } else {
-    return floor + 1;
-  }
-}
-
-int64_t FloorOfLog2(uint64_t value) {
-  if (value == 0) {
-    return 0;
-  }
-  return 63 - Clz(value);
+  return false;
 }
 
 }  // namespace xls

@@ -15,18 +15,31 @@
 #ifndef XLS_IR_ABSTRACT_EVALUATOR_H_
 #define XLS_IR_ABSTRACT_EVALUATOR_H_
 
+#include <bit>
 #include <cstdint>
+#include <optional>
 #include <queue>
 #include <vector>
 
-#include "absl/types/optional.h"
+#include "absl/functional/function_ref.h"
+#include "absl/log/check.h"
 #include "absl/types/span.h"
-#include "xls/common/logging/logging.h"
 #include "xls/common/math_util.h"
 #include "xls/ir/bits.h"
 #include "xls/ir/bits_ops.h"
 
 namespace xls {
+
+// Options struct which can be overridden using template specialization allowing
+// for limited customization of AbstractEvaluator.
+template <typename EvaluatorT>
+struct AbstractEvaluatorOptions {
+  // Is the ITE operation the fundamental operation for this evaluator. If true
+  // then the evaluator will implement operations using ITE directly more often.
+  // EG Selects will be translated into a binary tree of ITEs rather than or-ing
+  // together masked values.
+  static constexpr bool kIsITEFundamental = false;
+};
 
 // An abstract base class for constructing evaluators which perform common XLS
 // operations such as bitwise logical operations, arithmetic operations,
@@ -47,11 +60,27 @@ namespace xls {
 //     ...
 //
 // And define non-virtual methods One, Zero, Not, And, and Or.
-template <typename ElementT, typename EvaluatorT>
+template <typename ElementT, typename EvaluatorT,
+          typename OptionsT = AbstractEvaluatorOptions<EvaluatorT>>
 class AbstractEvaluator {
+  using ThisType = AbstractEvaluator<ElementT, EvaluatorT>;
+
  public:
+  static constexpr bool kIsITEFundamental = OptionsT::kIsITEFundamental;
+
+  using Evaluator = EvaluatorT;
   using Element = ElementT;
   using Vector = std::vector<Element>;
+  using Span = absl::Span<Element const>;
+  using SpanOfSpan = absl::Span<Span const>;
+
+  Vector SpanToVec(Span s) { return Vector(s.cbegin(), s.cend()); }
+
+  // Helper to create an unowned view of a set of owned elements. This is needed
+  // to call some of the functions taking collections of things.
+  std::vector<Span> SpanOfVectorsToVectorOfSpans(absl::Span<Vector const> sv) {
+    return std::vector<Span>(sv.begin(), sv.end());
+  }
 
   Element One() const { return static_cast<const EvaluatorT*>(this)->One(); }
   Element Zero() const { return static_cast<const EvaluatorT*>(this)->Zero(); }
@@ -65,8 +94,31 @@ class AbstractEvaluator {
     return static_cast<const EvaluatorT*>(this)->Or(a, b);
   }
 
+  // If operation. Consequent if 'sel' is true, alt if 'sel' is false.
+  Element If(Element sel, Element consequent, Element alternate) const {
+    return static_cast<const EvaluatorT*>(this)->If(sel, consequent, alternate);
+  }
+
+  // If operation applied to each bit of the consequent and alternate.
+  Vector IfBits(Element sel, Span consequent, Span alternate) {
+    Vector result;
+    CHECK_EQ(consequent.size(), alternate.size());
+    result.reserve(consequent.size());
+    for (int64_t i = 0; i < consequent.size(); ++i) {
+      result.push_back(If(sel, consequent[i], alternate[i]));
+    }
+    return result;
+  }
+
   Element Xor(const Element& a, const Element& b) const {
-    return And(Or(a, b), Not(And(a, b)));
+    return If(a, Not(b), b);
+  }
+  Element Xnor(const Element& a, const Element& b) const {
+    return If(a, b, Not(b));
+  }
+
+  Element Implies(const Element& a, const Element& b) const {
+    return If(a, b, One());
   }
 
   struct AdderResult {
@@ -75,7 +127,7 @@ class AbstractEvaluator {
   };
   AdderResult HalfAdder(const Element& a, const Element& b) const {
     Element carry = And(a, b);
-    Element sum = And(Or(a, b), Not(carry));
+    Element sum = Xor(a, b);
     return {sum, carry};
   }
   AdderResult FullAdder(const Element& a, const Element& b,
@@ -85,8 +137,30 @@ class AbstractEvaluator {
     return {second_result.sum, Or(first_result.carry, second_result.carry)};
   }
 
+  struct SubtractorResult {
+    Element diff;
+    Element borrow;
+  };
+  SubtractorResult HalfSubtractor(const Element& a, const Element& b) {
+    Element diff = Xor(a, b);
+    return {
+        .diff = diff,
+        .borrow = And(diff, b),
+    };
+  }
+  SubtractorResult FullSubtractor(const Element& a, const Element& b,
+                                  const Element& borrow_in) {
+    Element not_a = Not(a);
+    return {
+        .diff = XorReduce({a, b, borrow_in}).front(),
+        .borrow =
+            OrReduce({And(not_a, borrow_in), And(not_a, b), And(b, borrow_in)})
+                .front(),
+    };
+  }
+
   // Returns the given bits value as a Vector type.
-  Vector BitsToVector(const Bits& bits) {
+  Vector BitsToVector(const Bits& bits) const {
     Vector result(bits.bit_count());
     for (int64_t i = 0; i < bits.bit_count(); ++i) {
       result[i] = bits.Get(i) ? One() : Zero();
@@ -94,7 +168,7 @@ class AbstractEvaluator {
     return result;
   }
 
-  Vector BitwiseNot(const Vector& input) {
+  Vector BitwiseNot(const Span& input) {
     Vector result(input.size());
     for (int64_t i = 0; i < input.size(); ++i) {
       result[i] = Not(input[i]);
@@ -103,34 +177,32 @@ class AbstractEvaluator {
   }
 
   // Bitwise n-ary logical operations.
-  Vector BitwiseAnd(absl::Span<const Vector> inputs) {
+  Vector BitwiseAnd(SpanOfSpan inputs) const {
     return NaryOp(
         inputs, [&](const Element& a, const Element& b) { return And(a, b); });
   }
-  Vector BitwiseOr(absl::Span<const Vector> inputs) {
+  Vector BitwiseOr(SpanOfSpan inputs) const {
     return NaryOp(inputs,
                   [&](const Element& a, const Element& b) { return Or(a, b); });
   }
-  Vector BitwiseXor(absl::Span<const Vector> inputs) {
+  Vector BitwiseXor(SpanOfSpan inputs) const {
     return NaryOp(
         inputs, [&](const Element& a, const Element& b) { return Xor(a, b); });
   }
 
   // Overloads of bitwise operations for two operands.
-  Vector BitwiseAnd(const Vector& a, const Vector& b) {
-    return BitwiseAnd({a, b});
-  }
-  Vector BitwiseOr(const Vector& a, const Vector& b) {
-    return BitwiseOr({a, b});
-  }
-  Vector BitwiseXor(const Vector& a, const Vector& b) {
-    return BitwiseXor({a, b});
+  Vector BitwiseAnd(Span a, Span b) const { return BitwiseAnd({a, b}); }
+  Vector BitwiseOr(Span a, Span b) const { return BitwiseOr({a, b}); }
+  Vector BitwiseXor(Span a, Span b) const { return BitwiseXor({a, b}); }
+
+  Vector Gate(const Element& a, const Span& b) {
+    return BitwiseAnd(SignExtend({a}, b.size()), b);
   }
 
-  Vector BitSlice(const Vector& input, int64_t start, int64_t width) {
-    XLS_CHECK_GE(start, 0);
-    XLS_CHECK_LE(start + width, input.size());
-    XLS_CHECK_GE(width, 0);
+  Vector BitSlice(Span input, int64_t start, int64_t width) {
+    CHECK_GE(start, 0);
+    CHECK_LE(start + width, input.size());
+    CHECK_GE(width, 0);
     Vector result(width);
     for (int64_t i = 0; i < width; ++i) {
       result[i] = input[start + i];
@@ -138,7 +210,7 @@ class AbstractEvaluator {
     return result;
   }
 
-  Vector Concat(absl::Span<const Vector> inputs) {
+  Vector Concat(SpanOfSpan inputs) {
     Vector result;
     for (int64_t i = inputs.size() - 1; i >= 0; --i) {
       result.insert(result.end(), inputs[i].begin(), inputs[i].end());
@@ -146,32 +218,31 @@ class AbstractEvaluator {
     return result;
   }
 
-  Element Equals(const Vector& a, const Vector& b) {
-    XLS_CHECK_EQ(a.size(), b.size());
-    Element result = One();
-    for (int64_t i = 0; i < a.size(); ++i) {
-      result = And(result, Or(And(a[i], b[i]), And(Not(a[i]), Not(b[i]))));
+  Element Equals(Span a, Span b) const {
+    return Not(OrReduce(BitwiseXor(a, b)).front());
+  }
+
+  Element SLessThan(Span a, Span b) {
+    CHECK_EQ(a.size(), b.size());
+    Element same_sign = Xnor(a.back(), b.back());
+    if (a.size() == 1) {
+      // If 1 bit then slessthen if not the same sign and a is negative.
+      return If(same_sign, Zero(), a.back());
     }
-    return result;
+    // Same sign means that the comparison is unsigned otherwise less then if
+    // 'a' is negative.
+    auto a_non_sign = a.subspan(0, a.size() - 1);
+    auto b_non_sign = b.subspan(0, b.size() - 1);
+    return If(same_sign,
+              // NB Since they have the same sign the sign bit is equal so we
+              // can remove it from the comparison.
+              /*consequent=*/ULessThan(a_non_sign, b_non_sign),
+              // Different signs so the < is true if 'a' is negative.
+              /*alternate=*/a.back());
   }
 
-  Element SLessThan(const Vector& a, const Vector& b) {
-    // A < B if:
-    //  - A is negative && B is non-negative, or
-    //  - B has a more-signficant bit set (when A and B have the same sign)
-    // Which simplifies to:
-    //  (A is neg & B is non-neg) ||
-    //  (Not(A is non_neg & B is neg) & B has a more-significant bit set))
-    // Which simplifies to:
-    //  (A is neg & B is non-neg) ||
-    //  (Not(A is non-neg and B is neg) && ULessThan(a, b))
-    Element a_neg_b_non_neg = And(a.back(), Not(b.back()));
-    Element a_non_neg_b_neg = And(Not(a.back()), b.back());
-    return Or(a_neg_b_non_neg, And(Not(a_non_neg_b_neg), ULessThan(a, b)));
-  }
-
-  Element ULessThan(const Vector& a, const Vector& b) {
-    XLS_CHECK_EQ(a.size(), b.size());
+  Element ULessThan(Span a, Span b) const {
+    CHECK_EQ(a.size(), b.size());
     Element result = Zero();
     Element upper_bits_lte = One();
     for (int64_t i = a.size() - 1; i >= 0; --i) {
@@ -180,40 +251,34 @@ class AbstractEvaluator {
     }
     return result;
   }
-
-  Vector OneHotSelect(const Vector& selector, absl::Span<const Vector> cases,
-                      bool selector_can_be_zero) {
-    std::vector<absl::Span<const Element>> case_spans;
-    case_spans.reserve(cases.size());
-    for (const Vector& c : cases) {
-      case_spans.push_back(c);
-    }
-    return OneHotSelectInternal(selector, case_spans, selector_can_be_zero);
+  Element ULessThanOrEqual(Span a, Span b) const {
+    return Not(ULessThan(b, a));
+  }
+  Element UGreaterThan(Span a, Span b) const { return ULessThan(b, a); }
+  Element UGreaterThanOrEqual(Span a, Span b) const {
+    return Not(ULessThan(a, b));
   }
 
-  Vector Select(const Vector& selector, absl::Span<const Vector> cases,
-                absl::optional<const Vector> default_value = absl::nullopt) {
-    // Turn the binary selector into a one-hot selector.
-    Vector one_hot_selector;
-    for (int64_t i = 0; i < cases.size(); ++i) {
-      one_hot_selector.push_back(
-          Equals(selector, BitsToVector(UBits(i, selector.size()))));
-    }
-    // Copy the cases span as we may need to append to it.
-    std::vector<Vector> cases_vec(cases.begin(), cases.end());
-    if (default_value.has_value()) {
-      one_hot_selector.push_back(ULessThan(
-          BitsToVector(UBits(cases.size() - 1, selector.size())), selector));
-      cases_vec.push_back(*default_value);
-    }
-    return OneHotSelect(one_hot_selector, cases_vec,
-                        /*selector_can_be_zero=*/false);
+  Vector OneHotSelect(Span selector, SpanOfSpan cases,
+                      bool selector_can_be_zero) {
+    return OneHotSelectInternal(selector, cases, selector_can_be_zero);
+  }
+
+  Vector PrioritySelect(Span selector, SpanOfSpan cases,
+                        bool selector_can_be_zero, Span default_value) {
+    return PrioritySelectInternal(selector, cases, selector_can_be_zero,
+                                  default_value);
+  }
+
+  Vector Select(Span selector, SpanOfSpan cases,
+                std::optional<const Span> default_value = std::nullopt) {
+    return SelectInternal(selector, cases, default_value);
   }
 
   // Performs an operation equivalent to the XLS IR Op::kOneHot
   // operation. OneHotMsbToLsb uses priority LsbOrMsb::kLsb, OneHotMsbToLsb uses
   // priority LsbOrMsb::kMsb
-  Vector OneHotMsbToLsb(const Vector& input) {
+  Vector OneHotMsbToLsb(Span input) {
     Element all_zero = One();
     Element any_one = Zero();
     Vector result;
@@ -226,7 +291,7 @@ class AbstractEvaluator {
     result.push_back(all_zero);
     return result;
   }
-  Vector OneHotLsbToMsb(const Vector& input) {
+  Vector OneHotLsbToMsb(Span input) {
     Element all_zero = One();
     Element any_one = Zero();
     Vector result;
@@ -242,18 +307,35 @@ class AbstractEvaluator {
   // Shifting by more than the width of the input results in all zeros for
   // logical shifts, and all sign bit for arithmetic shifts. Input and amount
   // need not be the same width.
-  Vector ShiftRightLogical(const Vector& input, const Vector& amount) {
+  Vector ShiftRightLogical(Span input, Span amount) {
     return Shift(input, amount, /*right=*/true, /*arithmetic=*/false);
   }
-  Vector ShiftRightArith(const Vector& input, const Vector& amount) {
+  Vector ShiftRightArith(Span input, Span amount) {
     return Shift(input, amount, /*right=*/true, /*arithmetic=*/true);
   }
-  Vector ShiftLeftLogical(const Vector& input, const Vector& amount) {
+  Vector ShiftLeftLogical(Span input, Span amount) {
     return Shift(input, amount, /*right=*/false, /*arithmetic=*/false);
   }
 
-  Vector BitSliceUpdate(const Vector& input, const Vector& start,
-                        const Vector& value) {
+  Vector DynamicBitSlice(Span input, Span start, int64_t width) {
+    return DynamicBitSliceInternal(input, start, width);
+  }
+
+  Vector BitSliceUpdate(Span input, int64_t start, Span value) {
+    if (start > input.size()) {
+      return Vector(input.begin(), input.end());
+    }
+    int64_t remaining = start + value.size() > input.size()
+                            ? (input.size() - start)
+                            : value.size();
+    Vector result(input.begin(), input.end());
+    absl::c_copy(value.subspan(0, remaining), result.begin() + start);
+    return result;
+  }
+
+  template <typename = void>
+    requires(!kIsITEFundamental)
+  Vector BitSliceUpdate(Span input, Span start, Span value) {
     // Create a mask which masks on the 'input' bits which are *not* updated. It
     // should look like:
     //
@@ -284,16 +366,61 @@ class AbstractEvaluator {
                      ShiftLeftLogical(adjusted_value, start));
   }
 
+  // If ITE is fundamental then we can create a simpler implementation by just
+  // doing a select of all the possibilities.
+  template <typename = void>
+    requires(kIsITEFundamental)
+  Vector BitSliceUpdate(Span input, Span start, Span value) {
+    // ```
+    // (select start
+    //         (value[0] value[1] ... value[n] input[n] ... )
+    //         (input[0] value[0] value[1] ... value[n] input[n+1] ... )
+    //         (input[0] input[1] value[0] ... value[n] input[n+2] ... )
+    //         ...
+    //         (input[0] ... input[m-2] value[0] value[1] )
+    //         (input[0] ... input[m - 1] value[0]))
+    // ```
+    value =
+        value.size() > input.size() ? value.subspan(0, input.size()) : value;
+    std::vector<Vector> cases;
+    cases.reserve(input.size());
+    for (int i = 0; i < input.size(); ++i) {
+      cases.push_back(Vector(input.begin(), input.end()));
+      absl::c_copy_n(value, std::min(value.size(), input.size() - i),
+                     cases.back().begin() + i);
+    }
+    return SelectInternal(start, cases, /*default_value=*/input);
+  }
+
   // Binary encode and decode operations.
-  Vector Decode(const Vector& input, int64_t result_width) {
+  Vector Decode(Span input, int64_t result_width) {
+    // To improve the density of BDD representations and generally simplify
+    // things we pro actively check high bits which are out of range.
+    //
+    // How many bits of the input don't just force the result to 0.
+    int64_t used_bits =
+        Bits::MinBitCountUnsigned(std::bit_cast<uint64_t>(result_width)) + 1;
+    if (used_bits < input.size()) {
+      return IfBits(OrReduce(input.subspan(used_bits)).back(),
+                    Vector(result_width, Zero()),
+                    Decode(input.subspan(0, used_bits), result_width));
+    }
+    // Maybe cut down on the size of everything.
+    if (input.size() < 64 && (uint64_t{1} << input.size()) < result_width) {
+      // The input can never be large enough to force all the result bits to 1.
+      // Just calculate the result for a small enough result_width and resize.
+      return ZeroExtend(Decode(input, 1 << input.size()), result_width);
+    }
+    // Every bit is meaningful.
     Vector result(result_width);
     for (int64_t i = 0; i < result_width; ++i) {
       result[i] = Equals(input, BitsToVector(UBits(i, input.size())));
     }
     return result;
   }
-  Vector Encode(const Vector& input) {
-    int64_t result_width = Bits::MinBitCountUnsigned(input.size() - 1);
+
+  Vector Encode(Span input) {
+    int64_t result_width = CeilOfLog2(input.size());
     Vector result(result_width, Zero());
     for (int64_t i = 0; i < input.size(); ++i) {
       for (int64_t j = 0; j < result_width; ++j) {
@@ -305,43 +432,39 @@ class AbstractEvaluator {
     return result;
   }
 
-  Vector ZeroExtend(const Vector& input, int64_t new_width) {
-    XLS_CHECK_GE(new_width, input.size());
+  Vector ZeroExtend(Span input, int64_t new_width) {
+    CHECK_GE(new_width, input.size());
     return Concat({Vector(new_width - input.size(), Zero()), input});
   }
 
-  Vector SignExtend(const Vector& input, int64_t new_width) {
-    XLS_CHECK_GE(input.size(), 1);
-    XLS_CHECK_GE(new_width, input.size());
+  Vector SignExtend(Span input, int64_t new_width) {
+    CHECK_GE(input.size(), 1);
+    CHECK_GE(new_width, input.size());
     return Concat({Vector(new_width - input.size(), input.back()), input});
   }
 
   // Reduction ops.
-  Vector AndReduce(const Vector& a) {
-    Element result = One();
-    for (const Element& e : a) {
-      result = And(result, e);
-    }
-    return Vector({result});
+  Vector AndReduce(Span a) const {
+    return Vector{
+        ReduceOp([&](Element a, Element b) { return And(a, b); }, a, One())};
   }
 
-  Vector OrReduce(const Vector& a) {
-    Element result = Zero();
-    for (const Element& e : a) {
-      result = Or(result, e);
-    }
-    return Vector({result});
+  Vector OrReduce(Span a) const {
+    return Vector{
+        ReduceOp([&](Element a, Element b) { return Or(a, b); }, a, Zero())};
   }
 
-  Vector XorReduce(const Vector& a) {
-    Element result = Zero();
-    for (const Element& e : a) {
-      result = Or(And(Not(result), e), And(result, Not(e)));
-    }
-    return Vector({result});
+  Vector XorReduce(Span a) const {
+    return Vector{
+        ReduceOp([&](Element a, Element b) { return Xor(a, b); }, a, Zero())};
   }
 
-  Vector Add(const Vector& a, const Vector& b) {
+  // Result which includes if an overflow/underflow occurs
+  struct OverflowResult {
+    Element overflow;
+    Vector result;
+  };
+  OverflowResult AddWithCarry(Span a, Span b) {
     Vector result(a.size());
     Element carry = Zero();
     for (int i = 0; i < a.size(); i++) {
@@ -349,14 +472,59 @@ class AbstractEvaluator {
       result[i] = r.sum;
       carry = r.carry;
     }
-    return result;
+    return {.overflow = carry, .result = std::move(result)};
+  }
+  Vector Add(Span a, Span b) { return std::move(AddWithCarry(a, b).result); }
+
+  OverflowResult AddWithSignedOverflow(Span a, Span b) {
+    OverflowResult res = AddWithCarry(a, b);
+    // Overflow has occurred if sign changes but the sign of the inputs are the
+    // same sign. Otherwise overflow can't happen due to 2s complement domain.
+    Element overflow = And(Equals({a.back()}, {b.back()}),
+                           Not(Equals({res.result.back()}, {a.back()})));
+    return {.overflow = overflow, .result = std::move(res.result)};
   }
 
-  Vector Neg(const Vector& x) {
-    return Add(BitwiseNot(x), BitsToVector(UBits(1, x.size())));
+  OverflowResult SubWithUnsignedUnderflow(Span a, Span b) {
+    Vector result(a.size());
+    Element borrow = Zero();
+    for (int i = 0; i < a.size(); i++) {
+      SubtractorResult r = FullSubtractor(a[i], b[i], borrow);
+      result[i] = r.diff;
+      borrow = r.borrow;
+    }
+    return {.overflow = borrow, .result = std::move(result)};
   }
 
-  Vector Abs(const Vector& x) { return Select({x.back()}, {x, Neg(x)}); }
+  Vector Sub(Span a, Span b) {
+    return std::move(SubWithUnsignedUnderflow(a, b).result);
+  }
+
+  OverflowResult SubWithSignedUnderflow(Span a, Span b) {
+    OverflowResult sub = SubWithUnsignedUnderflow(a, b);
+    // 0 - int_min is an underflow so we need to check it separately. NB That
+    // all positive non-zero RHS values end up with the sign being wrong except
+    // for the RHS == 0 case.
+    Element is_int_min =
+        And(b.back(), Not(OrReduce(b.subspan(0, b.size() - 1)).back()));
+    Element underflow = And(
+        // Neg-neg and pos-pos can't underflow due to the 2s complement domain.
+        Not(Equals({a.back()}, {b.back()})),
+        // Pos - neg and Neg - pos underflow if the sign of the result matches
+        // the sign of b or b is int_min (in which case we could have a double
+        // underflow).
+        Or(Equals({sub.result.back()}, {b.back()}), is_int_min));
+    return {.overflow = std::move(underflow), .result = std::move(sub.result)};
+  }
+
+  Vector Neg(Span x) {
+    if (x.empty()) {
+      return SpanToVec(x);
+    }
+    return Sub(Vector(x.size(), Zero()), x);
+  }
+
+  Vector Abs(Span x) { return IfBits(x.back(), Neg(x), x); }
 
   // Signed multiplication of two Vectors.
   // Returns a Vector of a.size() + b.size().
@@ -365,7 +533,7 @@ class AbstractEvaluator {
   // http://pages.cs.wisc.edu/~david/courses/cs354/beyond354/int.mult.html
   // (by Karen Miller).
   // This will be optimized in the future.
-  Vector SMul(const Vector& a, const Vector& b) {
+  Vector SMul(Span a, Span b) {
     int max = std::max(a.size(), b.size());
     Vector temp_a = SignExtend(a, max * 2);
     Vector temp_b = SignExtend(b, max * 2);
@@ -373,12 +541,34 @@ class AbstractEvaluator {
     return BitSlice(result, 0, a.size() + b.size());
   }
 
+  OverflowResult SMulWithOverflow(Span a, Span b, int64_t output_width) {
+    Vector mul = SMul(a, b);
+    if (output_width >= a.size() + b.size()) {
+      Element sign = mul.back();
+      mul.resize(output_width, sign);
+      return {.overflow = Zero(), .result = std::move(mul)};
+    }
+    Element any_zero = Or(Not(OrReduce(a).back()), Not(OrReduce(b).back()));
+    // Negative if its not a multiply by zero and the signs of the two arguments
+    // are not the same otherwise positive.
+    Element expected_sign = And(Not(any_zero), Xor(a.back(), b.back()));
+    // If the truncated bits and the sign bit are just sign-extend they will all
+    // be true if expect_negative and false otherwise.
+    Vector high_bits_expected(1 + a.size() + b.size() - output_width,
+                              expected_sign);
+    Element overflow =
+        Not(Equals(high_bits_expected, Span(mul).subspan(output_width - 1)));
+    // Truncate to the appropriate width.
+    mul.resize(output_width);
+    return {.overflow = overflow, .result = std::move(mul)};
+  }
+
   // Unsigned multiplication of two Vectors.
   // Returns a Vector of a.size() + b.size().
   //
   // Implements a Dadda multiplier:
   // https://en.wikipedia.org/wiki/Dadda_multiplier
-  Vector UMul(const Vector& a, const Vector& b) {
+  Vector UMul(Span a, Span b) {
     std::vector<std::queue<Element>> partial_products(a.size() + b.size());
     for (int64_t i = 0; i < a.size(); ++i) {
       for (int64_t j = 0; j < b.size(); ++j) {
@@ -403,13 +593,13 @@ class AbstractEvaluator {
           continue;
         }
         // The last column should never need reduction.
-        XLS_CHECK_LT(col + 1, partial_products.size());
+        CHECK_LT(col + 1, partial_products.size());
 
         std::queue<Element>& next_column = partial_products[col + 1];
         while (column.size() > max_height + 1) {
           // By the while condition, the column should have at least 3 elements.
           // (Actually, it should have at least 4, but we only need 3.)
-          XLS_CHECK_GE(column.size(), 3);
+          CHECK_GE(column.size(), 3);
 
           // Use a full adder to combine the next 3 elements, outputting a sum
           // with a carry into the next column.
@@ -427,7 +617,7 @@ class AbstractEvaluator {
         if (column.size() > max_height) {
           // By this condition, the column should have at least 2 elements.
           // (Actually, it should have at least 3, but we only need 2.)
-          XLS_CHECK_GE(column.size(), 2);
+          CHECK_GE(column.size(), 2);
 
           // Use a half-adder to combine the next 2 elements, outputting a sum
           // with a carry into the next column.
@@ -450,7 +640,7 @@ class AbstractEvaluator {
 
       // All columns should start with height <= 2, and end up <= 3 if they
       // receive a carry.
-      XLS_CHECK_LE(column.size(), 3);
+      CHECK_LE(column.size(), 3);
 
       // Reduce this column to a single entry, pushing any carry forward.
       switch (column.size()) {
@@ -465,7 +655,7 @@ class AbstractEvaluator {
           column.pop();
           Element b = column.front();
           column.pop();
-          XLS_CHECK(column.empty());
+          CHECK(column.empty());
 
           AdderResult r = HalfAdder(a, b);
           column.push(r.sum);
@@ -480,7 +670,7 @@ class AbstractEvaluator {
           column.pop();
           Element c = column.front();
           column.pop();
-          XLS_CHECK(column.empty());
+          CHECK(column.empty());
 
           AdderResult r = FullAdder(a, b, c);
           column.push(r.sum);
@@ -489,10 +679,22 @@ class AbstractEvaluator {
         }
       }
 
-      XLS_CHECK_EQ(column.size(), 1);
+      CHECK_EQ(column.size(), 1);
       result[i] = column.front();
     }
     return result;
+  }
+
+  OverflowResult UMulWithOverflow(Span a, Span b, int64_t output_width) {
+    Vector mul = UMul(a, b);
+    if (output_width >= a.size() + b.size()) {
+      mul.resize(output_width, Zero());
+      return {.overflow = Zero(), .result = std::move(mul)};
+    }
+    Element overflow = OrReduce(Span(mul).subspan(output_width)).back();
+    // Truncate to the appropriate width.
+    mul.resize(output_width);
+    return {.overflow = overflow, .result = std::move(mul)};
   }
 
   struct DivisionResult {
@@ -504,8 +706,8 @@ class AbstractEvaluator {
   // Returns a quotient Vector of n.size(), and a remainder Vector of d.size().
   //
   // Implements long division.
-  DivisionResult UDivMod(const Vector& n, const Vector& d) {
-    Vector nonzero_divisor = OrReduce(d);
+  DivisionResult UDivMod(Span n, Span d) {
+    Element nonzero_divisor = OrReduce(d).front();
     Vector divisor = ZeroExtend(d, d.size() + 1);
     Vector neg_divisor = Neg(divisor);
 
@@ -519,37 +721,33 @@ class AbstractEvaluator {
       // If r >= divisor, then subtract divisor from r and set q[i] := 1.
       // Otherwise, set q[i] := 0.
       q[i] = Not(ULessThan(r, divisor));
-      r = Select({q[i]}, {r, Add(r, neg_divisor)});
+      r = IfBits(q[i], Add(r, neg_divisor), r);
 
       // Remove the MSB of r; guaranteed to be 0 because r < d.
       // Ensures r.size() == d.size().
       r.erase(r.end() - 1);
     }
     // If dividing by zero, return all 1s for q and all 0s for r.
-    q = Select({nonzero_divisor}, {Vector(q.size(), One()), q});
-    r = Select({nonzero_divisor}, {Vector(r.size(), Zero()), r});
+    q = IfBits(nonzero_divisor, q, Vector(q.size(), One()));
+    r = IfBits(nonzero_divisor, r, Vector(r.size(), Zero()));
     return {.quotient = q, .remainder = r};
   }
-  Vector UDiv(const Vector& n, const Vector& d) {
-    return UDivMod(n, d).quotient;
-  }
-  Vector UMod(const Vector& n, const Vector& d) {
-    return UDivMod(n, d).remainder;
-  }
+  Vector UDiv(Span n, Span d) { return UDivMod(n, d).quotient; }
+  Vector UMod(Span n, Span d) { return UDivMod(n, d).remainder; }
 
   // Signed division of two Vectors.
   // Returns a quotient Vector of n.size(), and a remainder Vector of d.size().
   //
   // Convention: remainder has the same sign as n.
-  DivisionResult SDivMod(const Vector& n, const Vector& d) {
+  DivisionResult SDivMod(Span n, Span d) {
     Element nonzero_divisor = OrReduce(d).back();
-    Element n_negative = n.size() > 0 ? n.back() : Zero();
-    Element d_negative = d.size() > 0 ? d.back() : Zero();
+    Element n_negative = n.empty() ? Zero() : n.back();
+    Element d_negative = d.empty() ? Zero() : d.back();
     DivisionResult result = UDivMod(Abs(n), Abs(d));
     result.remainder =
-        Select({n_negative}, {result.remainder, Neg(result.remainder)});
-    result.quotient = Select({Xor(n_negative, d_negative)},
-                             {result.quotient, Neg(result.quotient)});
+        IfBits(n_negative, Neg(result.remainder), result.remainder);
+    result.quotient = IfBits(Xor(n_negative, d_negative), Neg(result.quotient),
+                             result.quotient);
     // If dividing by zero and n is negative, return largest negative value;
     // otherwise, return largest positive value.
     Vector largest_positive = Vector(result.quotient.size(), One());
@@ -563,22 +761,36 @@ class AbstractEvaluator {
                {largest_positive, largest_negative}, result.quotient);
     return result;
   }
-  Vector SDiv(const Vector& n, const Vector& d) {
-    return SDivMod(n, d).quotient;
-  }
-  Vector SMod(const Vector& n, const Vector& d) {
-    return SDivMod(n, d).remainder;
-  }
+  Vector SDiv(Span n, Span d) { return SDivMod(n, d).quotient; }
+  Vector SMod(Span n, Span d) { return SDivMod(n, d).remainder; }
 
  private:
+  template <typename = void>
+    requires(!kIsITEFundamental)
+  Vector DynamicBitSliceInternal(Span input, Span start, int64_t width) {
+    return BitSlice(ShiftRightLogical(input, start), /*start=*/0, width);
+  }
+
+  template <typename = void>
+    requires(kIsITEFundamental)
+  Vector DynamicBitSliceInternal(Span input, Span start, int64_t width) {
+    Vector ext = ZeroExtend(input, input.size() + width);
+    std::vector<Span> cases;
+    cases.reserve(input.size());
+    for (int i = 0; i < input.size(); ++i) {
+      cases.push_back(absl::MakeConstSpan(ext).subspan(i, width));
+    }
+    return SelectInternal(start, cases, Vector(width, Zero()));
+  }
+
   // An implementation of OneHotSelect which takes a span of spans of Elements
   // rather than a span of Vectors. This enables the cases to be overlapping
   // spans of the same underlying vector as is used in the shift implementation.
-  Vector OneHotSelectInternal(absl::Span<const Element> selector,
+  Vector OneHotSelectInternal(Span selector,
                               absl::Span<const absl::Span<const Element>> cases,
                               bool selector_can_be_zero) {
-    XLS_CHECK_EQ(selector.size(), cases.size());
-    XLS_CHECK_GT(selector.size(), 0);
+    CHECK_EQ(selector.size(), cases.size());
+    CHECK_GT(selector.size(), 0);
     int64_t width = cases.front().size();
     Vector result(width, Zero());
     for (int64_t i = 0; i < selector.size(); ++i) {
@@ -603,12 +815,123 @@ class AbstractEvaluator {
     return result;
   }
 
+  template <typename SpanOfSpanLike>
+    requires(!kIsITEFundamental)
+  Vector SelectInternal(
+      Span selector, SpanOfSpanLike cases_vec,
+      std::optional<const Span> default_value = std::nullopt) {
+    // Turn the binary selector into a one-hot selector.
+    auto cases = absl::MakeConstSpan(cases_vec);
+    Vector one_hot_selector;
+    int64_t max_cases = 0;
+    for (int64_t i = 0; i < cases.size(); ++i) {
+      if (Bits::MinBitCountUnsigned(i) > selector.size()) {
+        break;
+      }
+      one_hot_selector.push_back(
+          Equals(selector, BitsToVector(UBits(i, selector.size()))));
+      max_cases++;
+    }
+    // Unreachable cases.
+    if (cases.size() > max_cases) {
+      default_value = std::nullopt;
+      cases = cases.subspan(0, max_cases);
+    }
+    if (default_value.has_value()) {
+      // Copy the cases span as we need to append to it.
+      std::vector<Span> ohs_cases(cases.begin(), cases.end());
+      one_hot_selector.push_back(
+          ULessThan(BitsToVector(UBits(cases_vec.size() - 1, selector.size())),
+                    selector));
+      ohs_cases.push_back(*default_value);
+      return OneHotSelectInternal(one_hot_selector, ohs_cases,
+                                  /*selector_can_be_zero=*/false);
+    } else {
+      return OneHotSelectInternal(one_hot_selector, cases,
+                                  /*selector_can_be_zero=*/false);
+    }
+  }
+
+  template <typename SpanOfSpanLike>
+    requires(kIsITEFundamental)
+  Vector SelectInternal(
+      Span selector, SpanOfSpanLike cases_spanlike,
+      std::optional<const Span> default_value = std::nullopt) {
+    auto cases = absl::MakeConstSpan(cases_spanlike);
+    if (cases.empty()) {
+      CHECK(default_value.has_value())
+          << "Selector has no default value and no cases";
+      return std::vector<Element>(default_value->begin(), default_value->end());
+    }
+    int64_t case_bits = Bits::MinBitCountUnsigned(
+        cases.size() - (default_value.has_value() ? 0 : 1));
+    int64_t selector_bits = selector.size();
+    if (selector_bits > case_bits) {
+      Element high_bit_set = OrReduce(selector.subspan(case_bits)).front();
+      selector = selector.subspan(0, case_bits);
+      CHECK(default_value.has_value())
+          << "Selector has no default value and selector width > required for "
+             "number of cases";
+      return IfBits(high_bit_set, *default_value,
+                    SelectInternal(selector, cases, default_value));
+    } else if (case_bits > selector_bits) {
+      cases = cases.subspan(0, 1 << selector_bits);
+      default_value = std::nullopt;
+    }
+    if (selector_bits == 1) {
+      CHECK(cases.size() >= 2 || default_value.has_value())
+          << "Selector has no default value and not enough cases ("
+          << cases.size() << ") for selector width (" << selector_bits << ")";
+      return IfBits(selector[0], cases.size() >= 2 ? cases[1] : *default_value,
+                    cases.front());
+    }
+    Element msb = selector.back();
+    Span tail = selector.subspan(0, selector.size() - 1);
+    return IfBits(
+        msb,
+        SelectInternal(tail, cases.subspan(1 << tail.size()), default_value),
+        // NB default is nullopt b/c selector_bits <= case_bits which
+        // means that the default value is not observable.
+        SelectInternal(tail, cases.subspan(0, 1 << tail.size()), std::nullopt));
+  }
+
+  // An implementation of PrioritySelect which takes a span of spans of Elements
+  // rather than a span of Vectors. This enables the cases to be overlapping
+  // spans of the same underlying vector as is used in the shift implementation.
+  Vector PrioritySelectInternal(
+      Span selector, absl::Span<const absl::Span<const Element>> cases,
+      bool selector_can_be_zero, Span default_value) {
+    CHECK_EQ(selector.size(), cases.size());
+    if (selector.empty()) {
+      // No actual cases. Strange but valid.
+      return SpanToVec(default_value);
+    }
+    int64_t width = default_value.size();
+    for (absl::Span<const Element> case_span : cases) {
+      CHECK_EQ(case_span.size(), width);
+    }
+    if (!selector_can_be_zero) {
+      CHECK(!cases.empty());
+      default_value = cases.back();
+      selector.remove_suffix(1);
+      cases.remove_suffix(1);
+    }
+    Vector result(default_value.begin(), default_value.end());
+    for (int64_t i = selector.size() - 1; i >= 0; --i) {
+      result = IfBits(selector[i], /*consequent=*/cases[i],
+                      /*alternate=*/result);
+    }
+    return result;
+  }
+
   // Performs an N-ary logical operation on the given inputs. The operation is
   // defined by the given function.
-  Vector NaryOp(absl::Span<const Vector> inputs,
-                absl::FunctionRef<Element(const Element&, const Element&)> f) {
-    XLS_CHECK_GT(inputs.size(), 0);
-    Vector result(inputs.front());
+  template <typename SpanOfSpanLike>
+  Vector NaryOp(
+      SpanOfSpanLike inputs,
+      absl::FunctionRef<Element(const Element&, const Element&)> f) const {
+    CHECK_GT(inputs.size(), 0);
+    Vector result(inputs.front().begin(), inputs.front().end());
     for (int64_t i = 1; i < inputs.size(); ++i) {
       for (int64_t j = 0; j < result.size(); ++j) {
         result[j] = f(result[j], inputs[i][j]);
@@ -620,43 +943,21 @@ class AbstractEvaluator {
   // Returns the result of shifting 'input' by' amount. If 'right' is true, then
   // a right-shift is performed. If 'arithmetic' is true, the shift is
   // arithmetic otherwise it is logical.
-  Vector Shift(const Vector& input, const Vector& amount, bool right,
-               bool arithmetic) {
-    // Create the shift using a OneHotSelect. Each case of the OneHotSelect is
-    // 'input' shifted by some constant value. The selector bits are each a
-    // comparison of 'amount' to a constant value.
-    //
-    // First create a selector with input.size() + 1 bits containing the
-    // following values:
-    //   i in [0 ... input.size() - 1] : selector[i] = (amount == i)
-    //   i == input.size()             : selector[i] = amount >= input.size()
-    Vector selector;
-    selector.reserve(input.size() + 1);
-    auto bits_vector = [&](int64_t v) {
-      return BitsToVector(UBits(v, amount.size()));
-    };
-    for (int64_t i = 0; i < input.size(); ++i) {
-      if (amount.size() < Bits::MinBitCountUnsigned(i)) {
-        // 'amount' doesn't have enough bits to express this shift amount.
-        break;
-      }
-      selector.push_back(Equals(amount, bits_vector(i)));
+  Vector Shift(Span input, Span amount, bool right, bool arithmetic) {
+    // Short-circuit zero-length shifts.
+    if (input.empty()) {
+      return {};
     }
-    // If 'amount' is wide enough to express over-shifting (shifting greater
-    // than or equal to the input size), we need an additional case to catch
-    // these instances.
-    if (amount.size() >= Bits::MinBitCountUnsigned(input.size())) {
-      selector.push_back(Not(ULessThan(amount, bits_vector(input.size()))));
-    }
+    int64_t case_cnt = input.size() + 1;
 
-    // Create a span for each case in the one-hot-select. Each span corresponds
+    // Create a span for each case in the select. Each span corresponds
     // to the input vector shifted by a particular amount. Because of this
     // special structure of the spans, they may be represented a spans (slices)
     // of the same underlying vector. This is much faster than creating a
     // separate vector (and allocation) for each case.
     //
     // First create an extended version of the input vector where additional
-    // bits are added to the beginning or end of the the vector. These
+    // bits are added to the beginning or end of the vector. These
     // additional bits ensure that any shift amount corresponds to a particular
     // slice of the extended vector.
     //
@@ -664,9 +965,9 @@ class AbstractEvaluator {
     // 'abcd' where 'a' through 'd' are the various bit values and 'd' is at
     // index 0.
     Vector extended;
-    extended.reserve(input.size() + selector.size() - 1);
+    extended.reserve(input.size() + case_cnt - 1);
     std::vector<absl::Span<const Element>> cases;
-    cases.reserve(selector.size());
+    cases.reserve(case_cnt);
     if (right) {
       // Shifting right.
       //
@@ -693,10 +994,10 @@ class AbstractEvaluator {
       //    cases[3] =  000a
       //    cases[4] = 0000
       extended.insert(extended.begin(), input.begin(), input.end());
-      for (int64_t i = 0; i < selector.size() - 1; ++i) {
+      for (int64_t i = 0; i < case_cnt - 1; ++i) {
         extended.push_back(arithmetic ? input.back() : Zero());
       }
-      for (int64_t i = 0; i < selector.size(); ++i) {
+      for (int64_t i = 0; i < case_cnt; ++i) {
         cases.push_back(absl::MakeConstSpan(&extended[i], input.size()));
       }
     } else {
@@ -710,19 +1011,49 @@ class AbstractEvaluator {
       //    cases[2] =   cd00     // ...
       //    cases[3] =    c000
       //    cases[4] =     0000
-      for (int64_t i = 0; i < selector.size() - 1; ++i) {
+      for (int64_t i = 0; i < case_cnt - 1; ++i) {
         extended.push_back(Zero());
       }
       for (int64_t i = 0; i < input.size(); ++i) {
         extended.push_back(input[i]);
       }
-      for (int64_t i = 0; i < selector.size(); ++i) {
-        cases.push_back(absl::MakeConstSpan(&extended[selector.size() - 1 - i],
-                                            input.size()));
+      for (int64_t i = 0; i < case_cnt; ++i) {
+        cases.push_back(
+            absl::MakeConstSpan(&extended[case_cnt - 1 - i], input.size()));
       }
     }
-    return OneHotSelectInternal(selector, cases,
-                                /*selector_can_be_zero=*/false);
+    return SelectInternal(
+        amount, absl::MakeConstSpan(cases).subspan(0, cases.size() - 1),
+        cases.back());
+  }
+
+  template <typename Op>
+    requires(!kIsITEFundamental)
+  Element ReduceOp(Op op, Span input, Element ident) const {
+    Element result = ident;
+    for (const Element& e : input) {
+      result = op(result, e);
+    }
+    return result;
+  }
+
+  // Do a tree reduction for ITE fundamental operations since BDDs want minimal
+  // depth.
+  template <typename Op>
+    requires(kIsITEFundamental)
+  Element ReduceOp(Op op, Span input, Element ident) const {
+    if (input.empty()) {
+      return ident;
+    }
+    if (input.size() == 1) {
+      return input.front();
+    }
+    if (input.size() == 2) {
+      return op(input[0], input[1]);
+    }
+    int64_t mid = input.size() / 2;
+    return op(ReduceOp(op, input.subspan(0, mid), ident),
+              ReduceOp(op, input.subspan(mid), ident));
   }
 };
 

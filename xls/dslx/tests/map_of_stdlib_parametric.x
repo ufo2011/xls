@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import std
+import std;
 
 fn main(x: s3[3]) -> s3[3] {
-  let y: s3[3] = map(x, std::abs);
-  y
+    let y: s3[3] = map(x, std::abs);
+    y
 }
 
-#![test]
+#[test]
 fn main_test() {
-  let got: s3[3] = main(s3[3]:[-1, 1, 0]);
-  assert_eq(s3[3]:[1, 1, 0], got)
+    let got: s3[3] = main(s3[3]:[-1, 1, 0]);
+    assert_eq(s3[3]:[1, 1, 0], got)
 }

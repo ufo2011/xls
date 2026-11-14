@@ -15,10 +15,35 @@
 #ifndef XLS_IR_PROC_H_
 #define XLS_IR_PROC_H_
 
-#include "absl/strings/string_view.h"
-#include "xls/ir/function.h"
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/base/casts.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/types/optional_ref.h"
+#include "absl/types/span.h"
+#include "xls/common/status/ret_check.h"
+#include "xls/common/status/status_macros.h"
+#include "xls/ir/channel.h"
+#include "xls/ir/function_base.h"
+#include "xls/ir/ir_annotator.h"
+#include "xls/ir/name_uniquer.h"
+#include "xls/ir/node.h"
+#include "xls/ir/nodes.h"
 #include "xls/ir/package.h"
+#include "xls/ir/proc_instantiation.h"
+#include "xls/ir/source_location.h"
+#include "xls/ir/state_element.h"
 #include "xls/ir/type.h"
+#include "xls/ir/value.h"
 
 namespace xls {
 
@@ -28,68 +53,452 @@ namespace xls {
 // TODO(meheff): Add link to documentation when we have some.
 class Proc : public FunctionBase {
  public:
-  Proc(absl::string_view name, const Value& init_value,
-       absl::string_view token_param_name, absl::string_view state_param_name,
+  // Creates a proc with no state elements.
+  Proc(std::string_view name, Package* package)
+      : FunctionBase(name, package), is_new_style_proc_(false) {}
+
+  // Creates a new-style proc which supports proc-scoped channels.
+  Proc(std::string_view name,
+       absl::Span<std::unique_ptr<ChannelInterface>> interface,
        Package* package)
-      : FunctionBase(name, package),
-        init_value_(init_value),
-        token_param_(AddNode(absl::make_unique<Param>(
-            absl::nullopt, token_param_name, package->GetTokenType(), this))),
-        state_param_(AddNode(absl::make_unique<Param>(
-            absl::nullopt, state_param_name,
-            package->GetTypeForValue(init_value_), this))),
-        next_token_(token_param_),
-        next_state_(state_param_) {}
-
-  virtual ~Proc() = default;
-
-  // Returns the initial value of the state variable.
-  const Value& InitValue() const { return init_value_; }
-
-  // Returns the type of the recurrent state variable.
-  Type* StateType() const { return StateParam()->GetType(); }
-
-  // Returns the state (or token) parameter node. These are the only Params of
-  // the Proc.
-  Param* StateParam() const { return state_param_; }
-  Param* TokenParam() const { return token_param_; }
-
-  // Returns the node holding the next recurrent token/state value.
-  Node* NextToken() const { return next_token_; }
-  Node* NextState() const { return next_state_; }
-
-  // Sets the next recurrent token value. Node must be token typed.
-  absl::Status SetNextToken(Node* next);
-
-  // Sets the next recurrent state value. Node type must match the type of the
-  // state of the proc.
-  absl::Status SetNextState(Node* next);
-
-  // Removes the existing state param node and creates a new one with the given
-  // name and type matching next_state (which may be any type). Replaces the
-  // proc's next recurrent state with the given next_state. The existing state
-  // param must have no uses.
-  absl::Status ReplaceState(absl::string_view state_param_name,
-                            Node* next_state);
-
-  bool HasImplicitUse(Node* node) const override {
-    return node == NextToken() || node == NextState();
+      : FunctionBase(name, package), is_new_style_proc_(true) {
+    for (std::unique_ptr<ChannelInterface>& channel_interface : interface) {
+      channel_interfaces_.push_back(std::move(channel_interface));
+      interface_.push_back(channel_interfaces_.back().get());
+    }
   }
 
-  std::string DumpIr(bool recursive = false) const override;
+  ~Proc() override = default;
+
+  void MoveFrom(Proc& other);
+
+  // Moves state, channels, and instantiations from `other`. Does not move any
+  // logic, including state reads/writes.
+  void MoveNonLogicFrom(Proc& other);
+
+  int64_t GetStateElementCount() const { return StateElements().size(); }
+
+  // Returns the total number of bits in the proc state.
+  int64_t GetStateFlatBitCount() const;
+
+  // Returns the state element(s).
+  absl::Span<StateElement* const> StateElements() const { return state_vec_; }
+  const absl::flat_hash_map<std::string, std::unique_ptr<StateElement>>&
+  StateElementMap() const {
+    return state_elements_;
+  }
+  StateElement* GetStateElement(int64_t index) const {
+    return StateElements().at(index);
+  }
+  absl::StatusOr<StateElement*> GetStateElementByName(
+      std::string_view name) const;
+  std::optional<StateElement*> MaybeGetStateElementByName(
+      std::string_view name) const;
+
+  bool HasStateElement(std::string_view name) const {
+    return state_elements_.contains(name);
+  }
+
+  // Remove legacy getters after all downstream passes migrate logic.
+  StateRead* GetStateRead(int64_t index) const {
+    absl::Span<StateRead* const> state_reads = GetStateReads(index);
+    CHECK_EQ(state_reads.size(), 1);
+    return state_reads.front();
+  }
+
+  StateRead* GetStateReadByStateElement(StateElement* state_element) const {
+    absl::Span<StateRead* const> state_reads =
+        GetStateReadsByStateElement(state_element);
+    CHECK_EQ(state_reads.size(), 1);
+    return state_reads.front();
+  }
+
+  // Get state reads for a state element at the given index.
+  absl::Span<StateRead* const> GetStateReads(int64_t index) const {
+    return state_reads_.at(GetStateElement(index));
+  }
+
+  // Get state reads for a state element.
+  absl::Span<StateRead* const> GetStateReadsByStateElement(
+      StateElement* state_element) const {
+    auto it = state_reads_.find(state_element);
+    if (it == state_reads_.end()) {
+      return absl::Span<StateRead* const>();
+    }
+    return it->second;
+  }
+
+  // Returns the index of the given state element in the vector of state
+  // elements.
+  absl::StatusOr<int64_t> GetStateElementIndex(
+      StateElement* state_element) const;
+  std::optional<int64_t> MaybeGetStateElementIndex(
+      StateElement* state_element) const;
+
+  const Proc* GetEffectiveProcOrDie() const final { return this; }
+
+  Proc* GetEffectiveProcOrDie() final { return this; }
+
+  // Returns true if the given proc-scoped construct (state element) is owned by
+  // this block.
+  bool IsOwned(StateElement* reg) const {
+    return state_elements_.contains(reg->name()) &&
+           state_elements_.at(reg->name()).get() == reg;
+  }
+
+  // Sanitizes and uniquifies the given name using the proc's name uniquer.
+  // Registers the uniquified name in the state uniquer so it is not handed out
+  // again.
+  std::string UniquifyStateName(std::string_view name) {
+    return state_name_uniquer_.GetSanitizedUniqueName(name);
+  }
+
+  // Returns the type of the given state element.
+  Type* GetStateElementType(int64_t index) const {
+    return StateElements().at(index)->type();
+  }
+
+  // A set of callbacks to help one replace a state element with one of a
+  // different type.
+  class StateElementTransformer {
+   public:
+    virtual ~StateElementTransformer() = default;
+    // Called with the new_state_read node and the old state_read_node. Must
+    // return a node which adapts the new_state_read's type to the
+    // old_state_read's type.
+    virtual absl::StatusOr<Node*> TransformStateRead(
+        Proc* proc, StateRead* new_state_read, StateRead* old_state_read) {
+      XLS_RET_CHECK(new_state_read->GetType() == old_state_read->GetType());
+      return new_state_read;
+    }
+    // Called with the old state_read node. Must return a node which will be the
+    // new 'predicate' for the new state_read. old_state_read's predicate.
+    virtual absl::StatusOr<std::optional<Node*>> TransformReadPredicate(
+        Proc* proc, StateRead* old_state_read) {
+      return old_state_read->predicate();
+    }
+    // Called with the new_state_read node and the next-node (Without any
+    // updates applied to it). Must return a node which adapts the old_next's
+    // value() node to the value of the corresponding next on new_param.
+    virtual absl::StatusOr<Node*> TransformNextValue(
+        Proc* proc, StateElement* new_state_element, Next* old_next) {
+      XLS_RET_CHECK(old_next->value()->GetType() == new_state_element->type());
+      return old_next->value();
+    }
+    // Caled with the new_state_element and the next-node (Without any updates
+    // applied to it). Must return a node which will be the new 'predicate' for
+    // the corresponding 'next' on the new_state_element.
+    virtual absl::StatusOr<std::optional<Node*>> TransformNextPredicate(
+        Proc* proc, StateElement* new_state_element, Next* old_next) {
+      return old_next->predicate();
+    }
+  };
+
+  // Transform the given state element using the 'transformer'. The new state
+  // element will have the same name (though a different index) as the old one
+  // and the type of 'init_value'. The callbacks in 'transform' will be called
+  // to adapt everything to the new type.
+  //
+  // Once the transformer has fixed up the types ReplaceUsesWith will be used to
+  // switch users of the old param to the new one.
+  //
+  // The old state element will continue to exist with a new name and all
+  // identity next nodes with all users removed. It should be cleaned up by
+  // ProcStateOptimizationPass in RemoveUnobservableStateElements.
+  //
+  // The proc must only use 'next' nodes to call this function.
+  absl::StatusOr<StateElement*> TransformStateElement(
+      StateElement* old_state_element, const Value& init_value,
+      StateElementTransformer& transform);
+
+  // Remove the state element at the given index. All state elements higher than
+  // `index` are shifted down one to fill the hole. The state parameter at the
+  // index must have no uses.
+  absl::Status RemoveStateElement(int64_t index);
+
+  // Remove all state elements currently present.
+  absl::Status RemoveAllStateElements();
+
+  // Appends a state element with the given name (if possible), next state
+  // value, and initial value. If `next_state` is not given then the next state
+  // node for this state element is set to the newly created state parameter
+  // node. Returns the newly created state read node.
+  absl::StatusOr<StateRead*> AppendStateElement(
+      std::string_view requested_state_name, const Value& init_value,
+      std::optional<Node*> read_predicate, std::optional<Node*> next_state,
+      bool non_synthesizable, const SourceInfo& loc = SourceInfo());
+  absl::StatusOr<StateRead*> AppendStateElement(
+      std::string_view requested_state_name, const Value& init_value,
+      const SourceInfo& loc = SourceInfo()) {
+    return AppendStateElement(requested_state_name, init_value,
+                              /*read_predicate=*/std::nullopt,
+                              /*next_state=*/std::nullopt,
+                              /*non_synthesizable=*/false, loc);
+  }
+
+  // Adds a state read node for an existing state element.
+  absl::StatusOr<StateRead*> AddStateRead(
+      StateElement* state_element,
+      std::optional<Node*> predicate = std::nullopt,
+      std::optional<std::string> label = std::nullopt,
+      const SourceInfo& loc = SourceInfo());
+
+  // Add a new state element (at index) without any reads or nexts. These must
+  // be added separately before verification.
+  absl::StatusOr<StateElement*> InsertUnreadStateElement(
+      int64_t index, std::string_view requested_state_name,
+      const Value& init_value, const SourceInfo& loc, bool non_synthesizable);
+  absl::StatusOr<StateElement*> AppendUnreadStateElement(
+      std::string_view requested_state_name, const Value& init_value,
+      bool non_synthesizable, const SourceInfo& loc = SourceInfo()) {
+    return InsertUnreadStateElement(GetStateElementCount(),
+                                    requested_state_name, init_value, loc,
+                                    non_synthesizable);
+  }
+
+  // Adds a state element at the given index. Current state elements at the
+  // given index or higher will be shifted up. Returns the newly created
+  // parameter node.
+  absl::StatusOr<StateRead*> InsertStateElement(
+      int64_t index, std::string_view requested_state_name,
+      const Value& init_value, std::optional<Node*> read_predicate,
+      std::optional<Node*> next_state, bool non_synthesizable,
+      const SourceInfo& loc = SourceInfo());
+  absl::StatusOr<StateRead*> InsertStateElement(
+      int64_t index, std::string_view requested_state_name,
+      const Value& init_value, const SourceInfo& loc = SourceInfo()) {
+    return InsertStateElement(index, requested_state_name, init_value,
+                              /*read_predicate=*/std::nullopt,
+                              /*next_state=*/std::nullopt,
+                              /*non_synthesizable=*/false, loc);
+  }
+
+  bool HasImplicitUse(Node* node) const override;
+
+  absl::Status RemoveNode(Node* n) override;
+
+  // Creates a clone of the proc with the new name `new_name`. Proc is
+  // owned by `target_package`. `channel_remapping` dictates how to map channel
+  // names to new channel names in the cloned version; if a key is unavailable
+  // in `channel_remapping` it is assumed to be the identity mapping at that
+  // key.
+  absl::StatusOr<Proc*> Clone(
+      std::string_view new_name, Package* target_package = nullptr,
+      const absl::flat_hash_map<std::string, std::string>& channel_remapping =
+          {},
+      const absl::flat_hash_map<const FunctionBase*, FunctionBase*>&
+          call_remapping = {},
+      const absl::flat_hash_map<std::string, std::string>&
+          state_name_remapping = {},
+      absl::optional_ref<absl::flat_hash_map<Node*, Node*>>
+          original_node_to_clone = std::nullopt,
+      const absl::flat_hash_map<std::string, std::string>&
+          spawned_proc_name_remapping = {}) const;
+
+  using FunctionBase::DumpIr;
+  std::string DumpIr(const IrAnnotator& annotate) const override;
+
+  FunctionBase::Kind kind() const final { return FunctionBase::Kind::kProc; }
+
+  // Returns true if this is a new-style proc which has proc-scoped channels.
+  bool is_new_style_proc() const { return is_new_style_proc_; }
+
+  // Returns the type of the channel reference (Channel or ChannelInterface)
+  // with the given name.
+  absl::StatusOr<Type*> GetChannelReferenceType(std::string_view name) const;
+
+  // Return the ordered list of the channel interfaces which form the interface
+  // of the proc. Only can be called for new style procs.
+  absl::Span<ChannelInterface* const> interface() const {
+    CHECK(is_new_style_proc());
+    return interface_;
+  }
+
+  // Return the channels defined in this proc. Only can be called for new style
+  // procs.
+  absl::Span<Channel* const> channels() const {
+    CHECK(is_new_style_proc());
+    return channel_vec_;
+  }
+
+  // Add a channel definition to the proc.  Only can be called for new style
+  // procs. Returns a data structure holding pointers to the interfaces to the
+  // two sides of the channel.
+  absl::StatusOr<ChannelWithInterfaces> AddChannel(
+      std::unique_ptr<Channel> channel);
+
+  // Remove a channel definition from the proc. Only can be called for new style
+  // procs. Also removes the interfaces for the channel.
+  absl::Status RemoveChannel(Channel* channel);
+
+  // Removes all channels and channel interfaces from this proc. Only can be
+  // called for new style procs.
+  absl::Status RemoveAllChannelsAndInterfaces();
+
+  // Returns the channel with the given name defined in the proc. Only can be
+  // called for new style procs.
+  absl::StatusOr<Channel*> GetChannel(std::string_view name);
+
+  // Returns whether a channel with the given name is declared in the proc. Only
+  // can be called for new style procs.
+  bool HasChannelWithName(std::string_view name);
+
+  // Returns the ChannelRef referring to the global channel or proc-scoped
+  // channel (new-style procs) with the given name.
+  absl::StatusOr<ChannelRef> GetChannelRef(std::string_view name,
+                                           ChannelDirection direction);
+
+  bool ChannelIsOwnedByProc(Channel* channel);
+
+  // Add input/output channels to the interface of the proc.
+  absl::StatusOr<ReceiveChannelInterface*> AddInputChannel(
+      std::string_view name, Type* type, ChannelKind kind,
+      FlowControl flow_control,
+      std::optional<ChannelStrictness> strictness = std::nullopt);
+  absl::StatusOr<SendChannelInterface*> AddOutputChannel(
+      std::string_view name, Type* type, ChannelKind kind,
+      FlowControl flow_control,
+      std::optional<ChannelStrictness> strictness = std::nullopt);
+  absl::StatusOr<ChannelInterface*> AddInterfaceChannel(
+      std::string_view name, ChannelDirection direction, Type* type,
+      ChannelKind kind, FlowControl flow_control,
+      std::optional<ChannelStrictness> strictness = std::nullopt);
+
+  // Remove a channel from the interface of the proc. ChannelInterfaceslater
+  // than `channel_interface` in the interface are shifted down.
+  absl::Status RemoveChannelInterface(ChannelInterface* channel_interface);
+
+  // Returns true if the given ChannelInterface refers to an element on the
+  // interface of the proc.
+  bool IsOnProcInterface(ChannelInterface* channel_interface);
+
+  // Add an input/output channel to the interface of the proc. Only can be
+  // called for new style procs.
+  absl::StatusOr<ReceiveChannelInterface*> AddInputChannelInterface(
+      std::unique_ptr<ReceiveChannelInterface> channel_interface);
+  absl::StatusOr<SendChannelInterface*> AddOutputChannelInterface(
+      std::unique_ptr<SendChannelInterface> channel_interface);
+  absl::StatusOr<ChannelInterface*> AddChannelInterface(
+      std::unique_ptr<ChannelInterface> channel_interface);
+
+  // Create and add a proc instantiation to the proc.
+  absl::StatusOr<ProcInstantiation*> AddProcInstantiation(
+      std::string_view name, absl::Span<ChannelInterface* const> channel_args,
+      Proc* proc);
+  // Delete all proc instantiations
+  absl::StatusOr<std::vector<std::unique_ptr<ProcInstantiation>>>
+  RemoveAllProcInstantiations();
+
+  // Returns whether this proc has a channel interface of the given name. Only
+  // can be called for new style procs.
+  bool HasChannelInterface(std::string_view name,
+                           ChannelDirection direction) const;
+
+  // Returns the (Send/Receive) channel interface with the given name.
+  absl::StatusOr<ChannelInterface*> GetChannelInterface(
+      std::string_view name, ChannelDirection direction) const;
+  absl::StatusOr<SendChannelInterface*> GetSendChannelInterface(
+      std::string_view name) const;
+  absl::StatusOr<ReceiveChannelInterface*> GetReceiveChannelInterface(
+      std::string_view name) const;
+
+  // Returns all the channel interfaces in the proc. This includes interfaces on
+  // the interface of the proc and of channels declared in the proc.
+  absl::Span<const std::unique_ptr<ChannelInterface>> channel_interfaces()
+      const {
+    return channel_interfaces_;
+  }
+
+  // Returns the list of instantiations of other procs in this proc.
+  absl::Span<std::unique_ptr<ProcInstantiation>> proc_instantiations() {
+    return absl::MakeSpan(proc_instantiations_);
+  }
+  absl::Span<const std::unique_ptr<ProcInstantiation>> proc_instantiations()
+      const {
+    return proc_instantiations_;
+  }
+
+  absl::StatusOr<ProcInstantiation*> GetProcInstantiation(
+      std::string_view instantiation_name) const;
+
+  // Sets the new-style proc bit to true. Proc may be malformed until the
+  // interface and channel declarations are added.
+  // TODO(https://github.com/google/xls/issues/869): Remove when all procs are
+  // new-style.
+  absl::Status ConvertToNewStyle();
+
+ protected:
+  absl::Status InternalRebuildSideTables() final;
 
  private:
-  Value init_value_;
+  bool is_new_style_proc_;
 
-  // State and token parameters. Procs have fixed set of parameters (state data
-  // and an input token) which are added at construction time.
-  Param* token_param_;
-  Param* state_param_;
+  NameUniquer state_name_uniquer_ =
+      NameUniquer(/*separator=*/"__", GetIrReservedWords());
 
-  // The nodes representing the token/state values for the next iteration of the
-  // proc.
-  Node* next_token_;
-  Node* next_state_;
+  // State elements within this proc. Indexed by state element name. Stored as
+  // std::unique_ptrs for pointer stability.
+  absl::flat_hash_map<std::string, std::unique_ptr<StateElement>>
+      state_elements_;
+
+  // Map of StateRead nodes for each state element.
+  absl::flat_hash_map<StateElement*, std::vector<StateRead*>> state_reads_;
+
+  // Vector of state element pointers. Kept in sync with the state_elements_
+  // map. Enables easy, stable iteration over state elements. With this vector,
+  // deletion of a state element is O(n) with the number of state elements. If
+  // this is a problem, a linked list might be used instead.
+  std::vector<StateElement*> state_vec_;
+
+  // All channel interfaces in this proc. Channel interfaces can be part of the
+  // proc interface or for channels declared in this proc.
+  std::vector<std::unique_ptr<ChannelInterface>> channel_interfaces_;
+
+  // Channel interfaces which form interface of the proc.
+  std::vector<ChannelInterface*> interface_;
+
+  // Instantiations of other procs within this proc.
+  std::vector<std::unique_ptr<ProcInstantiation>> proc_instantiations_;
+
+  // Channels declared in this proc indexed by channel name.
+  absl::flat_hash_map<std::string, std::unique_ptr<Channel>> channels_;
+  std::vector<Channel*> channel_vec_;
+};
+
+// A proc which has been scheduled and contains information about which nodes
+// execute in which pipeline stage.
+class ScheduledProc : public Proc {
+ public:
+  ScheduledProc(std::string_view name, Package* package)
+      : Proc(name, package) {}
+
+  // Creates a new-style scheduled proc which supports proc-scoped channels.
+  ScheduledProc(std::string_view name,
+                absl::Span<std::unique_ptr<ChannelInterface>> interface,
+                Package* package)
+      : Proc(name, interface, package) {}
+
+  bool IsScheduled() const override { return true; }
+
+  // Creates a clone of the scheduled proc with the new name `new_name`. Proc is
+  // owned by `target_package`. `channel_remapping` dictates how to map channel
+  // names to new channel names in the cloned version; if a key is unavailable
+  // in `channel_remapping` it is assumed to be the identity mapping at that
+  // key.
+  absl::StatusOr<ScheduledProc*> Clone(
+      std::string_view new_name, Package* target_package = nullptr,
+      const absl::flat_hash_map<std::string, std::string>& channel_remapping =
+          {},
+      const absl::flat_hash_map<const FunctionBase*, FunctionBase*>&
+          call_remapping = {},
+      const absl::flat_hash_map<std::string, std::string>&
+          state_name_remapping = {}) const {
+    XLS_ASSIGN_OR_RETURN(
+        Proc * cloned_proc,
+        Proc::Clone(new_name, target_package, channel_remapping, call_remapping,
+                    state_name_remapping));
+    return absl::down_cast<ScheduledProc*>(cloned_proc);
+  }
 };
 
 }  // namespace xls

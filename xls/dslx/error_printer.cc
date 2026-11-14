@@ -14,93 +14,198 @@
 
 #include "xls/dslx/error_printer.h"
 
+#include <stdio.h>  // NOLINT for fileno
+#include <unistd.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <iostream>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/str_split.h"
-#include "xls/common/file/filesystem.h"
+#include "absl/types/span.h"
+#include "re2/re2.h"
 #include "xls/common/status/ret_check.h"
+#include "xls/common/status/status_macros.h"
+#include "xls/dslx/frontend/builtin_stubs_utils.h"
+#include "xls/dslx/frontend/pos.h"
+#include "xls/dslx/virtualizable_file_system.h"
+#include "xls/dslx/warning_collector.h"
 
 namespace xls::dslx {
+namespace {
 
-absl::Status PrintPositionalError(
-    const Span& error_span, absl::string_view error_message, std::ostream& os,
-    std::function<absl::StatusOr<std::string>(absl::string_view)>
-        get_file_contents,
-    absl::optional<bool> color, int64_t error_context_line_count) {
-  XLS_RET_CHECK_EQ(error_context_line_count % 2, 1);
+struct ColorSpec {
+  std::string_view pos_color_leader;
+  std::string_view msg_color_leader;
+  std::string_view color_reset;
+};
 
-  if (get_file_contents == nullptr) {
-    get_file_contents = [](absl::string_view path) {
-      return GetFileContents(path);
-    };
+absl::Status PrintSingleSpanError(const Span& error_span,
+                                  std::string_view msg_to_print,
+                                  std::ostream& os, const FileTable& file_table,
+                                  VirtualizableFilesystem& vfs,
+                                  int64_t error_context_line_count,
+                                  const ColorSpec& color_spec) {
+  std::string contents;
+  if (IsSpanInBuiltinStubs(error_span, file_table)) {
+    contents = GetBuiltinStubsContent();
+  } else {
+    XLS_ASSIGN_OR_RETURN(
+        contents, vfs.GetFileContents(error_span.GetFilename(file_table)));
   }
-  XLS_ASSIGN_OR_RETURN(std::string contents,
-                       get_file_contents(error_span.filename()));
-  std::vector<absl::string_view> lines = absl::StrSplit(contents, '\n');
+
+  std::vector<std::string_view> lines = absl::StrSplit(contents, '\n');
+  // Lines are \n-terminated, not \n-separated.
+  if (lines.size() > 1 && lines.back().empty()) {
+    lines.resize(lines.size() - 1);
+  }
+  XLS_RET_CHECK(!lines.empty());
+  const Pos file_start(error_span.fileno(), 0, 0);
+
+  // file_limit as a whole is an exclusive limit (the first not-included
+  // character), but its file_limit.lineno() is inclusive (addresses the
+  // last line, not the one after).
+  const Pos file_limit(error_span.fileno(), lines.size() - 1,
+                       lines.back().size());
+
+  // Caps the effective start and limit against the file start and limit,
+  // and caps the limit against the start.
+  const Pos start =
+      std::max(file_start, std::min(error_span.start(), file_limit));
+  const Pos limit = std::max(start, std::min(file_limit, error_span.limit()));
 
   int64_t line_count_each_side = error_context_line_count / 2;
-  int64_t target_lineno = error_span.start().lineno();
-  int64_t low_lineno =
-      std::max(target_lineno - line_count_each_side, int64_t{0});
-  absl::Span<const absl::string_view> lines_before =
-      absl::MakeSpan(lines).subspan(low_lineno, target_lineno - low_lineno);
-  absl::string_view target_line = lines[error_span.start().lineno()];
-  // Note: since this is a limit there's a trailing +1.
-  absl::Span<const absl::string_view> lines_after =
-      absl::MakeSpan(lines).subspan(target_lineno + 1, line_count_each_side);
+  int64_t first_line_printed =
+      std::max(start.lineno() - line_count_each_side, int64_t{0});
+  int64_t last_line_printed =
+      std::min(limit.lineno() + line_count_each_side, file_limit.lineno());
 
-  // Note: "color" is a tristate, nullopt means no fixed request.
-  bool use_color;
-  if (color.has_value()) {
-    use_color = color.value();
-  } else {
-    use_color = isatty(fileno(stderr));
-  }
+  bool is_multiline = limit.lineno() > start.lineno();
 
-  std::string yellow_color_leader;
-  std::string red_color_leader;
-  std::string color_reset;
-  if (use_color) {
-    // ANSI color code for yellow.
-    yellow_color_leader = "\e[1;33m";
-    red_color_leader = "\e[1;31m";
-    // ANSI color code for reset.
-    color_reset = "\e[1;0m";
-  }
-
-  auto emit_line = [&](int64_t lineno, absl::string_view line,
-                       bool is_culprit = false) {
-    // Note: humans generally thing line i=0 is "line 1".
-    absl::string_view sigil = is_culprit ? "*" : " ";
-    os << absl::StreamFormat("%s%s %04d:%s %s\n", yellow_color_leader, sigil,
-                             lineno + 1, color_reset, line);
-  };
+  // When emitting multiline errors, we put a leading bar at the start of the
+  // line to show which are in the error range. When we're not doing multiline
+  // errors, this is just empty.
+  const std::string bar_on =
+      absl::StrCat(color_spec.msg_color_leader, " |", color_spec.color_reset);
+  const std::string bar_off = (is_multiline ? "  " : "");
+  std::string_view bar = bar_off;
 
   // Emit an indicator of what we're displaying.
-  os << absl::StreamFormat("%s:%s-%s\n", error_span.filename(),
+  os << absl::StreamFormat("%s:%s-%s\n", error_span.GetFilename(file_table),
                            error_span.start().ToStringNoFile(),
                            error_span.limit().ToStringNoFile());
 
-  // Emit the lines that come before.
-  for (int64_t i = 0; i < lines_before.size(); ++i) {
-    emit_line(low_lineno + i, lines_before[i]);
+  for (int64_t i = first_line_printed; i <= last_line_printed; ++i) {
+    os << absl::StreamFormat("%s%04d:%s%s %s\n", color_spec.pos_color_leader,
+                             i + 1, color_spec.color_reset, bar, lines[i]);
+    if (i == start.lineno()) {
+      // Emit arrow pointing to all of, or the start of, the error.
+      if (is_multiline) {
+        std::string spaces(std::string_view("0000: |").size(), ' ');
+        std::string underscores(std::max(int64_t{0}, start.colno()) + 1, '_');
+        os << absl::StreamFormat("%s%s%s^%s\n", color_spec.msg_color_leader,
+                                 spaces, underscores, color_spec.color_reset);
+        // Each line will also draw a little bit of a vertical bar
+        // connecting the start and the end of the multi-line error
+        // to the left.
+        bar = bar_on;
+      } else {
+        std::string squiggles(std::max(int64_t{0}, start.colno()) + 6, '~');
+        int64_t width = std::max(int64_t{0}, limit.colno() - start.colno() - 1);
+        std::string dashes_and_arrow;
+        if (width > 0) {
+          dashes_and_arrow = std::string(width - 1, '-') + "^";
+        }
+        std::string msg_with_space =
+            msg_to_print.empty() ? "" : absl::StrCat(" ", msg_to_print);
+        os << absl::StreamFormat("%s%s^%s%s%s\n", color_spec.msg_color_leader,
+                                 squiggles, dashes_and_arrow, msg_with_space,
+                                 color_spec.color_reset);
+      }
+    } else if (i == limit.lineno()) {
+      // Emit arrow pointing to the end of the multi-line error.
+      std::string spaces(std::string_view("0000: ").size(), ' ');
+      std::string underscores(std::max(int64_t{0}, limit.colno()), '_');
+      os << absl::StreamFormat("%s%s|%s^ %s%s\n", color_spec.msg_color_leader,
+                               spaces, underscores, msg_to_print,
+                               color_spec.color_reset);
+      // We're done drawing the multiline arrows; put down the crayon.
+      bar = bar_off;
+    }
   }
-
-  // Emit the culprit line.
-  emit_line(error_span.start().lineno(), target_line, /*is_culprit=*/true);
-
-  // Emit error indicator.
-  std::string squiggles(error_span.start().colno() + 6, '~');
-  int64_t width = std::max(
-      int64_t{1}, error_span.limit().colno() - error_span.start().colno() - 1);
-  std::string dashes(width - 1, '-');
-  os << absl::StreamFormat("%s  %s^%s^ %s%s\n", red_color_leader, squiggles,
-                           dashes, error_message, color_reset);
-
-  // Emit the lines that come after.
-  for (int64_t i = 0; i < lines_after.size(); ++i) {
-    emit_line(error_span.start().lineno() + 1 + i, lines_after[i]);
-  }
-
   return absl::OkStatus();
+}
+}  // namespace
+
+absl::Status PrintPositionalError(absl::Span<const Span> error_spans,
+                                  std::string_view error_message,
+                                  std::ostream& os, PositionalErrorColor color,
+                                  const FileTable& file_table,
+                                  VirtualizableFilesystem& vfs,
+                                  int64_t error_context_line_count) {
+  XLS_RET_CHECK_EQ(error_context_line_count % 2, 1);
+
+  // Strip ANSI escape codes from the error message opportunistically if we know
+  // we shouldn't be emitting colors.
+  //
+  // This is a bit of a layering violation but makes life easier as it allows
+  // "downstream" error message creation to insert ANSI codes without needing to
+  // be told explicitly if color error messages are ok.
+  std::string msg{error_message};
+  if (!isatty(fileno(stderr)) || color == PositionalErrorColor::kNoColor) {
+    RE2::GlobalReplace(&msg, "\33\\[\\d+m", "");
+  }
+
+  ColorSpec color_spec;
+  if (isatty(fileno(stderr))) {
+    switch (color) {
+      case PositionalErrorColor::kNoColor:
+        break;
+      case PositionalErrorColor::kErrorColor:
+        color_spec.pos_color_leader = "\e[1;33m";  // yellow
+        color_spec.msg_color_leader = "\e[1;31m";  // red
+        color_spec.color_reset = "\e[1;0m";        // reset
+        break;
+      case PositionalErrorColor::kWarningColor:
+        color_spec.pos_color_leader = "\e[1;33m";            // yellow
+        color_spec.msg_color_leader = "\e[38;2;255;140;0m";  // orange
+        color_spec.color_reset = "\e[1;0m";                  // reset
+        break;
+    }
+  }
+
+  XLS_RET_CHECK(!error_spans.empty());
+  bool first_span = true;
+  for (const Span& error_span : error_spans) {
+    std::string_view msg_to_print;
+    if (first_span) {
+      msg_to_print = msg;
+      first_span = false;
+    }
+    XLS_RETURN_IF_ERROR(
+        PrintSingleSpanError(error_span, msg_to_print, os, file_table, vfs,
+                             error_context_line_count, color_spec));
+  }
+  return absl::OkStatus();
+}
+
+void PrintWarnings(const WarningCollector& warnings,
+                   const FileTable& file_table, VirtualizableFilesystem& vfs) {
+  for (const WarningCollector::Entry& e : warnings.warnings()) {
+    absl::Status print_status = PrintPositionalError(
+        {e.span}, e.message, std::cerr, PositionalErrorColor::kWarningColor,
+        file_table, vfs);
+    if (!print_status.ok()) {
+      LOG(WARNING) << "Could not print warning: " << print_status;
+    }
+  }
 }
 
 }  // namespace xls::dslx

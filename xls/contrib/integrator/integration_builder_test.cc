@@ -14,14 +14,19 @@
 
 #include "xls/contrib/integrator/integration_builder.h"
 
+#include <memory>
+#include <string>
+#include <vector>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "xls/common/status/matchers.h"
+#include "xls/ir/bits.h"
 #include "xls/ir/ir_matcher.h"
-#include "xls/ir/ir_parser.h"
 #include "xls/ir/ir_test_base.h"
-#include "xls/ir/node_iterator.h"
+#include "xls/ir/nodes.h"
 #include "xls/ir/package.h"
+#include "xls/ir/source_location.h"
 #include "xls/ir/verifier.h"
 
 namespace m = ::xls::op_matchers;
@@ -56,12 +61,10 @@ TEST_F(IntegrationBuilderTest,
   auto main_in1 = fb_main.Param("in1", p->GetBitsType(2));
   auto main_in_arr =
       fb_main.Param("in_arr", p->GetArrayType(2, p->GetBitsType(2)));
-  fb_main.Map(main_in_arr, double_func, /*loc=*/std::nullopt, "map");
+  fb_main.Map(main_in_arr, double_func, SourceInfo(), "map");
   fb_main.CountedFor(main_in1, /*trip_count=*/4, /*stride=*/1, body_func,
-                     /*invariant_args=*/{}, /*loc=*/std::nullopt,
-                     "counted_for");
-  fb_main.Invoke(/*args=*/{main_in1}, double_func, /*loc=*/std::nullopt,
-                 "invoke");
+                     /*invariant_args=*/{}, SourceInfo(), "counted_for");
+  fb_main.Invoke(/*args=*/{main_in1}, double_func, SourceInfo(), "invoke");
   XLS_ASSERT_OK_AND_ASSIGN(Function * main_func, fb_main.Build());
 
   auto diff_package_dummy_p = CreatePackage();

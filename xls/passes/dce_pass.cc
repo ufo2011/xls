@@ -14,44 +14,69 @@
 
 #include "xls/passes/dce_pass.h"
 
+#include <cstdint>
+#include <deque>
+
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/log.h"
 #include "absl/status/statusor.h"
-#include "xls/common/logging/logging.h"
+#include "absl/types/span.h"
 #include "xls/common/status/status_macros.h"
-#include "xls/ir/dfs_visitor.h"
-#include "xls/ir/node_iterator.h"
+#include "xls/data_structures/algorithm.h"
+#include "xls/ir/function_base.h"
+#include "xls/ir/node_util.h"
+#include "xls/ir/nodes.h"
+#include "xls/ir/op.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/pass_base.h"
 
 namespace xls {
 
 absl::StatusOr<bool> DeadCodeEliminationPass::RunOnFunctionBaseInternal(
-    FunctionBase* f, const PassOptions& options, PassResults* results) const {
+    FunctionBase* f, const OptimizationPassOptions& options,
+    PassResults* results, OptimizationContext& context) const {
+  auto is_deletable = [](Node* n) {
+    // Don't remove invokes, they will be removed by inlining. The invoked
+    // functions could have side effects, so DCE shouldn't remove them.
+    //
+    // TODO: google/xls#1806 -  consider making invokes side-effecting if we can
+    // deal with FFI well.
+    return !n->function_base()->HasImplicitUse(n) && !n->Is<Invoke>() &&
+           (!OpIsSideEffecting(n->op()) || n->Is<Gate>());
+  };
+
   std::deque<Node*> worklist;
   for (Node* n : f->nodes()) {
-    if (n->users().empty() && !f->HasImplicitUse(n) && !n->Is<Param>()) {
+    if (n->users().empty() && is_deletable(n)) {
       worklist.push_back(n);
     }
   }
   int64_t removed_count = 0;
-  absl::flat_hash_set<Node*> unique_operands;
+  absl::flat_hash_set<Node*> unique_operands_scratch;
   while (!worklist.empty()) {
     Node* node = worklist.front();
     worklist.pop_front();
 
     // A node may appear more than once as an operand of 'node'. Keep track of
-    // which operands have been handled in a set.
-    unique_operands.clear();
-    for (Node* operand : node->operands()) {
-      if (unique_operands.insert(operand).second) {
-        if (operand->users().size() == 1 && !f->HasImplicitUse(operand) &&
-            !operand->Is<Param>()) {
-          worklist.push_back(operand);
-        }
-      }
-    }
+    // which operands have been handled.
+    ForEachUnique(
+        node->operands(),
+        [&](Node* operand) {
+          if (HasSingleUse(operand) && is_deletable(operand)) {
+            worklist.push_back(operand);
+          }
+        },
+        /*scratch_set=*/unique_operands_scratch);
+    VLOG(3) << "DCE removing " << node->ToString();
     XLS_RETURN_IF_ERROR(f->RemoveNode(node));
     removed_count++;
   }
 
-  XLS_VLOG(2) << "Removed " << removed_count << " dead nodes";
+  VLOG(2) << "Removed " << removed_count << " dead nodes";
+  // Use this pass to clean up context once we've removed nodes.
+  if (removed_count > 0) {
+    XLS_RETURN_IF_ERROR(context.CollectGarbage());
+  }
   return removed_count > 0;
 }
 

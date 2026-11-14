@@ -12,14 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Note: for changing permissions of files within a filesystem, use
+// std::filesystem::permissions directly.
+
 #ifndef XLS_COMMON_FILE_FILESYSTEM_H_
 #define XLS_COMMON_FILE_FILESYSTEM_H_
 
+#include <cstdint>
 #include <filesystem>
+#include <string>
+#include <string_view>
+#include <vector>
 
-#include "google/protobuf/message.h"
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
+#include "google/protobuf/io/zero_copy_stream.h"
+#include "google/protobuf/message.h"
+#include "xls/common/status/status_macros.h"
 
 namespace xls {
 
@@ -33,10 +44,10 @@ namespace xls {
 // Example:
 //
 //    // Ensures `filename` exists.
-//    XLS_CHECK_OK(FileExists(filename));
+//    CHECK_OK(FileExists(filename));
 //
 //    // Ensures `filename` doesn't exist (and no other errors occurred).
-//    XLS_CHECK(absl::IsNotFound(FileExists(filename)));
+//    CHECK(absl::IsNotFound(FileExists(filename)));
 //
 //    // To handle the possibility of an error:
 //    absl::Status status = FileExists(filename);
@@ -89,7 +100,26 @@ absl::StatusOr<std::string> GetFileContents(
 //  * StatusCode::kPermissionDenied (file not writable)
 //  * StatusCode::kUnknown (a Write or Open error occurred)
 absl::Status SetFileContents(const std::filesystem::path& file_name,
-                             absl::string_view content);
+                             std::string_view content);
+absl::Status SetFileContents(const std::filesystem::path& file_name,
+                             absl::Span<uint8_t const> content);
+absl::Status SetFileContents(const std::filesystem::path& file_name,
+                             absl::Span<int8_t const> content);
+
+// Writes the data provided in `content` to the file `file_name`, overwriting
+// any existing content. Fails if directory does not exist.
+//
+// NOTE: Will return OK iff all of the data in `content` was written.
+// May write some of the data and return an error.
+//
+// The file update should be atomic.
+//
+// Typical return codes (not guaranteed exhaustive):
+//  * StatusCode::kOk
+//  * StatusCode::kPermissionDenied (file not writable)
+//  * StatusCode::kUnknown (a Write or Open error occurred)
+absl::Status SetFileContentsAtomically(const std::filesystem::path& file_name,
+                                       std::string_view content);
 
 // Writes the contents of data into the file file_name, appending to any
 // existing content.
@@ -111,12 +141,30 @@ absl::Status SetFileContents(const std::filesystem::path& file_name,
 //  * StatusCode::kUnknown (a Write error occurred)
 //  * StatusCode::kNotFound (an Open error occurred)
 absl::Status AppendStringToFile(const std::filesystem::path& file_name,
-                                absl::string_view content);
+                                std::string_view content);
+
+// Parses a single text formatted protobuf from the given string which is
+// assumed to have come from the given file.
+//
+// REQUIRES: `contents` is a single text formatted protobuf.
+// REQUIRES: The proto must point to a valid object.
+// Typical return codes (not guaranteed to be exhaustive):
+//  * StatusCode::kOk
+//  * StatusCode::kFailedPrecondition (the file contents couldn't be parsed as
+//    text proto)
+//
+// *proto will hold the result of parsing the given string of the file as
+// protobuf only if OK is returned.  Regardless of success, the
+// contents of that protobuf may be modified.
+absl::Status ParseTextProto(std::string_view contents,
+                            const std::filesystem::path& file_name,
+                            google::protobuf::Message* proto);
 
 // Reads a single text formatted protobuf from a file.
 //
 // REQUIRES: `file_name` can be opened for reading.
 // REQUIRES: The contents of `file_name` are a single text formatted protobuf.
+// REQUIRES: The proto must point to a valid object.
 // Typical return codes (not guaranteed to be exhaustive):
 //  * StatusCode::kOk
 //  * StatusCode::kPermissionDenied (file not readable)
@@ -135,16 +183,78 @@ absl::Status ParseTextProtoFile(const std::filesystem::path& file_name,
 template <typename T>
 inline absl::StatusOr<T> ParseTextProtoFile(
     const std::filesystem::path& file_name) {
-  absl::StatusOr<T> v_or = T();
-  absl::Status status = ParseTextProtoFile(file_name, &v_or.value());
-  if (!status.ok()) {
-    v_or = status;
-  }
-  return v_or;
+  T proto_message;
+  XLS_RETURN_IF_ERROR(ParseTextProtoFile(file_name, &proto_message));
+  return proto_message;
 }
 
-// Writes the protobuf provided to the file `filename` in a protobuf text
+// Parses a single binary protobuf from the given string which is assumed to
+// have come from the given file.
+//
+// REQUIRES: `contents` is a single binary protobuf.
+// REQUIRES: The proto must point to a valid object.
+// Typical return codes (not guaranteed to be exhaustive):
+//  * StatusCode::kOk
+//  * StatusCode::kFailedPrecondition (the file contents couldn't be parsed as
+//    binary protobuf)
+//
+// *proto will hold the result of parsing the given string of the file as
+// protobuf only if OK is returned.  Regardless of success, the
+// contents of that protobuf may be modified.
+absl::Status ParseProtobin(std::string_view contents,
+                           const std::filesystem::path& file_name,
+                           google::protobuf::Message* proto);
+
+// Reads a file containing a single protobuf in binary format.
+//
+// REQUIRES: `file_name` can be opened for reading.
+// REQUIRES: The content of `file_name` is a single protobuf in binary format.
+// REQUIRES: The proto must point to a valid object.
+// Typical return codes (not guaranteed to be exhaustive):
+//  * StatusCode::kOk
+//  * StatusCode::kPermissionDenied (file not readable)
+//  * StatusCode::kNotFound (no such file)
+//  * StatusCode::kFailedPrecondition (the file contents couldn't be parsed as
+//    a protobuf binary)
+//  * StatusCode::kFailedPrecondition (the proto pointer is invalid)
+//
+// *proto will hold the result of parsing the file as protobuf in binary
+// format only if OK is returned.  Regardless of success, the contents of that
+// protobuf may be modified.
+absl::Status ParseProtobinFile(const std::filesystem::path& file_name,
+                               google::protobuf::Message* proto);
+
+// Writes the protobuf provided to the file `filename` in a protobuf binary
 // format, overwriting any existing content in the file.
+//
+// NOTE: Will return OK iff the protobuf could be converted to string and all of
+// that data in was written.  May write some data and return an error.
+//
+// Typical return codes (not guaranteed exhaustive):
+//  * StatusCode::kOk
+//  * StatusCode::kPermissionDenied (file not writable)
+//  * StatusCode::kFailedPrecondition (the proto couldn't be converted to
+//    string)
+absl::Status SetProtobinFile(const std::filesystem::path& file_name,
+                             const google::protobuf::Message& proto);
+
+// Writes the protobuf provided to the stream `output_stream` in a protobuf text
+// format, including the standard header.
+//
+// NOTE: Will return OK iff the protobuf could be converted to string and all of
+// that data in was written.  May write some data and return an error.
+//
+// Typical return codes (not guaranteed exhaustive):
+//  * StatusCode::kOk
+//  * StatusCode::kFailedPrecondition (the proto couldn't be converted to
+//    string)
+absl::Status PrintTextProtoToStream(
+    const google::protobuf::Message& proto,
+    google::protobuf::io::ZeroCopyOutputStream* output_stream);
+
+// Writes the protobuf provided to the file `filename` in a protobuf text
+// format, including the standard header. Overwrites any existing content in the
+// file.
 //
 // NOTE: Will return OK iff the protobuf could be converted to string and all of
 // that data in was written.  May write some data and return an error.
@@ -172,6 +282,20 @@ absl::StatusOr<std::filesystem::path> GetCurrentDirectory();
 //  * StatusCode::kPermissionDenied (directory is not readable)
 absl::StatusOr<std::vector<std::filesystem::path>> GetDirectoryEntries(
     const std::filesystem::path& path);
+
+// Finds all files under a given path which match a regex pattern.
+//
+// Follows the same behaviour as `GetDirectoryEntries`, the returned paths are
+// relative to the current working directory if `path` is relative, and absolute
+// if `path` is absolute.
+//
+// Typical return codes (not guaranteed exhaustive):
+//  * StatusCode::kOk
+//  * StatusCode::kNotFound (no such directory)
+//  * StatusCode::kFailedPrecondition (`path` is not a directory)
+//  * StatusCode::kPermissionDenied (directory is not readable)
+absl::StatusOr<std::vector<std::filesystem::path>> FindFilesMatchingRegex(
+    const std::filesystem::path& path, const std::string& pattern);
 
 // Returns the path pointed to by the file, if it's a link, or the given path
 // otherwise.

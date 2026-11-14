@@ -14,76 +14,240 @@
  * limitations under the License.
  */
 
-goog.module('xls.IrVisualization');
+goog.module('xls.irVisualization');
 
-var graphView = goog.require('xls.graphView');
-var irGraph = goog.require('xls.irGraph');
-var selectableGraph = goog.require('xls.selectableGraph');
+const graphView = goog.require('xls.graphView');
+const irGraph = goog.require('xls.irGraph');
+const selectableGraph = goog.require('xls.selectableGraph');
+
+
+/**
+ * Returns the IR text extracted from the given DOM element, converting <br>
+ * tags and block elements (e.g. <div>, <p>) to newline characters instead of
+ * stripping them as Node.textContent does.
+ * @param {?(!Element|!DocumentFragment)} element
+ * @return {string}
+ */
+function getIrText(element) {
+  if (!element) {
+    return '';
+  }
+  if (element.nodeType === Node.TEXT_NODE) {
+    return element.nodeValue || '';
+  }
+  const extractText = (node) => {
+    let text = '';
+    for (const child of node.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        text += child.nodeValue;
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        const tagName = child.tagName.toUpperCase();
+        if (tagName === 'BR') {
+          text += '\n';
+        } else {
+          const isBlock =
+              (tagName === 'DIV' || tagName === 'P' || tagName === 'TR' ||
+               tagName === 'LI' || tagName === 'PRE' ||
+               tagName === 'BLOCKQUOTE');
+          if (isBlock && text.length > 0 && !text.endsWith('\n')) {
+            text += '\n';
+          }
+          text += extractText(child);
+          if (isBlock && !text.endsWith('\n')) {
+            text += '\n';
+          }
+        }
+      }
+    }
+    return text;
+  };
+  return extractText(element);
+}
+
+/**
+ * Compresses a string using gzip if supported by the browser.
+ * Returns a Promise that resolves to a Blob containing gzip-compressed data,
+ * or null if CompressionStream is not available or compression fails.
+ * @param {string} text
+ * @return {!Promise<?Blob>}
+ * @suppress {missingProperties}
+ */
+function compressText(text) {
+  if (typeof CompressionStream === 'undefined') {
+    return Promise.resolve(null);
+  }
+  try {
+    const cs = new CompressionStream('gzip');
+    const blob = new Blob([text]);
+    const stream = blob.stream().pipeThrough(cs);
+    const response = new Response(stream);
+    return response.blob();
+  } catch (e) {
+    return Promise.resolve(null);
+  }
+}
 
 /**
  * Returns the offset of the selection (cursor) within a text element.
  * TODO(meheff): Move this into a separate file and share with hls/xls/ui tool.
- * @param {!Object} node
+ * @param {!Element} node
  * @return {?number}
  */
 function getOffsetWithin(node) {
-  let sumPrevSiblings = (node) => {
-    let prevSiblings = $(node.parentNode).contents();
-    let total = 0;
-    for (let sib of /** @type {!Array<!Object>} */ (prevSiblings.toArray())) {
-      if (sib === node) {
-        break;
-      }
-      total += $(sib).text().length;
-    }
-    return total;
-  };
-
-  let sel = window.getSelection();
-  let offset = sel.focusOffset;
-  let currentNode = sel.focusNode;
-  if (!currentNode) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) {
     return null;
   }
-  while (currentNode !== node) {
-    let prevSiblings = sumPrevSiblings(currentNode);
-    offset += prevSiblings;
-    currentNode = currentNode.parentNode;
-    if (!currentNode) {
-      return null;
-    }
+  const focusNode = sel.focusNode;
+  if (!focusNode || !node.contains(focusNode)) {
+    return null;
   }
-  return offset;
+  const range = document.createRange();
+  range.setStart(node, 0);
+  range.setEnd(focusNode, sel.focusOffset);
+  return getIrText(range.cloneContents()).length;
 }
 
 /**
  * Sets the offset of the selection (cursor) within a text element.
  * TODO(meheff): Move this into a separate file and share with hls/xls/ui tool.
- * @param {!Object} node The text element.
+ * @param {!Element} node The text element.
  * @param {number} offset The offset within the text element.
  */
 function setPositionAtOffset(node, offset) {
-  let allTextNodesUnder = (node) => {
-    let result = [];
-    for (let child of node.childNodes) {
+  if (offset < 0) {
+    return;
+  }
+  const sel = window.getSelection();
+  if (!sel) {
+    return;
+  }
+
+  let lastNode = null;
+  let lastNodeLength = 0;
+  let textSoFar = '';
+
+  const findAndSet = (currNode) => {
+    for (const child of currNode.childNodes) {
       if (child.nodeType === Node.TEXT_NODE) {
-        result.push(child);
-      } else {
-        result = result.concat(allTextNodesUnder(child));
+        const len = child.nodeValue.length;
+        lastNode = child;
+        lastNodeLength = len;
+        if (offset <= len) {
+          sel.collapse(child, offset);
+          return true;
+        }
+        offset -= len;
+        textSoFar += child.nodeValue;
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        const tagName = child.tagName.toUpperCase();
+        if (tagName === 'BR') {
+          if (offset <= 1) {
+            const parent = child.parentNode;
+            const idx = Array.prototype.indexOf.call(parent.childNodes, child);
+            sel.collapse(parent, idx + offset);
+            return true;
+          }
+          offset -= 1;
+          textSoFar += '\n';
+        } else {
+          const isBlock =
+              (tagName === 'DIV' || tagName === 'P' || tagName === 'TR' ||
+               tagName === 'LI' || tagName === 'PRE' ||
+               tagName === 'BLOCKQUOTE');
+          if (isBlock && textSoFar.length > 0 && !textSoFar.endsWith('\n')) {
+            if (offset <= 1) {
+              sel.collapse(child, 0);
+              return true;
+            }
+            offset -= 1;
+            textSoFar += '\n';
+          }
+          if (findAndSet(child)) {
+            return true;
+          }
+          if (isBlock && !textSoFar.endsWith('\n')) {
+            if (offset <= 1) {
+              const parent = child.parentNode;
+              const idx =
+                  Array.prototype.indexOf.call(parent.childNodes, child);
+              sel.collapse(parent, idx + 1);
+              return true;
+            }
+            offset -= 1;
+            textSoFar += '\n';
+          }
+        }
       }
     }
-    return result;
+    return false;
   };
 
-  let textNodes = allTextNodesUnder(node);
-  for (let textNode of textNodes) {
-    if (offset < textNode.length) {
-      window.getSelection().setPosition(textNode, offset);
-      return;
-    } else {
-      offset -= textNode.length;
+  if (!findAndSet(node) && lastNode) {
+    sel.collapse(lastNode, lastNodeLength);
+  }
+}
+
+/**
+ * Escapes HTML special characters in the given string.
+ * @param {*} str
+ * @return {string}
+ */
+function escapeHtml(str) {
+  if (str == null) {
+    return '';
+  }
+  return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+}
+
+/**
+ * Sets the function selector UI element to the given options.
+ * @param {!Element} selectElement
+ * @param {!Array<{name: string, kind: string, id: string}>} functions
+ */
+function setupFunctionSelector(selectElement, functions) {
+  const options = [];
+  for (const f of functions) {
+    options.push(
+        `<option value="${f.id}">[${f.kind}] ${escapeHtml(f.name)}</option>`);
+  }
+  setInnerHtml(selectElement, options.join('\n'));
+}
+
+/**
+ * Sets the option of the given select UI element to the given function.
+ * @param {!Element} selectElement
+ * @param {string} functionId
+ */
+function setFunctionSelector(selectElement, functionId) {
+  selectElement.value = functionId;
+}
+
+/**
+ * Returns the node ids of nodes which should be highlighted when the specified
+ * node is highlighted.
+ *
+ * @param {string} nodeId
+ * @return {!Array<string>}
+ */
+function getCohighlightedNodeIds(nodeId) {
+  let nodeDef = document.getElementById(`ir-node-def-${nodeId}`);
+  let cohighlightedNodeIds = new Set();
+  if (nodeDef && 'stateElement' in nodeDef.dataset) {
+    for (let index of nodeDef.dataset.stateElement.split(',')) {
+      document.querySelectorAll(`.state-element-${index}`).forEach(e => {
+        if ('nodeId' in e.dataset) {
+          cohighlightedNodeIds.add(e.dataset.nodeId);
+        }
+      });
     }
   }
+  return Array.from(cohighlightedNodeIds).sort();
 }
 
 /**
@@ -92,25 +256,19 @@ function setPositionAtOffset(node, offset) {
  */
 class IrVisualizer {
   /**
-   * @param {!Object} graphElement DOM element to hold the graph.
-   * @param {!Object} irElement Input DOM element holding IR text.
-   * @param {?Object=} nodeMetadataElement DOM element to write node metadata
+   * @param {!Element} graphElement DOM element to hold the graph.
+   * @param {!Element} irElement Input DOM element holding IR text.
+   * @param {!Element} functionSelector Function selector element.
+   * @param {?Element=} nodeMetadataElement DOM element to write node metadata
    *     text into.
-   * @param {?Object=} responseElement Optional DOM element to write the JSON
-   *     graph respresentation in the server response to. For debugging and
-   *     development purposes.
-   * @param {?Object=} graphInternalsElement Optional DOM element to write
-   *     internal graph representation to. For debugging and development
-   *     purposes.
    */
   constructor(
-      graphElement, irElement, nodeMetadataElement = undefined,
-      responseElement = undefined, graphInternalsElement = undefined) {
+      graphElement, irElement, functionSelector,
+      nodeMetadataElement = undefined) {
     this.graphElement_ = graphElement;
     this.irElement_ = irElement;
+    this.functionSelector_ = functionSelector;
     this.nodeMetadataElement_ = nodeMetadataElement;
-    this.responseElement_ = responseElement;
-    this.graphInternalsElement_ = graphInternalsElement;
 
     /**
      * The graph view object.
@@ -144,12 +302,31 @@ class IrVisualizer {
 
     /** @private {function(string)|undefined} */
     this.sourceErrorCallback_ = undefined;
+
+    /**
+     *  Object containing the graph structure for the package. The format is
+     *  defined by the proto xls.viz.package.
+     *  @private {?Object}
+     */
+    this.package_ = null;
+
+    /**
+     *  The unique identifier of the selected function to view.
+     *  @private {?string}
+     */
+    this.selectedFunctionId_ = null;
+
+    let self = this;
+    this.functionSelector_.addEventListener('change', e => {
+      if (e.target.value) {
+        self.selectFunction(e.target.value);
+      }
+    });
   }
 
   /**
    * Sets the callback to call when the IR is successfully parsed.
    * @param {function()} callback
-   * @export
    */
   setSourceOkHandler(callback) {
     this.sourceOkCallback_ = callback;
@@ -159,7 +336,6 @@ class IrVisualizer {
    * Sets the callback to call when the IR parsing encountered an error.
    * Callback takes a single argument, the error message.
    * @param {function(string)} callback
-   * @export
    */
   setSourceErrorHandler(callback) {
     this.sourceErrorCallback_ = callback;
@@ -168,7 +344,6 @@ class IrVisualizer {
   /**
    * Selects the nodes on the critical path through the graph. All other nodes
    * are unselected.
-   * @export
    */
   selectCriticalPath() {
     let criticalPathNodeIds =
@@ -182,7 +357,6 @@ class IrVisualizer {
    * Sets whether to show only the selected and frontier node and elements in
    * the graph depending on parameter 'value'.
    * @param {boolean} value
-   * @export
    */
   setShowOnlySelected(value) {
     if (this.graphView_) {
@@ -195,25 +369,48 @@ class IrVisualizer {
    * @param {string} nodeId
    */
   highlightNode(nodeId) {
-    $('.ir-identifier-' + nodeId).addClass('ir-identifier-highlighted');
+    document.querySelectorAll('.ir-node-identifier-' + nodeId).forEach(e => {
+      e.classList.add('ir-node-identifier-highlighted');
+    });
+
+    const cohighlightedNodeIds = getCohighlightedNodeIds(nodeId);
+    for (const id of cohighlightedNodeIds) {
+      document.querySelectorAll(`.ir-node-def-${id}`).forEach(e => {
+        e.classList.add('ir-node-identifier-highlighted');
+      });
+    }
+
     if (this.irGraph_ && this.nodeMetadataElement_) {
-      let text = '<b>node:</b> ' + this.irGraph_.node(nodeId).ir;
-      let delay = this.irGraph_.node(nodeId).attributes['delay_ps'];
+      let text = '<b>node:</b> ' + escapeHtml(this.irGraph_.node(nodeId).ir);
+      const delay = this.irGraph_.node(nodeId).attributes['delay_ps'];
       if (delay != null) {
         text += '\n<b>delay:</b> ' + delay + 'ps';
       }
-      let known = this.irGraph_.node(nodeId).attributes['known_bits'];
+      const known = this.irGraph_.node(nodeId).attributes['known_bits'];
       if (known) {
-        text += '\n<b>known bits:</b> ' + known;
+        text += '\n<b>known bits:</b> ' + escapeHtml(known);
       }
-      let cycle = this.irGraph_.node(nodeId).attributes['cycle'];
+      const cycle = this.irGraph_.node(nodeId).attributes['cycle'];
       if (cycle != undefined) {
-        text += '\n<b>cycle:</b> ' + cycle;
+        text += '\n<b>cycle:</b> ' + escapeHtml(cycle);
       }
-      this.nodeMetadataElement_.html(text);
+      const state_param_index =
+          this.irGraph_.node(nodeId).attributes['state_param_index'];
+      if (state_param_index !== null) {
+        text += '\n<b>state param index:</b> ' + escapeHtml(state_param_index);
+      }
+      const initial_value =
+          this.irGraph_.node(nodeId).attributes['initial_value'];
+      if (initial_value !== null) {
+        text += '\n<b>initial state value:</b> ' + escapeHtml(initial_value);
+      }
+      setInnerHtml(this.nodeMetadataElement_, text);
     }
     if (this.graphView_) {
       this.graphView_.highlightNode(nodeId);
+      for (let id of cohighlightedNodeIds) {
+        this.graphView_.highlightNode(id);
+      }
     }
   }
 
@@ -222,12 +419,25 @@ class IrVisualizer {
    * @param {string} nodeId
    */
   unhighlightNode(nodeId) {
-    $('.ir-identifier-' + nodeId).removeClass('ir-identifier-highlighted');
+    document.querySelectorAll('.ir-node-identifier-' + nodeId).forEach(e => {
+      e.classList.remove('ir-node-identifier-highlighted');
+    });
+
+    let cohighlightedNodeIds = getCohighlightedNodeIds(nodeId);
+    for (let id of cohighlightedNodeIds) {
+      document.querySelectorAll(`.ir-node-def-${id}`).forEach(e => {
+        e.classList.remove('ir-node-identifier-highlighted');
+      });
+    }
+
     if (this.irGraph_ && this.nodeMetadataElement_) {
-      this.nodeMetadataElement_.text('');
+      this.nodeMetadataElement_.textContent = '';
     }
     if (this.graphView_) {
       this.graphView_.unhighlightNode(nodeId);
+      for (let id of cohighlightedNodeIds) {
+        this.graphView_.unhighlightNode(id);
+      }
     }
   }
 
@@ -236,13 +446,19 @@ class IrVisualizer {
    * @param {string} edgeId
    */
   highlightEdge(edgeId) {
-    let srcId = this.irGraph_.edge(edgeId).source;
-    let tgtId = this.irGraph_.edge(edgeId).target;
-    $(`.ir-def-${srcId}`).addClass('ir-identifier-highlighted');
-    $(`.ir-use-${srcId}-${tgtId}`).addClass('ir-identifier-highlighted');
+    let srcId = this.irGraph_.edge(edgeId).sourceId;
+    let tgtId = this.irGraph_.edge(edgeId).targetId;
+    document.getElementById(`ir-node-def-${srcId}`)
+        .classList.add('ir-node-identifier-highlighted');
+    document.querySelectorAll(`.ir-edge-${srcId}-${tgtId}`).forEach(e => {
+      e.classList.add('ir-node-identifier-highlighted');
+    });
     if (this.graphView_) {
       this.graphView_.highlightEdge(edgeId);
     }
+    // Highlight the source node as well so the metadata about the value carried
+    // by the edge is shown in the metadata box.
+    this.highlightNode(srcId);
   }
 
   /**
@@ -250,13 +466,17 @@ class IrVisualizer {
    * @param {string} edgeId
    */
   unhighlightEdge(edgeId) {
-    let srcId = this.irGraph_.edge(edgeId).source;
-    let tgtId = this.irGraph_.edge(edgeId).target;
-    $(`.ir-def-${srcId}`).removeClass('ir-identifier-highlighted');
-    $(`.ir-use-${srcId}-${tgtId}`).removeClass('ir-identifier-highlighted');
+    let srcId = this.irGraph_.edge(edgeId).sourceId;
+    let tgtId = this.irGraph_.edge(edgeId).targetId;
+    document.getElementById(`ir-node-def-${srcId}`)
+        .classList.remove('ir-node-identifier-highlighted');
+    document.querySelectorAll(`.ir-edge-${srcId}-${tgtId}`).forEach(e => {
+      e.classList.remove('ir-node-identifier-highlighted');
+    });
     if (this.graphView_) {
       this.graphView_.unhighlightEdge(edgeId);
     }
+    this.unhighlightNode(srcId);
   }
 
   /**
@@ -270,10 +490,16 @@ class IrVisualizer {
     // (De)select identifier elements in the textual IR.
     for (const change of changes.nodes) {
       if (change.from == selectableGraph.SelectState.SELECTED) {
-        $('.ir-identifier-' + change.id).removeClass('ir-identifier-selected');
+        document.querySelectorAll(`.ir-node-identifier-${change.id}`)
+            .forEach(e => {
+              e.classList.remove('ir-node-identifier-selected');
+            });
       }
       if (change.to == selectableGraph.SelectState.SELECTED) {
-        $('.ir-identifier-' + change.id).addClass('ir-identifier-selected');
+        document.querySelectorAll(`.ir-node-identifier-${change.id}`)
+            .forEach(e => {
+              e.classList.add('ir-node-identifier-selected');
+            });
       }
     }
 
@@ -292,143 +518,232 @@ class IrVisualizer {
   }
 
   /**
+   * Sets the function to visualize to the function with the given id.
+   * @param {string} functionId
+   */
+  selectFunction(functionId) {
+    this.clearGraph();
+    this.selectedFunctionId_ = null;
+
+    // Scrape the function/proc/block names from the package.
+    let graph = null;
+    for (let func of this.package_['function_bases']) {
+      if (functionId == func['id']) {
+        graph = func;
+      }
+    }
+    if (graph == null) {
+      return;
+    }
+    this.irGraph_ = new irGraph.IrGraph(graph);
+    this.graph_ = new selectableGraph.SelectableGraph(this.irGraph_);
+    this.highlightIr_(graph);
+    this.setIrTextListeners_();
+    this.selectedFunctionId_ = functionId;
+
+    if (this.graphView_) {
+      this.draw(document.getElementById('only-selected-checkbox').checked);
+    }
+
+    // Scroll the start of the selected function definition into view.
+    document.getElementById(`ir-function-def-${functionId}`).scrollIntoView();
+
+    // Unselect all functions. This will grey out the IR text of all functions.
+    document.querySelectorAll('.ir-function').forEach(e => {
+      e.classList.add('ir-function-unselected');
+    });
+
+    // For the selected function, add the class `ir-function-selected` which
+    // will display this function in normal (not greyed out) text.
+    document.getElementById(`ir-function-${functionId}`)
+        .classList.remove('ir-function-unselected');
+    document.getElementById(`ir-function-${functionId}`)
+        .classList.add('ir-function-selected');
+  }
+
+  /**
    * Sets various listeners for hovering over and selecting identifiers in the
    * IR text.
    */
   setIrTextListeners_() {
     let self = this;
-    $('.ir-identifier').mouseenter(function() {
-      self.highlightNode(/** @type {string} */ ($(this).data('ir-identifier')));
+    document.querySelectorAll('.ir-node-identifier').forEach(elem => {
+      elem.addEventListener('mouseenter', e => {
+        if (e.target.dataset.functionId == self.selectedFunctionId_) {
+          self.highlightNode(
+              /** @type {string} */ (e.target.dataset.nodeId));
+        }
+      });
+      elem.addEventListener('mouseleave', e => {
+        if (e.target.dataset.functionId == self.selectedFunctionId_) {
+          self.unhighlightNode(
+              /** @type {string} */ (e.target.dataset.nodeId));
+        }
+      });
+      elem.addEventListener('click', e => {
+        if (e.target.dataset.functionId != self.selectedFunctionId_) {
+          // Ignore clicks on nodes which are not in the selected function.
+          return;
+        }
+        let nodeId = /** @type {string} */ (e.target.dataset.nodeId);
+        if (e.ctrlKey && self.graphView_) {
+          // If the control key is down. Zoom in on the node in the graph.
+          self.graphView_.focusOnNode(nodeId);
+        } else {
+          // Toggle the selection state.
+          self.selectNode(nodeId, !self.graph_.isNodeSelected(nodeId));
+        }
+      });
     });
-    $('.ir-identifier').mouseleave(function() {
-      self.unhighlightNode(
-          /** @type {string} */ ($(this).data('ir-identifier')));
-    });
-    $('.ir-identifier').click(function(e) {
-      let identifier = /** @type {string} */ ($(this).data('ir-identifier'));
-      if (e.originalEvent.ctrlKey && self.graphView_) {
-        // If the control key is down. Zoom in on the node in the graph.
-        self.graphView_.focusOnNode(identifier);
-      } else {
-        // Toggle the selection state.
-        self.selectNode(identifier, !self.graph_.isNodeSelected(identifier));
-      }
+
+    document.querySelectorAll('.ir-function-identifier').forEach(elem => {
+      elem.addEventListener('click', e => {
+        // Clicking on a function identifier selects the function for viewing.
+        if (e.target.dataset.identifier == self.selectedFunctionId_) {
+          return;
+        }
+        setFunctionSelector(
+            self.functionSelector_, e.target.dataset.identifier);
+        self.selectFunction(e.target.dataset.identifier);
+      });
     });
   }
 
   /**
-   * Highlights the IR text source using the JSON graphified IR. Currently just
-   * makes the identifiers bold and wraps them in spans.
-   * TODO(meheff): This should probably be done on the server side.
+   * Highlights the IR text source using the JSON graphified IR. This puts the
+   * marked up IR from the server into the IR text element.
    * @param {!Object} jsonGraph
    * @private
    */
   highlightIr_(jsonGraph) {
-    let text = this.irElement_.text();
-    // A map containing the node identifiers in the graph. The value of the map
-    // is a count as the identifiers are encountered when walking through the
-    // IR. It is used to identify defs (first encounter of an identifier).
-    let identifiers = {};
-    let nameToId = {};
-    jsonGraph['nodes'].forEach(function(node, index) {
-      identifiers[node.name] = 0;
-      nameToId[node.name] = node.id;
-    });
-    let pieces = [];
-    let lastPieceEnd = 0;
-    let lastDef = undefined;
-    for (const match of text.matchAll(/[a-zA-Z_][a-zA-Z0-9_.]*/g)) {
-      if (match.index > lastPieceEnd) {
-        pieces.push(text.slice(lastPieceEnd, match.index));
-      }
-      if (match[0] in identifiers) {
-        let id = nameToId[match[0]];
-        let classes = ['ir-identifier', 'ir-identifier-' + id];
-        // If this is the first time we've seen the identifier it is a def.
-        let isDef = identifiers[match[0]] == 0;
-        identifiers[match[0]] += 1;
-        // To enable highlighting of edge end points, add classes for the defs
-        // and uses of values.
-        if (isDef) {
-          classes.push('ir-def-' + id);
-          lastDef = id;
-        } else if (lastDef) {
-          classes.push(`ir-use-${id}-${lastDef}`);
-        }
-        pieces.push(`<span class="${classes.join(' ')}" data-ir-identifier="${
-            id}">${match[0]}</span>`);
-      } else {
-        pieces.push(match[0]);
-      }
-      lastPieceEnd = match.index + match[0].length;
-    }
-    pieces.push(text.slice(lastPieceEnd));
-    let focusOffset = getOffsetWithin(this.irElement_.get(0));
-    this.irElement_.html(pieces.join(''));
+    const focusOffset = getOffsetWithin(this.irElement_);
+    setInnerHtml(this.irElement_, this.package_['ir_html']);
     if (focusOffset != null) {
-      setPositionAtOffset(this.irElement_.get(0), focusOffset);
+      setPositionAtOffset(this.irElement_, focusOffset);
     }
   }
 
   /**
    * Sends the IR to the server for parsing and, if successful, highlights the
    * IR.
-   * @export
+   * @param {?function()} cb
    */
   parseAndHighlightIr(cb) {
     if (this.parseInFlight_) {
       return;
     }
     this.parseInFlight_ = true;
-    let text = this.irElement_.text();
-    $.post('/graph', {text: text}, (response_str) => {
-      // TODO: define a type for the graph object.
-      let response = /** @type {!Object} */ (JSON.parse(response_str));
+    const text = getIrText(this.irElement_);
+    compressText(text)
+        .then(compressedBlob => {
+          this.sendGraphRequest_(text, compressedBlob, cb);
+        })
+        .catch(e => {
+          this.sendGraphRequest_(text, null, cb);
+        });
+  }
+
+  /**
+   * Sends the graph request to the server with either compressed or raw IR
+   * text.
+   * @param {string} text
+   * @param {?Blob} compressedBlob
+   * @param {?function()} cb
+   * @private
+   */
+  sendGraphRequest_(text, compressedBlob, cb) {
+    if (getIrText(this.irElement_) != text) {
       this.parseInFlight_ = false;
-      if (this.irElement_.text() != text) {
-        return this.parseAndHighlightIr(cb);
-      }
-      // Clear graph.
-      this.irGraph_ = null;
-      this.graph_ = null;
-      if (this.graphView_) {
-        this.graphView_.destroy();
-        this.graphView_ = null;
-      }
-
-      if (response['error_code'] == 'ok') {
-        if (this.sourceOkCallback_) {
-          this.sourceOkCallback_();
-        }
-        this.irGraph_ = new irGraph.IrGraph(response['graph']);
-        this.graph_ = new selectableGraph.SelectableGraph(this.irGraph_);
-
-        if (!!this.responseElement_) {
-          this.responseElement_.text(
-              JSON.stringify(response['graph'], null, 2));
-        }
-        this.highlightIr_(response['graph']);
-        this.setIrTextListeners_();
-      } else {
-        if (!!this.sourceErrorCallback_) {
-          this.sourceErrorCallback_(response['message']);
-        }
-        if (!!this.responseElement_) {
-          this.responseElement_.text('');
-        }
-        if (!!this.graphInternalsElement_) {
-          this.graphInternalsElement_.text('');
-        }
-        let focusOffset = getOffsetWithin(this.irElement_.get(0));
-        this.irElement_.html(this.irElement_.text());
-        if (focusOffset) {
-          setPositionAtOffset(this.irElement_.get(0), focusOffset);
-        }
-      }
+      this.parseAndHighlightIr(cb);
+      return;
+    }
+    const self = this;
+    let cleanedUp = false;
+    const cleanup = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      self.parseInFlight_ = false;
       if (cb) {
         cb();
       }
-    }, 'text');
+    };
+    const xmr = new XMLHttpRequest();
+    xmr.open('POST', '/graph');
+    xmr.addEventListener('error', cleanup);
+    xmr.addEventListener('abort', cleanup);
+    xmr.addEventListener('load', function() {
+      let reparse = false;
+      try {
+        if (xmr.status < 200 || xmr.status >= 400) {
+          if (self.sourceErrorCallback_) {
+            self.sourceErrorCallback_('Server error (HTTP ' + xmr.status + ')');
+          }
+          return;
+        }
+
+        const response = /** @type {!Object} */ (JSON.parse(xmr.responseText));
+        if (getIrText(self.irElement_) != text) {
+          reparse = true;
+          return;
+        }
+
+        self.package_ = null;
+        if (response['error_code'] == 'ok') {
+          if (self.sourceOkCallback_) {
+            self.sourceOkCallback_();
+          }
+          self.package_ = response['graph'];
+
+          // Fill in the names and ids of function in the select element.
+          const functions = [];
+          for (const func of self.package_['function_bases']) {
+            functions.push(
+                {name: func['name'], kind: func['kind'], id: func['id']});
+          }
+          setupFunctionSelector(self.functionSelector_, functions);
+
+          // Select the function entry if entry is specified.
+          if (self.package_['entry_id']) {
+            setFunctionSelector(
+                self.functionSelector_, self.package_['entry_id']);
+            self.selectFunction(self.package_['entry_id']);
+          }
+        } else {
+          self.clearGraph();
+          if (!!self.sourceErrorCallback_) {
+            self.sourceErrorCallback_(response['message']);
+          }
+          self.package_ = null;
+        }
+      } finally {
+        if (reparse) {
+          self.parseInFlight_ = false;
+          self.parseAndHighlightIr(cb);
+        } else {
+          cleanup();
+        }
+      }
+    });
+    const data = new FormData();
+    if (compressedBlob) {
+      data.append('text_gzip', compressedBlob, 'ir.gz');
+    } else {
+      data.append('text', text);
+    }
+    xmr.send(data);
+  }
+
+  /**
+   * Clears the fields containing graph elements (cyctoscape and IR graph) and
+   * clears the visualization window.
+   */
+  clearGraph() {
+    this.irGraph_ = null;
+    this.graph_ = null;
+    if (this.graphView_) {
+      this.graphView_.destroy();
+      this.graphView_ = null;
+    }
   }
 
   /**
@@ -437,7 +752,6 @@ class IrVisualizer {
    * constructed.
    * @param {boolean} showOnlySelected Whether to include only selected and
    *     frontier nodes and edges in the graph.
-   * @export
    */
   draw(showOnlySelected) {
     if (!this.graph_) {
@@ -466,19 +780,22 @@ class IrVisualizer {
       if (nodeId) {
         if (ctrlPressed) {
           // Scroll the node into view in the IR text window.
-          $(`.ir-def-${nodeId}`)[0].scrollIntoView();
+          document.getElementById(`ir-node-def-${nodeId}`).scrollIntoView();
         } else {
           // Toggle the selection state.
           this.selectNode(nodeId, !this.graph_.isNodeSelected(nodeId));
         }
       } else {
-	// Clicking on the graph outside of a node (nodeId == null) clears the
-	// selection state.
+        // Clicking on the graph outside of a node (nodeId == null) clears the
+        // selection state.
         this.applyChange_(this.graph_.selectOnlyNodes([]));
       }
     });
   }
 }
 
-goog.exportSymbol('xls.IrVisualizer', IrVisualizer);
-exports = {IrVisualizer};
+exports = {
+  IrVisualizer,
+  getIrText,
+  compressText,
+};

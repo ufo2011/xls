@@ -14,28 +14,38 @@
 
 #include "xls/solvers/z3_lec.h"
 
-#include "gmock/gmock.h"
+#include <memory>
+#include <string>
+
 #include "gtest/gtest.h"
+#include "absl/log/log.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "xls/common/status/matchers.h"
+#include "xls/common/status/status_macros.h"
+#include "xls/ir/function.h"
 #include "xls/ir/ir_parser.h"
+#include "xls/ir/node.h"
+#include "xls/ir/nodes.h"
 #include "xls/netlist/cell_library.h"
 #include "xls/netlist/fake_cell_library.h"
 #include "xls/netlist/netlist.h"
 #include "xls/netlist/netlist_parser.h"
+#include "xls/scheduling/pipeline_schedule.h"
+#include "xls/scheduling/scheduling_options.h"
 
 namespace xls {
 namespace solvers {
 namespace z3 {
 namespace {
 
-using netlist::rtl::Netlist;
+using ::xls::netlist::rtl::Netlist;
 
 absl::StatusOr<bool> Match(const std::string& ir_text,
                            const std::string& netlist_text, bool expect_equal) {
   XLS_ASSIGN_OR_RETURN(std::unique_ptr<Package> package,
                        Parser::ParsePackage(ir_text));
-  XLS_ASSIGN_OR_RETURN(Function * entry_function, package->EntryFunction());
+  XLS_ASSIGN_OR_RETURN(Function * entry_function, package->GetTopAsFunction());
 
   XLS_ASSIGN_OR_RETURN(netlist::CellLibrary cell_library,
                        netlist::MakeFakeCellLibrary());
@@ -60,7 +70,7 @@ TEST(Z3LecTest, SimpleLec) {
   std::string ir_text = R"(
 package p
 
-fn main(input: bits[4]) -> bits[4] {
+top fn main(input: bits[4]) -> bits[4] {
   ret not.2: bits[4] = not(input)
 }
 )";
@@ -95,13 +105,49 @@ endmodule
   ASSERT_TRUE(match);
 }
 
+TEST(Z3LecTest, AdderLec) {
+  std::string ir_text = R"(
+package p
+
+top fn main(a: bits[2], b: bits[2]) -> bits[2] {
+  ret add.3: bits[2] = add(a, b)
+}
+)";
+
+  std::string netlist_text = R"(
+module main(clk, a_1_, a_0_, b_1_, b_0_, out_1_, out_0_);
+  input clk, a_1_, a_0_, b_1_, b_0_;
+  output out_1_, out_0_;
+  wire p0_a_1_, p0_a_0_, p0_b_1_, p0_b_0_, p0_add_3_comb_0_, p0_add_3_comb_1_, carry, high;
+
+  DFF p0_a_reg_1_ ( .D(a_1_), .CLK(clk), .Q(p0_a_1_) );
+  DFF p0_a_reg_0_ ( .D(a_0_), .CLK(clk), .Q(p0_a_0_) );
+  DFF p0_b_reg_1_ ( .D(b_1_), .CLK(clk), .Q(p0_b_1_) );
+  DFF p0_b_reg_0_ ( .D(b_0_), .CLK(clk), .Q(p0_b_0_) );
+
+  XOR out_0_cell ( .A(p0_a_0_), .B(p0_b_0_), .Z(p0_add_3_comb_0_) );
+
+  AND carry_cell ( .A(p0_a_0_), .B(p0_b_0_), .Z(carry) );
+  XOR high_cell ( .A(p0_a_1_), .B(p0_b_1_), .Z(high) );
+  XOR out_1_cell ( .A(high), .B(carry), .Z(p0_add_3_comb_1_) );
+
+  DFF p0_add_3_reg_1_ ( .D(p0_add_3_comb_1_), .CLK(clk), .Q(out_1_) );
+  DFF p0_add_3_reg_0_ ( .D(p0_add_3_comb_0_), .CLK(clk), .Q(out_0_) );
+endmodule
+)";
+
+  XLS_ASSERT_OK_AND_ASSIGN(bool match,
+                           Match(ir_text, netlist_text, /*expect_equal=*/true));
+  ASSERT_TRUE(match);
+}
+
 // Test verifies that z3::Lec correctly reports a mismatch in cases where the
 // IR and netlist disagree.
 TEST(Z3LecTest, FailsBadComparison) {
   std::string ir_text = R"(
 package p
 
-fn main(input: bits[4]) -> bits[4] {
+top fn main(input: bits[4]) -> bits[4] {
   ret not.2: bits[4] = not(input)
 }
 )";
@@ -142,7 +188,7 @@ TEST(Z3LecTest, SimpleMultiStage) {
   std::string ir_text = R"(
 package p
 
-fn main(i0: bits[1], i1: bits[1], i2: bits[1], i3: bits[1]) -> bits[1] {
+top fn main(i0: bits[1], i1: bits[1], i2: bits[1], i3: bits[1]) -> bits[1] {
   // Stage 1:
   and.1: bits[1] = and(i0, i1)
   and.2: bits[1] = and(i2, i3)
@@ -182,7 +228,8 @@ endmodule
 
   XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> package,
                            Parser::ParsePackage(ir_text));
-  XLS_ASSERT_OK_AND_ASSIGN(Function * entry_function, package->EntryFunction());
+  XLS_ASSERT_OK_AND_ASSIGN(Function * entry_function,
+                           package->GetTopAsFunction());
   XLS_ASSERT_OK_AND_ASSIGN(netlist::CellLibrary cell_library,
                            netlist::MakeFakeCellLibrary());
   netlist::rtl::Scanner scanner(netlist_text);
@@ -201,22 +248,24 @@ endmodule
   for (Node* node : entry_function->nodes()) {
     if (node->Is<Param>()) {
       cycle_map[node] = 0;
-    } else if (node->GetName().find("and") != std::string::npos) {
+    } else if (absl::StrContains(node->GetName(), "and")) {
       cycle_map[node] = 0;
-    } else if (node->GetName().find("or") != std::string::npos) {
+    } else if (absl::StrContains(node->GetName(), "or")) {
       cycle_map[node] = 1;
     } else {
       cycle_map[node] = 2;
     }
   }
 
-  PipelineSchedule schedule(entry_function, cycle_map, /*length=*/3);
+  XLS_ASSERT_OK_AND_ASSIGN(
+      PipelineSchedule schedule,
+      PipelineSchedule::Create(entry_function, cycle_map, {.length = 3}));
 
   for (int i = 0; i < schedule.length(); i++) {
     XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Lec> lec,
                              Lec::CreateForStage(params, schedule, i));
     ASSERT_TRUE(lec->Run());
-    XLS_LOG(INFO) << "Pass stage " << i;
+    LOG(INFO) << "Pass stage " << i;
   }
 }
 
@@ -227,7 +276,7 @@ TEST(Z3LecTest, FailsBadMultiStage) {
   std::string ir_text = R"(
 package p
 
-fn main(i0: bits[1], i1: bits[1], i2: bits[1], i3: bits[1]) -> bits[1] {
+top fn main(i0: bits[1], i1: bits[1], i2: bits[1], i3: bits[1]) -> bits[1] {
   // Stage 1:
   and.1: bits[1] = and(i0, i1)
   and.2: bits[1] = and(i2, i3)
@@ -270,7 +319,8 @@ endmodule
 
   XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> package,
                            Parser::ParsePackage(ir_text));
-  XLS_ASSERT_OK_AND_ASSIGN(Function * entry_function, package->EntryFunction());
+  XLS_ASSERT_OK_AND_ASSIGN(Function * entry_function,
+                           package->GetTopAsFunction());
   XLS_ASSERT_OK_AND_ASSIGN(netlist::CellLibrary cell_library,
                            netlist::MakeFakeCellLibrary());
   netlist::rtl::Scanner scanner(netlist_text);
@@ -289,16 +339,18 @@ endmodule
   for (Node* node : entry_function->nodes()) {
     if (node->Is<Param>()) {
       cycle_map[node] = 0;
-    } else if (node->GetName().find("and") != std::string::npos) {
+    } else if (absl::StrContains(node->GetName(), "and")) {
       cycle_map[node] = 0;
-    } else if (node->GetName().find("or") != std::string::npos) {
+    } else if (absl::StrContains(node->GetName(), "or")) {
       cycle_map[node] = 1;
     } else {
       cycle_map[node] = 2;
     }
   }
 
-  PipelineSchedule schedule(entry_function, cycle_map, /*length=*/3);
+  XLS_ASSERT_OK_AND_ASSIGN(
+      PipelineSchedule schedule,
+      PipelineSchedule::Create(entry_function, cycle_map, {.length = 3}));
   for (int i = 0; i < schedule.length(); i++) {
     XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Lec> lec,
                              Lec::CreateForStage(params, schedule, i));
@@ -307,7 +359,7 @@ endmodule
     } else {
       ASSERT_TRUE(lec->Run());
     }
-    XLS_LOG(INFO) << "Pass stage " << i;
+    LOG(INFO) << "Pass stage " << i;
   }
 }
 
@@ -320,7 +372,7 @@ TEST(Z3LecTest, MultibitMultiStage) {
   std::string ir_text = R"(
 package p
 
-fn main(i0: bits[4], i1: bits[4], i2: bits[4], i3: bits[4]) -> bits[4] {
+top fn main(i0: bits[4], i1: bits[4], i2: bits[4], i3: bits[4]) -> bits[4] {
   // Stage 1:
   and.1: bits[4] = and(i0, i1)
   and.2: bits[4] = and(i2, i3)
@@ -422,7 +474,8 @@ endmodule
 
   XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> package,
                            Parser::ParsePackage(ir_text));
-  XLS_ASSERT_OK_AND_ASSIGN(Function * entry_function, package->EntryFunction());
+  XLS_ASSERT_OK_AND_ASSIGN(Function * entry_function,
+                           package->GetTopAsFunction());
   XLS_ASSERT_OK_AND_ASSIGN(netlist::CellLibrary cell_library,
                            netlist::MakeFakeCellLibrary());
   netlist::rtl::Scanner scanner(netlist_text);
@@ -441,25 +494,27 @@ endmodule
   for (Node* node : entry_function->nodes()) {
     if (node->Is<Param>()) {
       cycle_map[node] = 0;
-    } else if (node->GetName().find("and") != std::string::npos) {
+    } else if (absl::StrContains(node->GetName(), "and")) {
       cycle_map[node] = 0;
-    } else if (node->GetName().find("or") != std::string::npos) {
+    } else if (absl::StrContains(node->GetName(), "or")) {
       cycle_map[node] = 1;
     } else {
       cycle_map[node] = 2;
     }
   }
 
-  PipelineSchedule schedule(entry_function, cycle_map, /*length=*/3);
+  XLS_ASSERT_OK_AND_ASSIGN(
+      PipelineSchedule schedule,
+      PipelineSchedule::Create(entry_function, cycle_map, {.length = 3}));
   for (int i = 0; i < schedule.length(); i++) {
     XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Lec> lec,
                              Lec::CreateForStage(params, schedule, i));
     bool foo = lec->Run();
     if (!foo) {
-      XLS_LOG(INFO) << lec->ResultToString();
+      LOG(INFO) << lec->ResultToString();
     }
     ASSERT_TRUE(foo);
-    XLS_LOG(INFO) << "Pass stage " << i;
+    LOG(INFO) << "Pass stage " << i;
   }
 }
 

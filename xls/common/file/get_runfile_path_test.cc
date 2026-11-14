@@ -14,8 +14,12 @@
 
 #include "xls/common/file/get_runfile_path.h"
 
+#include <filesystem>
+#include <string>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "xls/common/file/filesystem.h"
 #include "xls/common/status/matchers.h"
@@ -23,8 +27,21 @@
 namespace xls {
 namespace {
 
-using status_testing::IsOkAndHolds;
+using ::absl_testing::IsOkAndHolds;
+using ::testing::AllOf;
 using ::testing::HasSubstr;
+
+TEST(GetRunfilePathTest, GetXlsRunfilePathInLlvmReturnsTheRightPath) {
+  XLS_ASSERT_OK_AND_ASSIGN(std::filesystem::path runfile_path,
+                           GetXlsRunfilePath("clang/staging/include/stddef.h",
+                                             /*package=*/"llvm-project"));
+  absl::StatusOr<std::string> test_h_file_contents =
+      GetFileContents(runfile_path);
+
+  EXPECT_THAT(test_h_file_contents,
+              IsOkAndHolds(AllOf(HasSubstr("stddef.h"),
+                                 HasSubstr("Part of the LLVM Project"))));
+}
 
 TEST(GetRunfilePathTest, GetXlsRunfilePathReturnsTheRightPath) {
   XLS_ASSERT_OK_AND_ASSIGN(

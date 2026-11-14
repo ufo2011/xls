@@ -15,8 +15,8 @@
 #include "xls/common/visitor.h"
 
 #include <string>
+#include <variant>
 
-#include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "absl/types/variant.h"
 
@@ -24,7 +24,7 @@ namespace xls {
 namespace {
 
 TEST(OverloadedTest, Test) {
-  absl::variant<int, std::string> v = 3;
+  std::variant<int, std::string> v = 3;
   EXPECT_TRUE(absl::visit(Visitor{
                               [](int x) { return x == 3; },
                               [](const std::string&) { return false; },

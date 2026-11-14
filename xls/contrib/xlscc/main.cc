@@ -16,29 +16,42 @@
 // front-end. It accepts as input a C/C++ file and produces as textual output
 // the equivalent XLS intermediate representation (IR).
 
-#include <cstdlib>
+#include <filesystem>
 #include <fstream>
-#include <streambuf>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/flags/flag.h"
+#include "absl/log/flags.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/ascii.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_split.h"
-#include "clang/include/clang/AST/Attr.h"
+#include "absl/types/span.h"
 #include "clang/include/clang/AST/Decl.h"
-#include "clang/include/clang/AST/DeclCXX.h"
-#include "clang/include/clang/AST/Expr.h"
-#include "clang/include/clang/AST/Stmt.h"
-#include "xls/codegen/combinational_generator.h"
+#include "xls/common/exit_status.h"
+#include "xls/common/file/filesystem.h"
 #include "xls/common/init_xls.h"
-#include "xls/common/logging/logging.h"
+#include "xls/common/logging/log_flags.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/contrib/xlscc/cc_parser.h"
+#include "xls/contrib/xlscc/flags.h"
 #include "xls/contrib/xlscc/hls_block.pb.h"
 #include "xls/contrib/xlscc/metadata_output.pb.h"
 #include "xls/contrib/xlscc/translator.h"
-#include "xls/passes/standard_pipeline.h"
+#include "xls/contrib/xlscc/translator_types.h"
+#include "xls/dev_tools/tool_timeout.h"
+#include "xls/ir/channel.h"
+#include "xls/ir/package.h"
+#include "xls/ir/proc.h"
 
-const char kUsage[] = R"(
+static constexpr std::string_view kUsage = R"(
 Generates XLS IR from a given C++ file, or generates Verilog in the special
 case of a combinational module.
 
@@ -50,12 +63,17 @@ xlscc foo.cc --block_pb block_info.pb
 
 )";
 
-ABSL_FLAG(std::string, module_name, "",
-          "Explicit name to use for the generated module; if not provided the "
-          "mangled IR function name is used");
+ABSL_FLAG(std::string, out, "",
+          "Path at which to output verilog / IR. Stdout if not specified.");
 
 ABSL_FLAG(std::string, block_pb, "",
           "HLSBlock protobuf for generating as HLS block / XLS proc");
+
+ABSL_FLAG(bool, block_pb_text, false, "Input HLSBlock protobuf as textproto?");
+
+ABSL_FLAG(std::string, block_from_class, "",
+          "Specifies the name of a top class from which to generate the "
+          "HLSBlock. This class must contain the top method. ");
 
 ABSL_FLAG(std::string, top, "", "Top function name");
 
@@ -64,28 +82,184 @@ ABSL_FLAG(std::string, package, "", "Package name to generate");
 ABSL_FLAG(std::string, clang_args_file, "",
           "File containing on each line one command line argument for clang");
 
+ABSL_FLAG(std::vector<std::string>, defines, std::vector<std::string>(),
+          "Comma separated list of defines to pass to clang");
+
+ABSL_FLAG(std::vector<std::string>, include_dirs, std::vector<std::string>(),
+          "Comma separated list of include directories to pass to clang");
+
 ABSL_FLAG(std::string, meta_out, "",
           "Path at which to output metadata protobuf");
 
+ABSL_FLAG(bool, meta_out_text, false, "Output metadata as textproto?");
+
+ABSL_FLAG(std::string, verilog_line_map_out, "",
+          "Path at which to output Verilog line map protobuf");
+
+ABSL_FLAG(bool, error_on_uninitialized, false,
+          "Generate an error when a variable is uninitialized, or has the "
+          "wrong number of initializers.");
+
+ABSL_FLAG(bool, error_on_init_interval, false,
+          "Generate an error when an initiation interval is requested greater "
+          "than supported");
+
+ABSL_FLAG(
+    bool, generate_new_fsm, false,
+    "Generate the new style of FSM. Defaults to false, or the old style.");
+
+ABSL_FLAG(
+    bool, merge_states, true,
+    "Merge states in FSMs for pipelined loops. Increases throughput at some"
+    "potential cost.");
+
+ABSL_FLAG(bool, split_states_on_channel_ops, true,
+          "Split FSM states so that two IO operations on the same channel "
+          "cannot be in the same FSM state. This does not try to determine"
+          "mutual exclusion, so it can unnecessarily reduce throughput.");
+
+ABSL_FLAG(xlscc::StateElementSharingCriteria,
+          fsm_state_element_sharing_criteria,
+          xlscc::StateElementSharingCriteria::kByDecl,
+          "Criteria for sharing FSM state elements (decl, type, none).");
+
+ABSL_FLAG(int, top_level_init_interval, 1,
+          "Initiation interval of block top level (Run/main function)");
+
+ABSL_FLAG(int, max_unroll_iters, 1000,
+          "Maximum number of iterations to allow loops to be unrolled");
+
+ABSL_FLAG(int, warn_unroll_iters, 100,
+          "Maximum number of iterations to allow loops to be unrolled");
+
+ABSL_FLAG(int, z3_rlimit, 100000L,
+          "rlimit to set for z3 solver (eg for loop unrolling)");
+
+ABSL_FLAG(xlscc::ChannelStrictnessMap, channel_strictness,
+          xlscc::ChannelStrictnessMap(),
+          "Comma separated map of channels to strictness modes");
+
+ABSL_FLAG(xls::ChannelStrictness, default_channel_strictness,
+          xls::ChannelStrictness::kProvenMutuallyExclusive,
+          "Default strictness for channels not otherwise specified");
+
+ABSL_FLAG(std::string, io_op_token_ordering, "none",
+          "none (default), channel_wise, lexical");
+
+ABSL_FLAG(bool, debug_ir_trace_loop_context, false,
+          "Generate IR traces for pipelined loop context variables.");
+
+ABSL_FLAG(bool, debug_ir_trace_loop_control, false,
+          "Generate IR traces for pipelined loop control.");
+
+ABSL_FLAG(bool, debug_print_fsm_states, false,
+          "Print FSM states to XLS_LOG (try --alsologtostderr).");
+
+ABSL_FLAG(bool, debug_trace_activation_barriers, false,
+          "Generate IR traces for activation barriers.");
+
+ABSL_FLAG(bool, debug_fsm_trace, false,
+          "Generate IR traces for FSM state/activation debugging.");
+
+ABSL_FLAG(std::string, debug_write_function_slice_graph_path, "",
+          "Path to which to write out a graphviz (dot) file for the function "
+          "slices of the top function");
+
+ABSL_FLAG(
+    bool, print_optimization_warnings, false,
+    "Print optimization warnings / hints to XLS_LOG (try --alsologtostderr).");
+
 namespace xlscc {
 
-absl::Status Run(absl::string_view cpp_path) {
-  xlscc::Translator translator;
+static absl::Status Run(std::string_view cpp_path) {
+  auto timeout = ::xls::StartTimeoutTimer();
+  // Warnings should print by default
+  absl::SetFlag(&FLAGS_logtostderr, true);
+
+  xlscc::IOOpOrdering io_op_token_ordering = IOOpOrdering::kNone;
+
+  if (absl::GetFlag(FLAGS_io_op_token_ordering) == "none") {
+    io_op_token_ordering = IOOpOrdering::kNone;
+  } else if (absl::GetFlag(FLAGS_io_op_token_ordering) == "channel_wise") {
+    io_op_token_ordering = IOOpOrdering::kChannelWise;
+  } else if (absl::GetFlag(FLAGS_io_op_token_ordering) == "lexical") {
+    io_op_token_ordering = IOOpOrdering::kLexical;
+  } else {
+    std::cerr << "Unknown --io_op_token_ordering: "
+              << absl::GetFlag(FLAGS_io_op_token_ordering) << '\n';
+  }
+
+  xlscc::ChannelOptions channel_options = {
+      .default_strictness = absl::GetFlag(FLAGS_default_channel_strictness),
+      .strictness_map = absl::GetFlag(FLAGS_channel_strictness).map,
+  };
+
+  DebugIrTraceFlags ir_trace_flags = DebugIrTraceFlags_None;
+
+  if (absl::GetFlag(FLAGS_debug_ir_trace_loop_context)) {
+    ir_trace_flags = static_cast<DebugIrTraceFlags>(
+        ir_trace_flags | DebugIrTraceFlags_LoopContext);
+  }
+  if (absl::GetFlag(FLAGS_debug_ir_trace_loop_control)) {
+    ir_trace_flags = static_cast<DebugIrTraceFlags>(
+        ir_trace_flags | DebugIrTraceFlags_LoopControl);
+  }
+  if (absl::GetFlag(FLAGS_debug_print_fsm_states)) {
+    ir_trace_flags = static_cast<DebugIrTraceFlags>(
+        ir_trace_flags | DebugIrTraceFlags_FSMStates);
+  }
+  if (absl::GetFlag(FLAGS_print_optimization_warnings)) {
+    ir_trace_flags = static_cast<DebugIrTraceFlags>(
+        ir_trace_flags | DebugIrTraceFlags_OptimizationWarnings);
+  }
+  if (absl::GetFlag(FLAGS_debug_trace_activation_barriers)) {
+    ir_trace_flags = static_cast<DebugIrTraceFlags>(
+        ir_trace_flags | DebugIrTraceFlags_ActivationBarriers);
+  }
+  if (absl::GetFlag(FLAGS_debug_fsm_trace)) {
+    ir_trace_flags = static_cast<DebugIrTraceFlags>(ir_trace_flags |
+                                                    DebugIrTraceFlags_FSMTrace);
+  }
+
+  xlscc::StateElementSharingCriteria fsm_state_element_sharing_criteria =
+      absl::GetFlag(FLAGS_fsm_state_element_sharing_criteria);
+
+  xlscc::Translator translator(
+      absl::GetFlag(FLAGS_error_on_init_interval),
+      absl::GetFlag(FLAGS_error_on_uninitialized),
+      absl::GetFlag(FLAGS_generate_new_fsm), absl::GetFlag(FLAGS_merge_states),
+      absl::GetFlag(FLAGS_split_states_on_channel_ops), ir_trace_flags,
+      absl::GetFlag(FLAGS_max_unroll_iters),
+      absl::GetFlag(FLAGS_warn_unroll_iters), absl::GetFlag(FLAGS_z3_rlimit),
+      io_op_token_ordering,
+      /*existing_parser=*/std::unique_ptr<CCParser>(),
+      fsm_state_element_sharing_criteria);
 
   const std::string block_pb_name = absl::GetFlag(FLAGS_block_pb);
 
+  const std::string block_from_class_name =
+      absl::GetFlag(FLAGS_block_from_class);
+  const bool block_from_class = !block_from_class_name.empty();
+
   HLSBlock block;
-  if (!block_pb_name.empty()) {
-    std::ifstream file_in(block_pb_name);
-    if (!block.ParseFromIstream(&file_in)) {
-      return absl::InvalidArgumentError("Couldn't parse protobuf");
+  if (!block_from_class) {
+    if (!block_pb_name.empty()) {
+      if (!absl::GetFlag(FLAGS_block_pb_text)) {
+        std::ifstream file_in(block_pb_name);
+        if (!block.ParseFromIstream(&file_in)) {
+          return absl::InvalidArgumentError("Couldn't parse protobuf");
+        }
+      } else {
+        XLS_RETURN_IF_ERROR(xls::ParseTextProtoFile(block_pb_name, &block));
+      }
     }
   }
 
   const std::string top_function_name = absl::GetFlag(FLAGS_top);
 
   if (!top_function_name.empty()) {
-    XLS_RETURN_IF_ERROR(translator.SelectTop(top_function_name));
+    XLS_RETURN_IF_ERROR(
+        translator.SelectTop(top_function_name, block_from_class_name));
   }
 
   std::vector<std::string> clang_argvs;
@@ -101,84 +275,120 @@ absl::Status Run(absl::string_view cpp_path) {
     }
   }
 
-  std::vector<absl::string_view> clang_argv;
-  for (size_t i = 0; i < clang_argvs.size(); ++i) {
-    clang_argv.push_back(clang_argvs[i]);
+  for (std::string& def : absl::GetFlag(FLAGS_defines)) {
+    clang_argvs.push_back(absl::StrCat("-D", def));
   }
 
-  std::cerr << "Parsing file '" << cpp_path << "' with clang..." << std::endl;
+  for (std::string& dir : absl::GetFlag(FLAGS_include_dirs)) {
+    clang_argvs.push_back(absl::StrCat("-I", dir));
+  }
+
+  std::vector<std::string_view> clang_argv;
+  clang_argv.reserve(clang_argvs.size());
+  for (const auto& i : clang_argvs) {
+    clang_argv.push_back(i);
+  }
+
+  std::cerr << "Parsing file '" << cpp_path << "' with clang..." << '\n';
   XLS_RETURN_IF_ERROR(translator.ScanFile(
       cpp_path, clang_argv.empty()
-                    ? absl::Span<absl::string_view>()
+                    ? absl::Span<std::string_view>()
                     : absl::MakeSpan(&clang_argv[0], clang_argv.size())));
 
-  XLS_ASSIGN_OR_RETURN(absl::StatusOr<std::string> top_name,
-                       translator.GetEntryFunctionName());
+  XLS_ASSIGN_OR_RETURN(std::string top_name, translator.GetEntryFunctionName());
 
   std::string package_name = absl::GetFlag(FLAGS_package);
 
   if (package_name.empty()) {
     package_name = "my_package";
-  } else {
-    package_name = top_name.value();
   }
 
-  std::cerr << "Generating IR..." << std::endl;
-  xls::Package package(package_name, top_name.value());
+  std::filesystem::path output_file(absl::GetFlag(FLAGS_out));
+
+  std::filesystem::path debug_write_function_slice_graph_path(
+      absl::GetFlag(FLAGS_debug_write_function_slice_graph_path));
+
+  auto write_to_output = [&](std::string_view output,
+                             const GeneratedFunction* top_function,
+                             const xls::Package* package) -> absl::Status {
+    if (output_file.empty()) {
+      std::cout << output;
+    } else {
+      XLS_RETURN_IF_ERROR(xls::SetFileContents(output_file, output));
+    }
+    if (!debug_write_function_slice_graph_path.empty()) {
+      const std::string graph =
+          Debug_GenerateSliceGraph(*top_function, package);
+      XLS_RETURN_IF_ERROR(
+          xls::SetFileContents(debug_write_function_slice_graph_path, graph));
+    }
+    return absl::OkStatus();
+  };
+
+  std::cerr << "Generating IR..." << '\n';
+  xls::Package package(package_name);
   if (block_pb_name.empty()) {
-    XLS_RETURN_IF_ERROR(translator.GenerateIR_Top_Function(&package).status());
-    // TODO(seanhaskell): Simplify IR
-    std::cout << package.DumpIr() << std::endl;
-  } else {
+    absl::flat_hash_map<const clang::NamedDecl*, ChannelBundle>
+        top_channel_injections = {};
     XLS_ASSIGN_OR_RETURN(
-        xls::Proc * proc,
-        translator.GenerateIR_Block(&package, block,
-                                    xlscc::XLSChannelMode::kAllSingleValue));
+        GeneratedFunction * top_function,
+        translator.GenerateIR_Top_Function(&package, top_channel_injections));
 
-    XLS_RETURN_IF_ERROR(translator.InlineAllInvokes(&package));
+    XLS_RETURN_IF_ERROR(package.SetTopByName(top_name));
+    translator.AddSourceInfoToPackage(package);
 
-    absl::flat_hash_map<const xls::Channel*, xls::verilog::ProcPortType>
-        channel_gen_types;
+    std::cerr << "Saving Package IR..." << '\n';
+    XLS_RETURN_IF_ERROR(write_to_output(absl::StrCat(package.DumpIr(), "\n"),
+                                        top_function, &package));
+  } else {
+    xls::Proc* proc = nullptr;
 
-    for (const HLSChannel& channel : block.channels()) {
-      XLS_ASSIGN_OR_RETURN(xls::Channel * xls_channel,
-                           package.GetChannel(channel.name()));
-      xls::verilog::ProcPortType port_type = xls::verilog::ProcPortType::kNull;
-      switch (channel.type()) {
-        case ChannelType::DIRECT_IN:
-          port_type = xls::verilog::ProcPortType::kSimple;
-          break;
-        case ChannelType::FIFO:
-          port_type = xls::verilog::ProcPortType::kReadyValid;
-          break;
-        default:
-          return absl::UnimplementedError(
-              absl::StrFormat("Channel %s has unknown type %i", channel.name(),
-                              channel.type()));
+    if (!block_from_class) {
+      XLS_ASSIGN_OR_RETURN(
+          proc,
+          translator.GenerateIR_Block(
+              &package, block, absl::GetFlag(FLAGS_top_level_init_interval),
+              channel_options));
+    } else {
+      XLS_ASSIGN_OR_RETURN(
+          proc,
+          translator.GenerateIR_BlockFromClass(
+              &package, &block, absl::GetFlag(FLAGS_top_level_init_interval),
+              channel_options));
+
+      if (!block_pb_name.empty()) {
+        XLS_RETURN_IF_ERROR(xls::SetTextProtoFile(block_pb_name, block));
       }
-      channel_gen_types[xls_channel] = port_type;
     }
 
-    std::cerr << "Generating Verilog..." << std::endl;
-    XLS_ASSIGN_OR_RETURN(
-        xls::verilog::ModuleGeneratorResult result,
-        xls::verilog::GenerateCombinationalModuleFromProc(
-            proc, channel_gen_types, false /*UseSystemVerilog*/));
+    XLS_RETURN_IF_ERROR(package.SetTop(proc));
+    std::cerr << "Saving Package IR..." << '\n';
+    translator.AddSourceInfoToPackage(package);
+    XLS_ASSIGN_OR_RETURN(const clang::FunctionDecl* top_function_decl,
+                         translator.GetTopFunction());
+    const GeneratedFunction* top_function =
+        translator.GetGeneratedFunction(top_function_decl);
 
-    std::cout << result.verilog_text << std::endl;
+    XLS_RETURN_IF_ERROR(write_to_output(absl::StrCat(package.DumpIr(), "\n"),
+                                        top_function, &package));
   }
 
   const std::string metadata_out_path = absl::GetFlag(FLAGS_meta_out);
   if (!metadata_out_path.empty()) {
     XLS_ASSIGN_OR_RETURN(xlscc_metadata::MetadataOutput meta,
                          translator.GenerateMetadata());
-    std::ofstream ostr(metadata_out_path);
-    if (!ostr.good()) {
-      return absl::NotFoundError(absl::StrFormat(
-          "Couldn't open metadata output path: %s", metadata_out_path));
-    }
-    if (!meta.SerializeToOstream(&ostr)) {
-      return absl::UnknownError("Error writing metadata proto");
+
+    if (absl::GetFlag(FLAGS_meta_out_text)) {
+      XLS_RETURN_IF_ERROR(xls::SetTextProtoFile(metadata_out_path, meta));
+    } else {
+      std::ofstream ostr(metadata_out_path);
+      if (!ostr.good()) {
+        return absl::NotFoundError(absl::StrFormat(
+            "Couldn't open metadata output path: %s", metadata_out_path));
+      }
+      if (!meta.SerializeToOstream(&ostr)) {
+        return absl::UnknownError("Error writing metadata proto");
+      }
     }
   }
 
@@ -188,19 +398,13 @@ absl::Status Run(absl::string_view cpp_path) {
 }  // namespace xlscc
 
 int main(int argc, char** argv) {
-  std::vector<absl::string_view> positional_arguments =
+  std::vector<std::string_view> positional_arguments =
       xls::InitXls(kUsage, argc, argv);
 
   if (positional_arguments.size() != 1) {
-    XLS_LOG(QFATAL) << absl::StreamFormat("Expected invocation: %s CPP_FILE",
-                                          argv[0]);
+    LOG(QFATAL) << absl::StreamFormat("Expected invocation: %s CPP_FILE",
+                                      argv[0]);
   }
-  absl::string_view cpp_path = positional_arguments[0];
-  //  XLS_QCHECK_OK(xlscc::Run(cpp_path));
-  absl::Status status = xlscc::Run(cpp_path);
-  if (!status.ok()) {
-    std::cerr << status.ToString() << std::endl;
-    return EXIT_FAILURE;
-  }
-  return EXIT_SUCCESS;
+  std::string_view cpp_path = positional_arguments[0];
+  return xls::ExitStatus(xlscc::Run(cpp_path));
 }

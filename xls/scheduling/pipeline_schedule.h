@@ -1,4 +1,7 @@
-// Copyright 2020 The XLS Authors
+#include <variant>
+
+#include "xls/ir/xls_ir_interface.pb.h"
+// Copyright 2022 The XLS Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,126 +14,77 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Abstractions for describing the binding of Nodes to cycles.
+// PackageSchedule map FunctionBases to a PipelineSchedule, and
+// PipelineSchedule maps nodes in a FunctionBase to an integer value
+// representing a pipeline stage.
 
 #ifndef XLS_SCHEDULING_PIPELINE_SCHEDULE_H_
 #define XLS_SCHEDULING_PIPELINE_SCHEDULE_H_
 
+#include <algorithm>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "xls/delay_model/delay_estimator.h"
-#include "xls/ir/function.h"
+#include "absl/strings/str_format.h"
+#include "absl/types/span.h"
+#include "xls/common/status/ret_check.h"
+#include "xls/common/status/status_macros.h"
+#include "xls/estimators/delay_model/delay_estimator.h"
+#include "xls/fdo/delay_manager.h"
+#include "xls/ir/function_base.h"
+#include "xls/ir/node.h"
 #include "xls/scheduling/pipeline_schedule.pb.h"
+#include "xls/scheduling/scheduling_options.h"
 
 namespace xls {
 
-// The strategy to use when scheduling pipelines.
-enum class SchedulingStrategy {
-  // Schedule all nodes a early as possible while satifying dependency and
-  // timing constraints.
-  ASAP,
-
-  // Minimize the number of pipeline registers when scheduling.
-  MINIMIZE_REGISTERS
-};
-
-// Returns the list of ordering of cycles (pipeline stages) in which to compute
-// min cut of the graph. Each min cut of the graph computes which XLS node
-// values are in registers after a particular stage in the pipeline schedule. A
-// min-cut must be computed for each stage in the schedule to determine the set
-// of pipeline registers for the entire pipeline. The ordering of stages for
-// which the min-cut is performed (e.g., stage 0 then 1, vs stage 1 then 0) can
-// affect the total number of registers in the pipeline so multiple orderings
-// are tried. This function returns this set of orderings.  Exposed for testing.
-std::vector<std::vector<int64_t>> GetMinCutCycleOrders(int64_t length);
-
-// Options to use when generating a pipeline schedule. At least a clock period
-// or a pipeline length (or both) must be specified. If only one value is
-// specified the other value is computed as follows:
-//
-// (1) Only clock period specified. A minimum pipeline length is computed by
-//     scheduling all nodes as early as possible while satisfying the clock
-//     timing constraint. The pipeline length is the latest cycle any node is
-//     scheduled in.
-//
-// (2) Only pipeline length specified. A minimum clock period is computed which
-//     allows a pipeline of the given length via as-soon-as-possible
-//     scheduling. The clock period is found via a binary search.
-//     TODO(meheff): Implement this.
-//
-// Once the clock period and pipeline length are determined, a schedule is
-// produced which minimizes the number of pipeline registers.
-class SchedulingOptions {
- public:
-  explicit SchedulingOptions(
-      SchedulingStrategy strategy = SchedulingStrategy::MINIMIZE_REGISTERS)
-      : strategy_(strategy) {}
-
-  // Returns the scheduling strategy.
-  SchedulingStrategy strategy() const { return strategy_; }
-
-  // Sets/gets the target clock period in picoseconds.
-  SchedulingOptions& clock_period_ps(int64_t value) {
-    clock_period_ps_ = value;
-    return *this;
-  }
-  absl::optional<int64_t> clock_period_ps() const { return clock_period_ps_; }
-
-  // Sets/gets the target number of stages in the pipeline.
-  SchedulingOptions& pipeline_stages(int64_t value) {
-    pipeline_stages_ = value;
-    return *this;
-  }
-  absl::optional<int64_t> pipeline_stages() const { return pipeline_stages_; }
-
-  // Sets/gets the percentage of clock period to set aside as a margin to ensure
-  // timing is met. Effectively, this lowers the clock period by this percentage
-  // amount for the purposes of scheduling.
-  SchedulingOptions& clock_margin_percent(int64_t value) {
-    clock_margin_percent_ = value;
-    return *this;
-  }
-  absl::optional<int64_t> clock_margin_percent() const {
-    return clock_margin_percent_;
-  }
-
- private:
-  SchedulingStrategy strategy_;
-  absl::optional<int64_t> clock_period_ps_;
-  absl::optional<int64_t> pipeline_stages_;
-  absl::optional<int64_t> clock_margin_percent_;
-};
-
-// A map from node to cycle as a bare-bones representation of a schedule.
-using ScheduleCycleMap = absl::flat_hash_map<Node*, int64_t>;
-
-// Abstraction describing the binding of Nodes to cycles.
+// Abstraction describing the binding of Nodes to cycles for a FunctionBase.
 class PipelineSchedule {
  public:
-  // Produces a feed-forward pipeline schedule using the given delay model and
-  // scheduling options.
-  static absl::StatusOr<PipelineSchedule> Run(
-      Function* f, const DelayEstimator& delay_estimator,
-      const SchedulingOptions& options);
+  PipelineSchedule() = default;
 
   // Reconstructs a PipelineSchedule object from a proto representation.
   static absl::StatusOr<PipelineSchedule> FromProto(
-      Function* function, const PipelineScheduleProto& proto);
+      FunctionBase* function, const PackageScheduleProto& proto);
+
+  // Builds trivial pipeline schedule with all nodes in a single stage
+  static absl::StatusOr<PipelineSchedule> SingleStage(FunctionBase* function);
+
+  struct Options {
+    std::optional<int64_t> length;
+    std::optional<int64_t> min_clock_period_ps;
+    std::optional<int64_t> target_clock_period_ps;
+  };
 
   // Constructs a schedule for the given function with the given cycle map. If
-  // length is not given, then the length equal to the largest cycle in cycle
-  // map minus one.
-  PipelineSchedule(Function* function, ScheduleCycleMap cycle_map,
-                   absl::optional<int64_t> length = absl::nullopt);
+  // length is not given in `options`, then the length is equal to the largest
+  // cycle in cycle map minus one.
+  static absl::StatusOr<PipelineSchedule> Create(FunctionBase* function_base,
+                                                 ScheduleCycleMap cycle_map,
+                                                 Options options = {});
 
-  Function* function() const { return function_; }
+  FunctionBase* function_base() const { return function_base_; }
 
   // Returns whether the given node is contained in this schedule.
   bool IsScheduled(Node* node) const { return cycle_map_.contains(node); }
 
+  // Remove a node from the schedule.
+  void RemoveNode(Node* node);
+
   // Returns the cycle in which the node is placed. Dies if node has not
   // been placed in this schedule.
   int64_t cycle(const Node* node) const { return cycle_map_.at(node); }
+
+  bool empty() const { return cycle_map_.empty(); }
 
   // Returns the nodes scheduled in the given cycle. The node order is
   // guaranteed to be topological.
@@ -143,12 +97,25 @@ class PipelineSchedule {
   // N and has users after cycle N.
   std::vector<Node*> GetLiveOutOfCycle(int64_t c) const;
 
+  // Returns true if the given node is live out of the given cycle.
+  bool IsLiveOutOfCycle(Node* node, int64_t c) const;
+
   // Returns the number of stages in the pipeline. Use 'length' instead of
   // 'size' as 'size' is ambiguous in this context (number of resources? number
   // of nodes? number of cycles?). Note that codegen may add flops to the input
   // or output of the pipeline so this value may not be the same as the latency
   // of the pipeline.
   int64_t length() const { return cycle_to_nodes_.size(); }
+
+  // Returns the minimum possible clock period, if this was computed while
+  // creating the schedule. This is purely for tracing purposes.
+  const std::optional<int64_t>& min_clock_period_ps() const {
+    return min_clock_period_ps_;
+  }
+
+  const std::optional<int64_t>& target_clock_period_ps() const {
+    return target_clock_period_ps_;
+  }
 
   // Verifies various invariants of the schedule (each node scheduled exactly
   // once, node not scheduled before operands, etc.).
@@ -158,18 +125,163 @@ class PipelineSchedule {
   // given clock period.
   absl::Status VerifyTiming(int64_t clock_period_ps,
                             const DelayEstimator& delay_estimator) const;
+  absl::Status VerifyTiming(int64_t clock_period_ps,
+                            const DelayManager& delay_manager) const;
+
+  // Verifies that all scheduling constraints are followed.
+  absl::Status VerifyConstraints(
+      absl::Span<const SchedulingConstraint> constraints,
+      const SchedulingOptions& options) const;
 
   // Returns a protobuf holding this object's scheduling info.
-  PipelineScheduleProto ToProto();
+  absl::StatusOr<PipelineScheduleProto> ToProto(
+      const DelayEstimator& delay_estimator) const;
+
+  // Returns the number of internal registers in this schedule.
+  int64_t CountFinalInteriorPipelineRegisters() const;
+
+  // Returns the underlying cycle map.
+  const ScheduleCycleMap& GetCycleMap() const { return cycle_map_; }
 
  private:
-  Function* function_;
+  PipelineSchedule(FunctionBase* function_base, ScheduleCycleMap cycle_map,
+                   std::optional<int64_t> min_clock_period_ps,
+                   std::optional<int64_t> target_clock_period_ps);
+
+  FunctionBase* function_base_ = nullptr;
 
   // Map from node to the cycle in which it is scheduled.
   ScheduleCycleMap cycle_map_;
 
   // The nodes scheduled each cycle.
   std::vector<std::vector<Node*>> cycle_to_nodes_;
+
+  // The minimum possible clock period, if known.
+  std::optional<int64_t> min_clock_period_ps_;
+
+  // The actual target clock period used for scheduling.
+  std::optional<int64_t> target_clock_period_ps_;
+};
+
+// A collection of FunctionBase schedules necessary to generate pipelined
+// implementation for a Package.
+class PackageSchedule {
+ public:
+  using ScheduleMap = absl::flat_hash_map<FunctionBase*, PipelineSchedule>;
+
+  explicit PackageSchedule(Package* package) : package_(package) {}
+
+  explicit PackageSchedule(PipelineSchedule schedule)
+      : package_(schedule.function_base()->package()) {
+    schedules_[schedule.function_base()] = std::move(schedule);
+  }
+  PackageSchedule(Package* package, ScheduleMap schedules,
+                  std::optional<absl::flat_hash_map<FunctionBase*, int64_t>>
+                      synchronous_offsets = std::nullopt)
+      : package_(package),
+        schedules_(std::move(schedules)),
+        synchronous_offsets_(synchronous_offsets) {}
+
+  // Reconstructs a PackageSchedule object from a proto representation.
+  // Will return an error status if the proto schedules reference nodes that
+  // don't exist in the package.
+  static absl::StatusOr<PackageSchedule> FromProto(
+      Package* p, const PackageScheduleProto& proto);
+
+  // Returns whether the given FunctionBase has a schedule.
+  bool HasSchedule(FunctionBase* fb) const { return schedules_.contains(fb); }
+
+  const ScheduleMap& GetSchedules() const { return schedules_; }
+
+  // Return the PipelineSchedule for the given FunctionBase.
+  PipelineSchedule& GetSchedule(FunctionBase* function_base) {
+    return schedules_.at(function_base);
+  }
+  const PipelineSchedule& GetSchedule(FunctionBase* function_base) const {
+    return schedules_.at(function_base);
+  }
+
+  // Adds a schedule for the given FunctionBase. Returns an error if there is
+  // already a schedule for the given FunctionBase.
+  absl::Status AddSchedule(FunctionBase* fb, PipelineSchedule&& schedule) {
+    XLS_RET_CHECK(!HasSchedule(fb))
+        << absl::StrFormat("`%s` already has a schedule", fb->name());
+    XLS_RET_CHECK_EQ(fb, schedule.function_base());
+    schedules_[fb] = schedule;
+    return absl::OkStatus();
+  }
+
+  absl::Status RemoveSchedule(FunctionBase* fb) {
+    if (!HasSchedule(fb)) {
+      return absl::NotFoundError(
+          absl::StrFormat("FunctionBase `%s` has no schedule", fb->name()));
+    }
+    schedules_.erase(fb);
+    if (synchronous_offsets_.has_value()) {
+      synchronous_offsets_->erase(fb);
+    }
+    return absl::OkStatus();
+  }
+
+  // Sets the schedule associated with `fb` to `schedule`.
+  absl::Status UpdateSchedule(FunctionBase* fb, PipelineSchedule&& schedule) {
+    if (HasSchedule(fb)) {
+      XLS_RETURN_IF_ERROR(RemoveSchedule(fb));
+    }
+    return AddSchedule(fb, std::move(schedule));
+  }
+
+  // Returns the FunctionBases with a schedule in a stable sort.
+  std::vector<FunctionBase*> GetScheduledFunctionBases() const {
+    std::vector<FunctionBase*> function_bases;
+    for (const auto& [fb, _] : schedules_) {
+      function_bases.push_back(fb);
+    }
+    std::sort(function_bases.begin(), function_bases.end(),
+              FunctionBase::NameLessThan);
+    return function_bases;
+  }
+
+  bool IsSynchronousSchedule() const {
+    return synchronous_offsets_.has_value();
+  }
+
+  // Returns the global stage the nodes is in within a synchronous schedule of
+  // the package. CHECK fails if this is PackageSchedule is not a synchronous
+  // schedule.
+  int64_t GetSynchronousCycle(Node* node) const {
+    CHECK(IsSynchronousSchedule());
+    return GetSchedule(node->function_base()).cycle(node) +
+           synchronous_offsets_->at(node->function_base());
+  }
+
+  void Clear() {
+    schedules_.clear();
+    synchronous_offsets_.reset();
+  }
+
+  absl::StatusOr<PackageScheduleProto> ToProto(
+      const DelayEstimator& delay_estimator) const;
+  std::string ToString() const;
+
+  using GenericFunctionInterfaceProto =
+      std::variant<PackageInterfaceProto::Function,
+                   PackageInterfaceProto::Proc>;
+  // Generates an interface proto describing the results of scheduling for the
+  // given function base.
+  absl::StatusOr<PackageInterfaceProto::ScheduledFunctionBase>
+  ToScheduledInterfaceProto(FunctionBase* fb,
+                            GenericFunctionInterfaceProto base_info) const;
+
+ private:
+  Package* package_ = nullptr;
+  ScheduleMap schedules_;
+
+  // If this package represents a synchronous schedule of FunctionBases
+  // (procs) in the package, this map contains the stage offset of each
+  // function base in the synchronous schedule.
+  std::optional<absl::flat_hash_map<FunctionBase*, int64_t>>
+      synchronous_offsets_;
 };
 
 }  // namespace xls

@@ -1,0 +1,139 @@
+// Copyright 2022 The XLS Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+edition = "2023";
+
+package xls;
+
+import "xls/codegen/codegen_residual_data.proto";
+import "xls/ir/xls_ir_interface.proto";
+
+enum GeneratorKind {
+  GENERATOR_KIND_INVALID = 0;
+  GENERATOR_KIND_PIPELINE = 1;
+  GENERATOR_KIND_COMBINATIONAL = 2;
+}
+
+enum IOKindProto {
+  IO_KIND_INVALID = 0;
+  IO_KIND_FLOP = 1;
+  IO_KIND_SKID_BUFFER = 2;
+  IO_KIND_ZERO_LATENCY_BUFFER = 3;
+}
+
+enum RegisterMergeStrategyProto {
+  STRATEGY_INVALID = 0;
+  STRATEGY_DONT_MERGE = 1;
+  STRATEGY_IDENTITY_ONLY = 2;
+}
+
+enum SourceAnnotationStrategyProto {
+  ANNOTATION_STRATEGY_INVALID = 0;
+  ANNOTATION_STRATEGY_NONE = 1;
+  ANNOTATION_STRATEGY_COMMENT = 2;
+  ANNOTATION_STRATEGY_SRC_ATTRIBUTE = 3;
+  ANNOTATION_STRATEGY_DIRECTIVE = 4;
+}
+
+enum CodegenVersionProto {
+  CODEGEN_VERSION_DEFAULT = 0;
+  CODEGEN_VERSION_ONE_DOT_ZERO = 1;
+  CODEGEN_VERSION_ONE_DOT_FIVE = 2;
+  CODEGEN_VERSION_TWO_DOT_ZERO = 3;
+}
+
+// Flags passed to the codegen_main binary.
+//
+// See codegen_flags.cc ABSL_FLAG() definitions for the meaning of these fields.
+message CodegenFlagsProto {
+  string top = 1;
+  GeneratorKind generator = 2;
+  string input_valid_signal = 3;
+  string output_valid_signal = 4;
+  string manual_load_enable_signal = 5;
+  bool flop_inputs = 6;
+  bool flop_outputs = 7;
+  IOKindProto flop_inputs_kind = 8;
+  IOKindProto flop_outputs_kind = 9;
+  bool flop_single_value_channels = 10;
+  bool add_idle_output = 11;
+  string module_name = 12;
+  string output_port_name = 13;
+  string reset = 14;
+  bool reset_active_low = 15;
+  bool reset_asynchronous = 16;
+  bool reset_data_path = 17;
+  bool use_system_verilog = 18;
+  bool separate_lines = 19;
+  int64 max_inline_depth = 35;
+  string gate_format = 20;
+  string assert_format = 21;
+  string smulp_format = 22;
+  string umulp_format = 23;
+  string streaming_channel_data_suffix = 24;
+  string streaming_channel_valid_suffix = 25;
+  string streaming_channel_ready_suffix = 26;
+  repeated string ram_configurations = 27;
+  bool gate_recvs = 28;
+  bool array_index_bounds_checking = 29;
+  RegisterMergeStrategyProto register_merge_strategy = 30;
+  int64 max_trace_verbosity = 31;
+  // If present details about the interface requested. Eg specific sv types to
+  // use for arguments etc. Only the 'top' and channels are interpreted. Unknown
+  // interface elements are ignored.
+  PackageInterfaceProto package_interface = 32;
+  // Should annotated arguments be emitted with the sv_types they are annotated
+  // with.
+  bool emit_sv_types = 33;
+
+  string simulation_macro_name = 34;
+  repeated string assertion_macro_names = 39;
+
+  CodegenVersionProto codegen_version = 36;
+
+  // Which module to use for FIFOs. If empty, will materialize an internal
+  // implementation.
+  string fifo_module = 40;
+  string nodata_fifo_module = 41;
+
+  // If present, the seed used to randomize the order of lines in the output. If
+  // empty, will use a default order. This can be useful for creating multiple
+  // equivalent Verilog outputs to exercise the rest of the synthesis pipeline.
+  repeated int32 randomize_order_seed = 38;
+
+  // If false, runtime invariant assertions (e.g. one-hot selector checks)
+  // are omitted from generated RTL.  Default is true.
+  bool add_invariant_assertions = 42;
+
+  // Parsed reference residual data. When present, codegen uses this to
+  // influence emission order; preferred over reading from a path at runtime.
+  verilog.CodegenResidualData reference_residual_data = 43;
+
+  SourceAnnotationStrategyProto source_annotation_strategy = 44;
+
+  // Debugging flag to cause the block conversion to dump its pass results.
+  string ir_dump_path = 45;
+
+  // If true, use a consistent naming scheme for boundary ports. If false, may
+  // vary port names and/or reuse ports at the boundary, and users are expected
+  // to use the block signature to find ports.
+  bool preserve_ports = 46;
+
+  // If true, recursively embed each instantiated child block's signature
+  // into the parent block's signature. Default is false.
+  bool embed_child_block_signatures = 47;
+
+  // Space for pass-specific configuration extensions.
+  extensions 20000 to max;
+}

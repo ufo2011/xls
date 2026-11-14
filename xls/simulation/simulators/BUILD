@@ -12,8 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
 package(
+    default_applicable_licenses = ["//:license"],
     default_visibility = ["//xls:xls_internal"],
+    features = [
+        "layering_check",
+        "parse_headers",
+    ],
     licenses = ["notice"],  # Apache 2.0
 )
 
@@ -25,15 +32,22 @@ cc_library(
         "@com_icarus_iverilog//:vvp",
     ],
     deps = [
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
+        "//xls/codegen/vast",
         "//xls/common:module_initializer",
         "//xls/common:subprocess",
+        "//xls/common/file:filesystem",
         "//xls/common/file:get_runfile_path",
+        "//xls/common/file:temp_directory",
         "//xls/common/file:temp_file",
         "//xls/common/status:status_macros",
+        "//xls/simulation:verilog_include",
         "//xls/simulation:verilog_simulator",
-        "//xls/tools:verilog_include",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
     ],
     alwayslink = 1,
 )

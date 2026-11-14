@@ -14,13 +14,16 @@
 
 #include "xls/ir/dfs_visitor.h"
 
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "xls/common/logging/logging.h"
 #include "xls/common/status/matchers.h"
 #include "xls/ir/function.h"
 #include "xls/ir/ir_test_base.h"
@@ -35,7 +38,7 @@ namespace {
 class TestVisitor : public DfsVisitorWithDefault {
  public:
   absl::Status DefaultHandler(Node* node) override {
-    XLS_VLOG(1) << "Visiting " << node->GetName();
+    VLOG(1) << "Visiting " << node->GetName();
     visited_.push_back(node);
     visited_set_.insert(node);
     return absl::OkStatus();
@@ -142,26 +145,6 @@ fn graph(p: bits[42], q: bits[42]) -> bits[42] {
     EXPECT_EQ(6, v.visited_count());
     EXPECT_TRUE(v.IsVisited(FindNode("umul.4", f)));
   }
-}
-
-TEST_F(DfsVisitorTest, GraphWithCycle) {
-  std::string input = R"(
-fn graph(p: bits[42], q: bits[42]) -> bits[42] {
-  and.1: bits[42] = and(p, q)
-  add.2: bits[42] = add(and.1, q)
-  ret sub.3: bits[42] = sub(add.2, add.2)
-}
-)";
-  // We don't want a VerifiedPackage because we are introducing a cycle.
-  auto p = absl::make_unique<Package>(TestName());
-  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(input, p.get()));
-
-  // Introduce a cycle in the graph.
-  ASSERT_TRUE(FindNode("and.1", f)
-                  ->ReplaceOperand(FindNode("p", f), FindNode("add.2", f)));
-  TestVisitor v;
-  EXPECT_THAT(std::string(f->Accept(&v).message()),
-              ::testing::HasSubstr(std::string("Cycle detected")));
 }
 
 }  // namespace

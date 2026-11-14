@@ -1,0 +1,88 @@
+# Copyright 2025 The XLS Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//xls:xls_internal"],
+    licenses = ["notice"],  # Apache 2.0
+)
+
+cc_library(
+    name = "verilog_fuzz_domain",
+    testonly = True,
+    srcs = ["verilog_fuzz_domain.cc"],
+    hdrs = ["verilog_fuzz_domain.h"],
+    deps = [
+        "//xls/common/fuzzing:fuzztest",
+        "//xls/common/logging:log_lines",
+        "//xls/common/status:ret_check",
+        "//xls/common/status:status_macros",
+        "//xls/fuzzer/ir_fuzzer:ir_fuzz_domain",
+        "//xls/ir",
+        "//xls/public:runtime_codegen_actions",
+        "//xls/tools:codegen_flags_cc_proto",
+        "//xls/tools:scheduling_options_flags_cc_proto",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/log:vlog_is_on",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
+cc_test(
+    name = "codegen_fuzz_test",
+    srcs = ["codegen_fuzz_test.cc"],
+    deps = [
+        ":verilog_fuzz_domain",
+        "//xls/codegen_v_1_5:block_conversion_pass_pipeline",
+        "//xls/codegen_v_1_5:passes",
+        "//xls/common:xls_gunit_main",
+        "//xls/common/fuzzing:fuzztest",
+        "//xls/common/status:matchers",
+        "//xls/fuzzer/ir_fuzzer:ir_fuzz_domain",
+        "//xls/ir",
+        "//xls/ir:function_builder",
+        "//xls/ir:ir_parser",
+        "//xls/tools:codegen_flags_cc_proto",
+        "//xls/tools:scheduling_options_flags_cc_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_binary(
+    name = "reproducer_to_ir_main",
+    testonly = 1,
+    srcs = ["reproducer_to_ir_main.cc"],
+    deps = [
+        ":verilog_fuzz_domain",
+        "//xls/common:exit_status",
+        "//xls/common:init_xls",
+        "//xls/common/file:filesystem",
+        "//xls/common/fuzzing:fuzztest",
+        "//xls/common/status:ret_check",
+        "//xls/common/status:status_macros",
+        "//xls/fuzzer/ir_fuzzer:ir_fuzz_domain",
+        "//xls/fuzzer/ir_fuzzer:reproducer_repo_files",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+    ],
+)

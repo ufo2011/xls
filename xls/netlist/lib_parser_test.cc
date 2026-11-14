@@ -14,12 +14,16 @@
 
 #include "xls/netlist/lib_parser.h"
 
+#include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 
-#include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
 #include "xls/common/status/matchers.h"
+#include "xls/common/status/status_macros.h"
 
 namespace xls {
 namespace netlist {
@@ -45,8 +49,7 @@ TEST(LibParserTest, ScanSimple) {
 // block structure.
 absl::StatusOr<std::unique_ptr<Block>> Parse(
     std::string text,
-    absl::optional<absl::flat_hash_set<std::string>> allowlist =
-        absl::nullopt) {
+    std::optional<absl::flat_hash_set<std::string>> allowlist = std::nullopt) {
   XLS_ASSIGN_OR_RETURN(auto cs, CharStream::FromText(text));
   Scanner scanner(&cs);
   Parser parser(&scanner, std::move(allowlist));

@@ -15,12 +15,14 @@
 #include "xls/netlist/find_logic_clouds.h"
 
 #include <memory>
+#include <string>
+#include <vector>
 
-#include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "absl/memory/memory.h"
 #include "xls/common/status/matchers.h"
+#include "xls/netlist/cell_library.h"
 #include "xls/netlist/fake_cell_library.h"
+#include "xls/netlist/netlist.h"
 #include "xls/netlist/netlist_parser.h"
 
 namespace xls {

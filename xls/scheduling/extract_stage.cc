@@ -15,6 +15,8 @@
 #include "xls/scheduling/extract_stage.h"
 
 #include <algorithm>
+#include <memory>
+#include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -22,12 +24,15 @@
 #include "absl/strings/str_format.h"
 #include "xls/common/status/status_macros.h"
 #include "xls/ir/node.h"
-#include "xls/ir/node_iterator.h"
 #include "xls/ir/nodes.h"
+#include "xls/ir/source_location.h"
+#include "xls/ir/topo_sort.h"
+#include "xls/scheduling/pipeline_schedule.h"
+#include "xls/scheduling/schedule_graph.h"
 
 namespace xls {
 
-absl::StatusOr<Function*> ExtractStage(Function* src,
+absl::StatusOr<Function*> ExtractStage(FunctionBase* src,
                                        const PipelineSchedule& schedule,
                                        int stage) {
   // Create a new function in the package which only contains the nodes at the
@@ -37,25 +42,61 @@ absl::StatusOr<Function*> ExtractStage(Function* src,
       absl::StrFormat("%s_stage_%d", src->name(), stage), package);
   absl::flat_hash_map<Node*, Node*> node_map;
   std::vector<Node*> live_out;
-  for (Node* node : TopoSort(src)) {
+  XLS_ASSIGN_OR_RETURN(std::vector<Node*> sorted_nodes, TopoSort(src));
+  for (Node* node : sorted_nodes) {
+    if (IsUntimed(node)) {
+      continue;
+    }
     if (schedule.cycle(node) == stage) {
       std::vector<Node*> new_operands;
       for (Node* operand : node->operands()) {
         if (node_map.contains(operand)) {
           new_operands.push_back(node_map.at(operand));
+        } else if (operand->Is<Literal>()) {
+          // Literals are "untimed", so we haven't added them yet. We don't want
+          // to treat literals as parameters because they are specialized in the
+          // delay model. Clone literals on demand.
+          Node* new_literal = new_f->AddNode(std::make_unique<Literal>(
+              operand->loc(), operand->As<Literal>()->value(),
+              operand->GetName(), new_f.get()));
+          node_map[operand] = new_literal;
+          new_operands.push_back(new_literal);
         } else {
           Node* new_param = new_f->AddNode(
-              absl::make_unique<Param>(operand->loc(), operand->GetName(),
-                                       operand->GetType(), new_f.get()));
+              std::make_unique<Param>(operand->loc(), operand->GetType(),
+                                      operand->GetName(), new_f.get()));
           node_map[operand] = new_param;
           new_operands.push_back(new_param);
         }
       }
-      XLS_ASSIGN_OR_RETURN(Node * new_node,
-                           node->CloneInNewFunction(new_operands, new_f.get()));
+      // hack to support viewing procs as functions
+      Node* new_node;
+      if (node->Is<StateRead>() || node->Is<Next>() || node->Is<Send>() ||
+          node->Is<Receive>()) {
+        // NB The fact that data-dependencies is dropped is fine since prior to
+        // this anything used by the Send or Next node is marked for return
+        // below.
+        new_node = new_f->AddNode(std::make_unique<xls::Param>(
+            node->loc(), node->GetType(), node->GetName(), new_f.get()));
+      } else {
+        XLS_ASSIGN_OR_RETURN(
+            new_node, node->CloneInNewFunction(new_operands, new_f.get()));
+        if (new_node->GetName() != node->GetName()) {
+          // When cloning nodes without names, we can and will end up with
+          // different ids. Because we're in the same package, we don't really
+          // want to set the new node's id to the name of the old node. As a
+          // compromise, we set the new node's name to the old node's name,
+          // which includes the id but has an underscore instead of a period.
+          new_node->SetName(node->GetName());
+        }
+      }
       node_map[node] = new_node;
-      if (std::any_of(node->users().begin(), node->users().end(),
-                      [&](Node* u) { return schedule.cycle(u) > stage; })) {
+      // NB This checks whether the value is *USED* by a send or next and
+      // returns it.
+      if (std::any_of(node->users().begin(), node->users().end(), [&](Node* u) {
+            return schedule.cycle(u) > stage || u->Is<Send>() ||
+                   u->Is<Next>() || new_f->HasImplicitUse(node);
+          })) {
         live_out.push_back(new_node);
       }
     }
@@ -65,14 +106,19 @@ absl::StatusOr<Function*> ExtractStage(Function* src,
   // which gathers all nodes scheduled in the stage that are live out.
   // The tuple will be the return value of the new function.
   // Otherwise, just use the mapped function output.
-  if (node_map.contains(src->return_value())) {
-    XLS_RETURN_IF_ERROR(new_f->set_return_value(node_map[src->return_value()]));
+  if (src->IsFunction() &&
+      node_map.contains(src->AsFunctionOrDie()->return_value())) {
+    XLS_RETURN_IF_ERROR(new_f->set_return_value(
+        node_map.at(src->AsFunctionOrDie()->return_value())));
   } else {
-    XLS_ASSIGN_OR_RETURN(Node * return_tuple,
-                         new_f->MakeNode<Tuple>(absl::nullopt, live_out));
-    XLS_RETURN_IF_ERROR(new_f->set_return_value(return_tuple));
+    if (live_out.size() == 1) {
+      XLS_RETURN_IF_ERROR(new_f->set_return_value(live_out.front()));
+    } else {
+      XLS_ASSIGN_OR_RETURN(Node * return_tuple,
+                           new_f->MakeNode<Tuple>(SourceInfo(), live_out));
+      XLS_RETURN_IF_ERROR(new_f->set_return_value(return_tuple));
+    }
   }
   return package->AddFunction(std::move(new_f));
 }
-
 }  // namespace xls

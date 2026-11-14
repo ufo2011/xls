@@ -22,6 +22,8 @@ namespace std {
 class iostream {
 
 };
+ostream cerr;
+const int endl = 1;
 
 }  // namespace std
 

@@ -16,13 +16,16 @@
 #define XLS_NOC_SIMULATION_PARAMETERS_H_
 
 #include <cstdint>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
-#include "absl/types/variant.h"
-#include "xls/common/logging/logging.h"
-#include "xls/common/status/ret_check.h"
 #include "xls/noc/config/network_config.pb.h"
 #include "xls/noc/simulation/common.h"
 
@@ -42,20 +45,6 @@ namespace noc {
 // TODO(tedhong): 2020-12-23 - Add a third abstraction that maps proto names
 //                             to network graph ids.
 
-// Interface to protos describing a network.
-class NetworkParam {
- public:
-  NetworkParam(const NetworkConfigProto& network) : network_proto_(&network) {}
-
-  absl::string_view GetName() const { return network_proto_->name(); }
-
-  // Get source proto for the network this link is in.
-  const NetworkConfigProto& GetNetworkProto() const { return *network_proto_; }
-
- private:
-  const NetworkConfigProto* network_proto_;
-};
-
 // Interface to protos describing a virtual channel
 struct VirtualChannelParam {
  public:
@@ -63,7 +52,7 @@ struct VirtualChannelParam {
                       const VirtualChannelConfigProto& vc)
       : network_proto_(&network), vc_proto_(&vc) {}
 
-  absl::string_view GetName() const { return vc_proto_->name(); }
+  std::string_view GetName() const { return vc_proto_->name(); }
 
   // Get depth of this virtual channel.
   //
@@ -73,7 +62,7 @@ struct VirtualChannelParam {
   // but not less.
   int64_t GetDepth() const { return vc_proto_->depth(); }
 
-  // Get bits used for th  if () e data in a single flit.
+  // Get bits used for the data in a single flit.
   int64_t GetFlitDataBitWidth() const { return vc_proto_->flit_bit_width(); }
 
   // Get assoicated network proto for this router.
@@ -89,13 +78,47 @@ struct VirtualChannelParam {
   const VirtualChannelConfigProto* vc_proto_;
 };
 
+// Interface to protos describing a network.
+class NetworkParam {
+ public:
+  explicit NetworkParam(const NetworkConfigProto& network)
+      : network_proto_(&network) {}
+
+  std::string_view GetName() const { return network_proto_->name(); }
+
+  // Get source proto for the network this link is in.
+  const NetworkConfigProto& GetNetworkProto() const { return *network_proto_; }
+
+  // Count of VCs associated with this port.
+  //  Could be 0 if no VCs sare used.
+  int64_t VirtualChannelCount() const {
+    return network_proto_->virtual_channels_size();
+  }
+
+  // Get the virtual channels used in the network.
+  std::vector<VirtualChannelParam> GetVirtualChannels() const {
+    std::vector<VirtualChannelParam> ret;
+
+    for (int64_t i = 0; i < VirtualChannelCount(); ++i) {
+      const VirtualChannelConfigProto& vc_proto =
+          network_proto_->virtual_channels().at(i);
+      ret.emplace_back(*network_proto_, vc_proto);
+    }
+
+    return ret;
+  }
+
+ private:
+  const NetworkConfigProto* network_proto_;
+};
+
 // Interface to protos describing a port.
 struct PortParam {
  public:
   PortParam(const NetworkConfigProto& network, const PortConfigProto& port)
       : network_proto_(&network), port_proto_(&port) {}
 
-  absl::string_view GetName() const { return port_proto_->name(); }
+  std::string_view GetName() const { return port_proto_->name(); }
 
   // Count of VCs associated with this port.
   //  Could be 0 if no VCs sare used.
@@ -107,7 +130,7 @@ struct PortParam {
   std::vector<VirtualChannelParam> GetVirtualChannels() const {
     std::vector<VirtualChannelParam> ret;
     for (int64_t i = 0; i < VirtualChannelCount(); ++i) {
-      absl::string_view vc_name = port_proto_->virtual_channels(i);
+      std::string_view vc_name = port_proto_->virtual_channels(i);
 
       const VirtualChannelConfigProto* vc_proto = nullptr;
       for (const VirtualChannelConfigProto& p :
@@ -116,7 +139,7 @@ struct PortParam {
           vc_proto = &p;
         }
       }
-      XLS_CHECK(vc_proto != nullptr);  // The VC should be configured.
+      CHECK(vc_proto != nullptr);  // The VC should be configured.
       ret.emplace_back(*network_proto_, *vc_proto);
     }
     return ret;
@@ -139,7 +162,7 @@ struct LinkParam {
   LinkParam(const NetworkConfigProto& network, const LinkConfigProto& link)
       : network_proto_(&network), link_proto_(&link) {}
 
-  absl::string_view GetName() const { return link_proto_->name(); }
+  std::string_view GetName() const { return link_proto_->name(); }
 
   // Get pipeline stages from source to sink.
   int64_t GetSourceToSinkPipelineStages() const {
@@ -173,7 +196,7 @@ class NetworkInterfaceSrcParam {
                            const PortConfigProto& port)
       : network_proto_(&network), port_proto_(&port) {}
 
-  absl::string_view GetName() const { return port_proto_->name(); }
+  std::string_view GetName() const { return port_proto_->name(); }
 
   // Returns associated port param
   PortParam GetPortParam() const {
@@ -204,7 +227,7 @@ class NetworkInterfaceSinkParam {
   // Returns number of flits this network interface can buffer.
   int64_t GetDepth() const { return depth_; }
 
-  absl::string_view GetName() const { return port_proto_->name(); }
+  std::string_view GetName() const { return port_proto_->name(); }
 
   // Construct associated port param
   PortParam GetPortParam() const {
@@ -232,7 +255,7 @@ class RouterParam {
               const RouterConfigProto& router)
       : network_proto_(&network), router_proto_(&router) {}
 
-  absl::string_view GetName() const { return router_proto_->name(); }
+  std::string_view GetName() const { return router_proto_->name(); }
 
   // Get assoicated network proto for this router.
   const NetworkConfigProto& GetNetworkProto() const { return *network_proto_; }
@@ -248,8 +271,8 @@ class RouterParam {
 // Variant used to store all possible param objects for
 // each type of network component.
 using NetworkComponentParam =
-    absl::variant<NetworkInterfaceSrcParam, NetworkInterfaceSinkParam,
-                  RouterParam, LinkParam>;
+    std::variant<NetworkInterfaceSrcParam, NetworkInterfaceSinkParam,
+                 RouterParam, LinkParam>;
 
 // Associates Param objects with NetworkGraph objects.
 class NocParameters {

@@ -14,52 +14,154 @@
 
 # Common utilities shared among XLA subfolders.
 
-# pytype test and library
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//xls/build_rules:py_oss_defs.bzl", "pytype_strict_contrib_test", "pytype_strict_library")
+load("//xls/build_rules:xls_cc_embed_data_rules.bzl", "xls_cc_embed_data")
 
 package(
+    default_applicable_licenses = ["//:license"],
     default_visibility = ["//xls:xls_internal"],
+    features = [
+        "layering_check",
+        "parse_headers",
+    ],
     licenses = ["notice"],  # Apache 2.0
+)
+
+cc_library(
+    name = "attribute_data",
+    srcs = ["attribute_data.cc"],
+    hdrs = ["attribute_data.h"],
+)
+
+cc_library(
+    name = "timeout_support",
+    srcs = ["timeout_support.cc"],
+    hdrs = ["timeout_support.h"],
+    deps = [
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_library(
+    name = "iter_util",
+    hdrs = ["iter_util.h"],
+    deps = ["@abseil-cpp//absl/types:span"],
+)
+
+cc_test(
+    name = "iter_util_test",
+    srcs = ["iter_util_test.cc"],
+    deps = [
+        ":iter_util",
+        ":xls_gunit_main",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "sorted_vector",
+    hdrs = ["sorted_vector.h"],
+)
+
+cc_test(
+    name = "sorted_vector_test",
+    srcs = ["sorted_vector_test.cc"],
+    deps = [
+        ":sorted_vector",
+        ":xls_gunit_main",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest",
+    ],
 )
 
 cc_library(
     name = "bits_util",
     hdrs = ["bits_util.h"],
     deps = [
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
 cc_library(
-    name = "proto_adaptor_utils",
-    hdrs = ["proto_adaptor_utils.h"],
+    name = "random_util",
+    hdrs = ["random_util.h"],
     deps = [
-        "@com_google_absl//absl/strings",
-    ],
-)
-
-cc_test(
-    name = "proto_adaptor_utils_test",
-    srcs = ["proto_adaptor_utils_test.cc"],
-    deps = [
-        ":proto_adaptor_utils",
-        ":xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/random:bit_gen_ref",
     ],
 )
 
 cc_library(
-    name = "casts",
-    hdrs = ["casts.h"],
+    name = "proto_test_utils",
+    testonly = True,
+    hdrs = ["proto_test_utils.h"],
+    deps = [
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest",
+        "@protobuf",
+        "@protobuf//:differencer",
+    ],
+)
+
+proto_library(
+    name = "matcher_test_messages_proto",
+    srcs = ["testdata/matcher_test_messages.proto"],
+)
+
+cc_proto_library(
+    name = "matcher_test_messages_cc_proto",
+    deps = [":matcher_test_messages_proto"],
 )
 
 cc_test(
-    name = "casts_test",
-    srcs = ["casts_test.cc"],
+    name = "proto_test_utils_test",
+    srcs = ["proto_test_utils_test.cc"],
     deps = [
-        ":casts",
+        ":matcher_test_messages_cc_proto",
+        ":proto_test_utils",
         ":xls_gunit_main",
-        "@com_google_absl//absl/base",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
+        "@protobuf",
+    ],
+)
+
+cc_library(
+    name = "case_converters",
+    srcs = ["case_converters.cc"],
+    hdrs = ["case_converters.h"],
+    deps = [
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "xls_gunit_sample",
+    srcs = ["xls_gunit_sample.cc"],
+    deps = [
+        ":xls_gunit_main",
+        "@google_benchmark//:benchmark",
+        "@googletest//:gtest",
+    ],
+)
+
+pytype_strict_contrib_test(
+    name = "xls_gunit_sample_test",
+    srcs = ["xls_gunit_sample_test.py"],
+    data = [":xls_gunit_sample"],
+    deps = [
+        ":runfiles",
+        "@abseil-py//absl/testing:absltest",
     ],
 )
 
@@ -68,37 +170,81 @@ cc_library(
     srcs = ["indent.cc"],
     hdrs = ["indent.h"],
     deps = [
-        "@com_google_absl//absl/strings",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "gunit_init_xls",
+    testonly = True,
+    srcs = ["gunit_init_xls.cc"],
+    hdrs = ["gunit_init_xls.h"],
+    deps = [
+        ":init_xls",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "benchmark_support",
+    testonly = True,
+    srcs = ["benchmark_support.cc"],
+    hdrs = ["benchmark_support.h"],
+    visibility = ["//xls:xls_utility_users"],
+    deps = [
+        "@abseil-cpp//absl/flags:flag",
+        "@google_benchmark//:benchmark",
     ],
 )
 
 cc_library(
     name = "init_xls",
     srcs = ["init_xls.cc"],
-    hdrs = ["init_xls.h"],
-    deps = [
-        "@com_google_absl//absl/strings",
-        "//xls/common/file:get_runfile_path",
-        "//xls/common/logging",
-        "//xls/common/logging:vlog_is_on",
-        "@com_google_absl//absl/flags:parse",
+    hdrs = [
+        "build_embed.h",
+        "init_xls.h",
     ],
+    linkstamp = "build_embed.cc",
+    visibility = ["//xls:xls_utility_users"],
+    deps = [
+        "@abseil-cpp//absl/flags:config",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/flags:usage",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/log:flags",
+        "@abseil-cpp//absl/log:initialize",
+    ],
+)
+
+cc_library(
+    name = "exit_status",
+    srcs = ["exit_status.cc"],
+    hdrs = ["exit_status.h"],
+    visibility = ["//xls:xls_utility_users"],
+    deps = ["@abseil-cpp//absl/status"],
 )
 
 cc_library(
     name = "math_util",
     srcs = ["math_util.cc"],
     hdrs = ["math_util.h"],
-    deps = ["//xls/common/logging"],
+    visibility = ["//xls:xls_utility_users"],
+    deps = [
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/types:span",
+    ],
 )
 
 cc_test(
     name = "math_util_test",
     srcs = ["math_util_test.cc"],
+    shard_count = 3,
     deps = [
         ":math_util",
         ":xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "//xls/common/fuzzing:fuzztest",
+        "@abseil-cpp//absl/base:core_headers",
+        "@googletest//:gtest",
     ],
 )
 
@@ -114,16 +260,14 @@ cc_test(
     deps = [
         ":module_initializer",
         ":xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
 cc_library(
     name = "source_location",
     hdrs = ["source_location.h"],
-    deps = [
-        "@com_google_absl//absl/base:config",
-    ],
+    deps = ["@abseil-cpp//absl/types:source_location"],
 )
 
 cc_test(
@@ -133,7 +277,123 @@ cc_test(
     deps = [
         ":source_location",
         ":xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_binary(
+    name = "subprocess_helper",
+    srcs = ["subprocess_helper.cc"],
+    deps = [
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+xls_cc_embed_data(
+    name = "subprocess_helper_embedded",
+    data = ":subprocess_helper",
+)
+
+# Select a chdir API supported by the toolchain and deployment target. "auto"
+# uses Darwin's availability adapter on macOS and the wrapper on Linux, keeping
+# compatibility with older libc versions. Explicit choices require the standard
+# POSIX.1-2024 action ("posix") or glibc >= 2.29 ("glibc"). For example:
+#   --//xls/common:subprocess_chdir=glibc
+string_flag(
+    name = "subprocess_chdir",
+    build_setting_default = "auto",
+    values = [
+        "auto",
+        "posix",
+        "glibc",
+    ],
+)
+
+config_setting(
+    name = "subprocess_chdir_darwin",
+    constraint_values = ["@platforms//os:osx"],
+    flag_values = {":subprocess_chdir": "auto"},
+)
+
+config_setting(
+    name = "subprocess_chdir_posix",
+    flag_values = {":subprocess_chdir": "posix"},
+)
+
+config_setting(
+    name = "subprocess_chdir_glibc",
+    constraint_values = ["@platforms//os:linux"],
+    flag_values = {":subprocess_chdir": "glibc"},
+)
+
+config_setting(
+    name = "subprocess_wrapper_enabled",
+    constraint_values = ["@platforms//os:linux"],
+    flag_values = {":subprocess_chdir": "auto"},
+)
+
+cc_library(
+    name = "subprocess_for_os",
+    srcs = select({
+        ":subprocess_chdir_darwin": [
+            "subprocess_chdir_darwin.cc",
+            "subprocess_posix.cc",
+        ],
+        ":subprocess_chdir_posix": [
+            "subprocess_chdir_posix.cc",
+            "subprocess_posix.cc",
+        ],
+        ":subprocess_chdir_glibc": [
+            "subprocess_chdir_glibc.cc",
+            "subprocess_posix.cc",
+        ],
+        ":subprocess_wrapper_enabled": ["subprocess_with_wrapper.cc"],
+    }),
+    hdrs = [
+        "subprocess_chdir.h",
+        "subprocess_for_os.h",
+    ],
+    local_defines = select({
+        ":subprocess_chdir_glibc": ["_GNU_SOURCE"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":strerror",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ] + select({
+        ":subprocess_chdir_darwin": [],
+        ":subprocess_chdir_posix": [],
+        ":subprocess_chdir_glibc": [],
+        ":subprocess_wrapper_enabled": [
+            ":subprocess_helper_embedded",
+            "//xls/common/file:file_descriptor",
+            "//xls/common/status:status_macros",
+        ],
+    }),
+)
+
+cc_test(
+    name = "subprocess_for_os_test",
+    srcs = ["subprocess_for_os_test.cc"],
+    data = [":subprocess_helper"],
+    deps = [
+        ":subprocess_for_os",
+        ":xls_gunit_main",
+        "//xls/common/file:filesystem",
+        "//xls/common/file:get_runfile_path",
+        "//xls/common/file:temp_directory",
+        "//xls/common/status:matchers",
+        "@abseil-cpp//absl/cleanup",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest",
     ],
 )
 
@@ -143,27 +403,42 @@ cc_library(
     hdrs = ["subprocess.h"],
     deps = [
         ":strerror",
-        "@com_google_absl//absl/container:fixed_array",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
-        "@com_google_absl//absl/types:span",
+        ":subprocess_for_os",
+        ":thread",
         "//xls/common/file:file_descriptor",
-        "//xls/common/logging",
         "//xls/common/logging:log_lines",
         "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/cleanup",
+        "@abseil-cpp//absl/container:fixed_array",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
 cc_test(
     name = "subprocess_test",
     srcs = ["subprocess_test.cc"],
+    data = [":subprocess_helper"],
     deps = [
         ":subprocess",
         ":xls_gunit_main",
+        "//xls/common/file:get_runfile_path",
+        "//xls/common/file:temp_directory",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@abseil-cpp//absl/cleanup",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+        "@googletest//:gtest",
     ],
 )
 
@@ -171,7 +446,7 @@ cc_library(
     name = "strerror",
     srcs = ["strerror.cc"],
     hdrs = ["strerror.h"],
-    deps = ["@com_google_absl//absl/strings:str_format"],
+    deps = ["@abseil-cpp//absl/strings:str_format"],
 )
 
 cc_test(
@@ -180,7 +455,7 @@ cc_test(
     deps = [
         ":strerror",
         ":xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -188,9 +463,8 @@ cc_library(
     name = "strong_int",
     hdrs = ["strong_int.h"],
     deps = [
-        "@com_google_absl//absl/base:core_headers",
-        "@com_google_absl//absl/meta:type_traits",
-        "@com_google_absl//absl/strings",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/meta:type_traits",
     ],
 )
 
@@ -199,13 +473,14 @@ cc_library(
     srcs = ["string_to_int.cc"],
     hdrs = ["string_to_int.h"],
     deps = [
-        "@com_google_absl//absl/numeric:int128",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
-        "//xls/common/logging",
         "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/numeric:int128",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
     ],
 )
 
@@ -215,10 +490,11 @@ cc_test(
     deps = [
         ":string_to_int",
         ":xls_gunit_main",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest",
     ],
 )
 
@@ -228,9 +504,9 @@ cc_test(
     deps = [
         ":strong_int",
         ":xls_gunit_main",
-        "@com_google_absl//absl/container:node_hash_map",
-        "@com_google_absl//absl/hash:hash_testing",
-        "@com_google_googletest//:gtest",
+        "@abseil-cpp//absl/container:node_hash_map",
+        "@abseil-cpp//absl/hash:hash_testing",
+        "@googletest//:gtest",
     ],
 )
 
@@ -239,9 +515,9 @@ cc_library(
     srcs = ["symbolized_stacktrace.cc"],
     hdrs = ["symbolized_stacktrace.h"],
     deps = [
-        "@com_google_absl//absl/debugging:stacktrace",
-        "@com_google_absl//absl/debugging:symbolize",
-        "@com_google_absl//absl/strings:str_format",
+        "@abseil-cpp//absl/debugging:stacktrace",
+        "@abseil-cpp//absl/debugging:symbolize",
+        "@abseil-cpp//absl/strings:str_format",
     ],
 )
 
@@ -251,7 +527,7 @@ cc_test(
     deps = [
         ":symbolized_stacktrace",
         ":xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -272,97 +548,233 @@ cc_test(
     deps = [
         ":visitor",
         ":xls_gunit_main",
-        "@com_google_absl//absl/types:variant",
-        "@com_google_googletest//:gtest",
+        "@abseil-cpp//absl/types:variant",
+        "@googletest//:gtest",
     ],
 )
 
-py_library(
+cc_library(
+    name = "type_traits_utils",
+    hdrs = ["type_traits_utils.h"],
+)
+
+cc_test(
+    name = "type_traits_utils_test",
+    srcs = ["type_traits_utils_test.cc"],
+    deps = [
+        ":type_traits_utils",
+        ":xls_gunit_main",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "to_string_utils",
+    srcs = ["to_string_utils.cc"],
+    hdrs = ["to_string_utils.h"],
+    deps = [
+        ":type_traits_utils",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "to_string_utils_test",
+    srcs = ["to_string_utils_test.cc"],
+    deps = [
+        ":to_string_utils",
+        ":xls_gunit_main",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "comparison_utils",
+    hdrs = ["comparison_utils.h"],
+    deps = [
+        ":to_string_utils",
+        ":type_traits_utils",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "comparison_utils_test",
+    srcs = ["comparison_utils_test.cc"],
+    deps = [
+        ":comparison_utils",
+        ":xls_gunit_main",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_test(
+    name = "golden_files_test",
+    srcs = ["golden_files_test.cc"],
+    data = glob([
+        "testdata/golden_files_*",
+    ]),
+    deps = [
+        ":golden_files",
+        ":xls_gunit_main",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest",
+    ],
+)
+
+pytype_strict_library(
     name = "xls_error",
     srcs = ["xls_error.py"],
 )
 
-py_library(
+pytype_strict_library(
     name = "memoize",
     srcs = ["memoize.py"],
-    srcs_version = "PY2AND3",
 )
 
 cc_library(
     name = "iterator_range",
     hdrs = ["iterator_range.h"],
-    deps = [
-        "@com_google_absl//absl/base:config",
-    ],
 )
 
-py_library(
+pytype_strict_library(
     name = "runfiles",
     srcs = ["runfiles.py"],
-    srcs_version = "PY3",
     deps = [
         "@rules_python//python/runfiles",
     ],
 )
 
-py_library(
-    name = "multiprocess",
-    srcs = ["multiprocess.py"],
-    srcs_version = "PY3",
-    deps = ["@com_google_absl_py//absl:app"],
+pytype_strict_library(
+    name = "golden_files_py",
+    testonly = True,
+    srcs = ["golden_files.py"],
+    deps = [
+        ":runfiles",
+        "@abseil-py//absl/flags",
+        "@abseil-py//absl/logging",
+    ],
 )
 
-py_test(
+pytype_strict_library(
+    name = "multiprocess",
+    srcs = ["multiprocess.py"],
+    deps = ["@abseil-py//absl:app"],
+)
+
+pytype_strict_contrib_test(
     name = "runfiles_test",
     srcs = ["runfiles_test.py"],
     data = [
         "testdata/bar.txt",
         "testdata/foo.txt",
     ],
-    python_version = "PY3",
     deps = [
         ":runfiles",
-        "@com_google_absl_py//absl/testing:absltest",
+        "@abseil-py//absl/testing:absltest",
     ],
 )
 
-py_library(
+pytype_strict_library(
     name = "test_base",
     srcs = ["test_base.py"],
-    srcs_version = "PY2AND3",
-    deps = [
-        "@com_google_absl_py//absl/testing:absltest",
-        "//xls/common/python:init_xls",
-    ],
+    deps = ["@abseil-py//absl/testing:absltest"],
 )
 
 cc_library(
-    name = "update_golden_files",
+    name = "update_golden_files_flag",
     testonly = True,
-    hdrs = ["update_golden_files.inc"],
+    hdrs = ["update_golden_files_flag.inc"],
+    deps = ["@abseil-cpp//absl/flags:flag"],
 )
 
-py_library(
+pytype_strict_library(
     name = "gfile",
     srcs = ["gfile.py"],
 )
 
-py_library(
-    name = "check_simulator",
-    srcs = ["check_simulator.py"],
-)
-
-py_library(
+cc_library(
     name = "revision",
-    srcs = ["revision.py"],
+    srcs = ["revision.cc"],
+    hdrs = ["revision.h"],
 )
 
 cc_library(
     name = "xls_gunit_main",
     testonly = True,
     srcs = ["xls_gunit_main.cc"],
+    visibility = ["//xls:xls_utility_users"],
     deps = [
-        ":init_xls",
-        "@com_google_googletest//:gtest",
+        ":benchmark_support",
+        ":gunit_init_xls",
+        "@com_google_fuzztest//fuzztest:init_fuzztest",
+        "@googletest//:gtest",
     ],
+    alwayslink = True,
+)
+
+cc_library(
+    name = "golden_files",
+    testonly = True,
+    srcs = ["golden_files.cc"],
+    hdrs = ["golden_files.h"],
+    deps = [
+        ":source_location",
+        ":update_golden_files_flag",
+        "//xls/common/file:filesystem",
+        "//xls/common/file:get_runfile_path",
+        "//xls/common/status:matchers",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "stopwatch",
+    srcs = ["stopwatch.cc"],
+    hdrs = ["stopwatch.h"],
+    deps = [
+        "@abseil-cpp//absl/base:no_destructor",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_test(
+    name = "stopwatch_test",
+    srcs = ["stopwatch_test.cc"],
+    deps = [
+        ":stopwatch",
+        ":xls_gunit_main",
+        "//xls/common/fuzzing:fuzztest",
+        "@abseil-cpp//absl/time",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "undeclared_outputs",
+    testonly = True,
+    srcs = ["undeclared_outputs.cc"],
+    hdrs = ["undeclared_outputs.h"],
+)
+
+bzl_library(
+    name = "openroad_warnings_bzl",
+    srcs = ["openroad_warnings.bzl"],
+)
+
+cc_library(
+    name = "pointer_utils",
+    hdrs = ["pointer_utils.h"],
 )

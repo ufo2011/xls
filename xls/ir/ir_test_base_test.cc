@@ -14,11 +14,17 @@
 
 #include "xls/ir/ir_test_base.h"
 
+#include <memory>
+#include <string_view>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest-spi.h"
 #include "gtest/gtest.h"
-#include "absl/strings/string_view.h"
 #include "xls/common/status/matchers.h"
+#include "xls/data_structures/leaf_type_tree.h"
+#include "xls/ir/function_base.h"
+#include "xls/ir/ternary.h"
+#include "xls/ir/type.h"
 
 namespace xls {
 namespace {
@@ -28,7 +34,7 @@ class IrTestBaseTest : public IrTestBase {
   static constexpr char kTestPackage[] = R"(
 package test_package
 
-fn main(p: bits[8], q: bits[8]) -> bits[8] {
+top fn main(p: bits[8], q: bits[8]) -> bits[8] {
   add.1: bits[8] = add(p, q)
   ret add.2: bits[8] = add(add.1, q)
 }
@@ -39,7 +45,7 @@ fn main(p: bits[8], q: bits[8]) -> bits[8] {
     XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedPackage> p,
                              ParsePackage(kTestPackage));
     // Set an id to a duplicate value.
-    FindNode("add.2", p.get())->set_id(1);
+    FindNode("add.2", p.get())->SetId(1);
   }
 };
 
@@ -55,30 +61,34 @@ TEST_F(IrTestBaseTest, ValidVerifiedPackageSucceeds) {
   XLS_ASSERT_OK(ParsePackage(kTestPackage).status());
 }
 
-TEST_F(IrTestBaseTest, RunAndExpectEqRightValue) {
-  RunAndExpectEq({{"p", 3}, {"q", 10}}, 23, kTestPackage);
+TEST_F(IrTestBaseTest, HasNodes) {
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedPackage> p,
+                           ParsePackage(kTestPackage));
+
+  EXPECT_TRUE(HasNode("p", p.get()));
+  EXPECT_TRUE(HasNode("q", p.get()));
+  EXPECT_TRUE(HasNode("add.1", p.get()));
+  EXPECT_TRUE(HasNode("add.2", p.get()));
+
+  FunctionBase* f = FindFunction("main", p.get());
+  EXPECT_TRUE(HasNode("p", f));
+  EXPECT_TRUE(HasNode("q", f));
+  EXPECT_TRUE(HasNode("add.1", f));
+  EXPECT_TRUE(HasNode("add.2", f));
 }
 
-TEST_F(IrTestBaseTest, RunAndExpectEqWrongValue) {
-  EXPECT_FATAL_FAILURE(RunAndExpectEq({{"p", 3}, {"q", 10}}, 55, kTestPackage),
-                       "bits[8]:55 != bits[8]:23");
-}
-
-TEST_F(IrTestBaseTest, RunAndExpectEqArgDoesNotFit) {
-  EXPECT_FATAL_FAILURE(
-      RunAndExpectEq({{"p", 12345}, {"q", 10}}, 23, kTestPackage),
-      "Argument value 12345 for parameter 'p' does not fit in type bits[8]");
-}
-
-TEST_F(IrTestBaseTest, RunAndExpectEqExpectedResultDoesNotFit) {
-  EXPECT_FATAL_FAILURE(
-      RunAndExpectEq({{"p", 3}, {"q", 10}}, 12345, kTestPackage),
-      "Value 12345 does not fit in return type bits[8]");
-}
-
-TEST_F(IrTestBaseTest, RunAndExpectEqMissingArg) {
-  EXPECT_FATAL_FAILURE(RunAndExpectEq({{"p", 3}}, 10, kTestPackage),
-                       "Missing argument 'q'");
+TEST_F(IrTestBaseTest, Matchers) {
+  auto p = CreatePackage();
+  Type* type = p->GetArrayType(2, p->GetBitsType(2));
+  LeafTypeTree<TernaryVector> ltt(
+      type, {TernaryVector{TernaryValue::kKnownOne, TernaryValue::kKnownZero},
+             TernaryVector{TernaryValue::kUnknown, TernaryValue::kKnownOne}});
+  EXPECT_THAT(ltt, LttIs<TernaryVector>(
+                       ElementsAre(TernaryIs("0b01"), TernaryIs("0b1X"))));
+  EXPECT_THAT(ltt,
+              LttIs<TernaryVector>(ElementsAre(testing::_, TernaryIs("0b1X"))));
+  EXPECT_THAT(ltt, LttIs<TernaryVector>(ElementsAre(
+                       testing::Not(TernaryIs("0b00")), TernaryIs("0b1X"))));
 }
 
 }  // namespace

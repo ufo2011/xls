@@ -1,0 +1,99 @@
+# Copyright 2025 The XLS Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    features = [
+        "layering_check",
+        "parse_headers",
+    ],
+    licenses = ["notice"],  # Apache 2.0
+)
+
+cc_library(
+    name = "warn_on_defined_but_unused",
+    srcs = ["warn_on_defined_but_unused.cc"],
+    hdrs = ["warn_on_defined_but_unused.h"],
+    deps = [
+        "//xls/common/status:ret_check",
+        "//xls/common/status:status_macros",
+        "//xls/dslx:warning_collector",
+        "//xls/dslx:warning_kind",
+        "//xls/dslx/frontend:ast",
+        "//xls/dslx/frontend:ast_utils",
+        "//xls/dslx/type_system:type",
+        "//xls/dslx/type_system:type_info",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "warn_on_defined_but_unused_test",
+    srcs = ["warn_on_defined_but_unused_test.cc"],
+    deps = [
+        ":warn_on_defined_but_unused",
+        "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
+        "//xls/dslx:create_import_data",
+        "//xls/dslx:import_data",
+        "//xls/dslx:parse_and_typecheck",
+        "//xls/dslx:warning_collector",
+        "//xls/dslx:warning_kind",
+        "//xls/dslx/frontend:ast",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "format_type_mismatch",
+    srcs = ["format_type_mismatch.cc"],
+    hdrs = ["format_type_mismatch.h"],
+    deps = [
+        "//xls/common:visitor",
+        "//xls/common/status:ret_check",
+        "//xls/common/status:status_macros",
+        "//xls/dslx/frontend:pos",
+        "//xls/dslx/type_system:type",
+        "//xls/dslx/type_system:zip_types",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:variant",
+    ],
+)
+
+cc_test(
+    name = "format_type_mismatch_test",
+    srcs = ["format_type_mismatch_test.cc"],
+    deps = [
+        ":format_type_mismatch",
+        "//xls/common:xls_gunit_main",
+        "//xls/common/status:matchers",
+        "//xls/dslx:channel_direction",
+        "//xls/dslx/frontend:ast",
+        "//xls/dslx/frontend:module",
+        "//xls/dslx/frontend:pos",
+        "//xls/dslx/type_system:type",
+        "@googletest//:gtest",
+    ],
+)

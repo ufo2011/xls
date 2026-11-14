@@ -1,0 +1,124 @@
+// Copyright 2023 The XLS Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef XLS_DSLX_IR_CONVERT_CONVERT_OPTIONS_H_
+#define XLS_DSLX_IR_CONVERT_CONVERT_OPTIONS_H_
+
+#include <bitset>
+#include <cstddef>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "xls/dslx/warning_kind.h"
+#include "xls/ir/channel.h"
+
+namespace xls::dslx {
+
+// Kinds of automatically generated cover ops that can be synthesized during
+// IR conversion (as opposed to explicit `cover!()` ops, which are governed by
+// `ConvertOptions::emit_cover`). New auto-coverage functionality should add a
+// kind here, before the `kCount` sentinel.
+enum class AutoCoverKind {
+  kBranch,  // One cover op per if/else branch and match arm.
+  kCount,   // Sentinel; must remain the last enumerator.
+};
+
+// A growable set of `AutoCoverKind` values backed by a fixed bitmask.
+//
+// `ConvertOptions` is used to form shared option constants (e.g. in tests), so
+// it must remain a literal type; a hash-based container is not
+// constexpr-constructible, while this type is. The bitset is sized directly
+// from the enum, so adding a kind automatically grows it and can never
+// overflow.
+class AutoCoverKindSet {
+ public:
+  constexpr AutoCoverKindSet() = default;
+
+  void Insert(AutoCoverKind kind) { bits_.set(Index(kind)); }
+
+  bool Contains(AutoCoverKind kind) const { return bits_.test(Index(kind)); }
+
+ private:
+  static constexpr std::size_t Index(AutoCoverKind kind) {
+    return static_cast<std::size_t>(kind);
+  }
+
+  std::bitset<static_cast<std::size_t>(AutoCoverKind::kCount)> bits_;
+};
+
+// Bundles together options (common among the API routines below) used in
+// DSLX-to-IR conversion.
+struct ConvertOptions {
+  // Whether to emit positional metadata into the output IR.
+  //
+  // Stripping positions can be useful for less fragile string matching in
+  // development, e.g. tests.
+  bool emit_positions = true;
+
+  // Whether to emit fail!() operations as predicated assertion IR nodes.
+  bool emit_assert = true;
+
+  // Whether to emit trace operations.
+  bool emit_trace = true;
+
+  // Whether to emit cover operations.
+  bool emit_cover = true;
+
+  // Which kinds of automatic cover ops to synthesize. Empty by default (no
+  // automatic covers).
+  AutoCoverKindSet emit_auto_cover;
+
+  // Whether an automatic cover of `kind` should be synthesized. Requires the
+  // kind to be enabled AND `emit_cover` (the master switch for all covers).
+  constexpr bool ShouldEmitAutoCover(AutoCoverKind kind) const {
+    return emit_cover && emit_auto_cover.Contains(kind);
+  }
+
+  // Should the generated IR be verified?
+  bool verify_ir = true;
+
+  // Should warnings be treated as errors?
+  bool warnings_as_errors = true;
+
+  // Set of warnings used in DSLX typechecking.
+  //
+  // Note that this is only used in IR conversion routines that do typechecking.
+  WarningKindSet warnings = kDefaultWarningsSet;
+
+  // Should #[test] and #[test_proc] entities be emitted to IR.
+  bool convert_tests = false;
+
+  // If present, the default FIFO config to use for any FIFO that does not
+  // specify a config.
+  std::optional<FifoConfig> default_fifo_config;
+
+  // Whether to use type system v2 to perform type checking.
+  bool type_inference_v2 = false;
+
+  // Should we generate proc-scoped channels without global channels as an
+  // intermediate step? See https://github.com/google/xls/issues/2078
+  bool lower_to_proc_scoped_channels = true;
+
+  // Force every DSLX function to use the implicit-token calling convention,
+  // regardless of what type inference determined.
+  bool force_implicit_token_calling_convention = false;
+
+  // Configured values to override for use in IR conversion.
+  std::vector<std::string> configured_values;
+};
+
+}  // namespace xls::dslx
+
+#endif  // XLS_DSLX_IR_CONVERT_CONVERT_OPTIONS_H_

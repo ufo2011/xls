@@ -13,11 +13,17 @@
 // limitations under the License.
 #include "xls/ir/value_view.h"
 
-#include <cstdint>
+#include <strings.h>
 
-#include "gmock/gmock.h"
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <vector>
+
 #include "gtest/gtest.h"
+#include "absl/base/casts.h"
 #include "absl/status/status.h"
+#include "absl/types/span.h"
 #include "xls/common/bits_util.h"
 #include "xls/common/math_util.h"
 #include "xls/common/status/matchers.h"
@@ -25,7 +31,8 @@
 #include "xls/common/status/status_macros.h"
 #include "xls/ir/bits.h"
 #include "xls/ir/bits_ops.h"
-#include "xls/ir/value_helpers.h"
+#include "xls/ir/value.h"
+#include "xls/ir/value_utils.h"
 
 namespace xls {
 namespace {
@@ -109,12 +116,12 @@ TEST(PackedBitViewTest, ExtractsUnalignedReallyBigs) {
 
   BitsRope rope(kElementWidth + kBitOffset);
   for (int i = 0; i < kBitOffset; i++) {
-    rope.push_back(0);
+    rope.push_back(0);  // NOLINT(modernize-use-bool-literals)
   }
   int current_bit = 0;
   int current_byte = 0;
   for (int i = 0; i < kElementWidth; i++) {
-    rope.push_back(current_byte & (1 << current_bit));
+    rope.push_back((current_byte & (1 << current_bit)) != 0);
     if (current_bit == kCharBit) {
       current_byte++;
       current_bit = 0;
@@ -139,7 +146,7 @@ template <int64_t kBitWidth>
 absl::Status TestWidthAndOffset(int bit_offset) {
   BitsRope rope(kBitWidth + bit_offset);
   for (int i = 0; i < bit_offset; i++) {
-    rope.push_back(0);
+    rope.push_back(0);  // NOLINT(modernize-use-bool-literals)
   }
   int current_bit = 0;
   int current_byte = 0;
@@ -210,17 +217,16 @@ TEST(PackedArrayViewTest, ExtractsUnaligned) {
 
   BitsRope rope(kElementBits * kNumElements + kBitOffset);
   for (int i = 0; i < kBitOffset; i++) {
-    rope.push_back(0);
+    rope.push_back(0);  // NOLINT(modernize-use-bool-literals)
   }
 
   // Fill the n'th element with n (for each element).
   for (int i = 0; i < kNumElements; i++) {
     for (int j = 0; j < kElementBits; j++) {
-      rope.push_back(i & (1 << j));
+      rope.push_back((i & (1 << j)) != 0);
     }
   }
   std::vector<uint8_t> buffer = rope.Build().ToBytes();
-  std::reverse(buffer.begin(), buffer.end());
 
   PackedArrayView<PackedBitsView<kElementBits>, kNumElements> array_view(
       buffer.data(), kBitOffset);
@@ -241,12 +247,12 @@ TEST(PackedTupleViewTest, ExtractsSimpleUnaligned) {
 
   using SignT = PackedBitsView<1>;
   using ExpT = PackedBitsView<8>;
-  using SfdT = PackedBitsView<23>;
-  using TupleT = PackedTupleView<SignT, ExpT, SfdT>;
+  using FractionT = PackedBitsView<23>;
+  using TupleT = PackedTupleView<SignT, ExpT, FractionT>;
   BitsRope rope(TupleT::kBitCount + kBitOffset);
 
   for (int i = 0; i < kBitOffset; i++) {
-    rope.push_back(0);
+    rope.push_back(0);  // NOLINT(modernize-use-bool-literals)
   }
   // Iterate low-to-high, keeping LSb-first ordering.
   absl::Span<const Value> elements = value.elements();
@@ -259,7 +265,7 @@ TEST(PackedTupleViewTest, ExtractsSimpleUnaligned) {
 
   std::vector<uint8_t> buffer(CeilOfRatio(kValueBits + kBitOffset, kCharBit),
                               0);
-  rope.Build().ToBytes(absl::MakeSpan(buffer), false);
+  rope.Build().ToBytes(absl::MakeSpan(buffer));
 
   TupleT tuple_view(buffer.data(), kBitOffset);
   uint8_t sign_data = 0;
@@ -270,9 +276,9 @@ TEST(PackedTupleViewTest, ExtractsSimpleUnaligned) {
   tuple_view.Get<1>().Get(&exp_data);
   EXPECT_EQ(exp_data, value.element(1).bits().ToUint64().value());
 
-  uint32_t sfd_data = 0;
-  tuple_view.Get<2>().Get(reinterpret_cast<uint8_t*>(&sfd_data));
-  EXPECT_EQ(sfd_data, value.element(2).bits().ToUint64().value());
+  uint32_t fraction_data = 0;
+  tuple_view.Get<2>().Get(reinterpret_cast<uint8_t*>(&fraction_data));
+  EXPECT_EQ(fraction_data, value.element(2).bits().ToUint64().value());
 }
 
 }  // namespace

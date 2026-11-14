@@ -16,13 +16,19 @@
 
 #include "absl/status/statusor.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/ir/function_base.h"
+#include "xls/ir/node.h"
+#include "xls/ir/op.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/pass_base.h"
 
 namespace xls {
 
 // Identity Removal performs one forward pass over the nodes and replaces
 // identities with their respective operands.
 absl::StatusOr<bool> IdentityRemovalPass::RunOnFunctionBaseInternal(
-    FunctionBase* f, const PassOptions& options, PassResults* results) const {
+    FunctionBase* f, const OptimizationPassOptions& options,
+    PassResults* results, OptimizationContext& context) const {
   bool changed = false;
   for (Node* node : f->nodes()) {
     if (node->op() == Op::kIdentity) {

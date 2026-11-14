@@ -3,12 +3,11 @@
 [TOC]
 
 The XLS IR is a pure dataflow-oriented IR that has the static-single-assignment
-property, but is specialized for generating circuitry. Notably, it includes high
-level parallel patterns. The aim is to create effective circuit designs through
-a "lifted" understanding of the high-level operations and their semantics,
-instead of trying to reverse all relevant properties via dependence analysis,
-which often cannot take advantage of high level knowledge that the designer
-holds in their mind at design time.
+property, but is specialized for generating circuitry. The aim is to create
+effective circuit designs through a "lifted" understanding of the high-level
+operations and their semantics, instead of trying to reverse all relevant
+properties via dependence analysis, which often cannot take advantage of high
+level knowledge that the designer holds in their mind at design time.
 
 This document describes the semantics of the XLS intermediate representation
 (IR) including data types, operations, and textual representation.
@@ -25,9 +24,9 @@ A vector of bits with a fixed width.
 
 **Value syntax:**
 
-*   A literal decimal number. Example: `42`.
-*   A binary number prefixed with `0b`. Example: `0b10101`
-*   A hexadecimal number: `0x`. Example: `0xdeadbeef`
+-   A literal decimal number. Example: `42`.
+-   A binary number prefixed with `0b`. Example: `0b10101`
+-   A hexadecimal number: `0x`. Example: `0xdeadbeef`
 
 The representation may optionally include the bit width in which case the type
 is prefixed before the literal: `bits[N]:$literal`. Example: `bits[8]:0xab`.
@@ -35,23 +34,23 @@ is prefixed before the literal: `bits[N]:$literal`. Example: `bits[8]:0xab`.
 ### Array
 
 A one-dimensional array of elements of the same type with a fixed number of
-elements. An array can contain bits, arrays, or tuples as elements. May be empty
-(in which case the type of the array element cannot be automatically deduced).
+elements. An array can contain bits, arrays, or tuples as elements. Empty
+(zero-element) arrays are not supported.
 
 **Type syntax:**
 
 `$type[N]`: an array containing `N` elements of type `$type`. Examples:
 
-*   Two-element array of 8-bit bits type: `bits[8][2]`
-*   Three-element array of tuple type: `(bits[32], bits[2])[3]`
+-   Two-element array of 8-bit bits type: `bits[8][2]`
+-   Three-element array of tuple type: `(bits[32], bits[2])[3]`
 
 **Value syntax:**
 
 `[$value_1, ... , $value_N]` where `$value_n` is the value of the `n`-th
 element. Examples:
 
-*   Array of bits elements with explicit bit count: `[bits[8]:10, bits[8]:30]`
-*   Three-element array consisting of two-element arrays of bits elements: `[[1,
+-   Array of bits elements with explicit bit count: `[bits[8]:10, bits[8]:30]`
+-   Three-element array consisting of two-element arrays of bits elements: `[[1,
     2], [3, 4], [5, 6]]]`
 
 ### Tuple
@@ -69,8 +68,8 @@ types. tuples can contain bits, arrays, or tuples as elements. May be empty.
 `($value_{0}, ..., $value_{N-1})` where `$value_n` is the value of the `n`-th
 element. Examples:
 
-*   Tuple containing two bits elements: `(0b100, 0b101)`
-*   A nested tuple containing various element types: `((1, 2), 42, [5, 6])`
+-   Tuple containing two bits elements: `(0b100, 0b101)`
+-   A nested tuple containing various element types: `((1, 2), 42, [5, 6])`
 
 ### Token
 
@@ -81,6 +80,101 @@ has no correlate in hardware.
 **Type syntax:**
 
 `token`
+
+## Functions, procs, and blocks
+
+The XLS IR has three function-level abstractions each which hold a data-flow
+graph of XLS IR operations: *functions*, *procs*, and *blocks*. Names of
+function, procs and blocks must be unique among their respective abstractions
+(functions, procs, and blocks). For example, a block cannot share a name with
+another block but can share a name with a function.
+
+### Function
+
+A function is a stateless abstraction with a single-output which is computed
+from zero or more input parameters. May invoke other functions.
+
+### Proc
+
+A Proc is a stateful abstraction with an arbitrarily-typed recurrent state.
+Procs can communicate with other procs via channels which (abstractly) are
+infinite-depth FIFOs with flow control. Channel communication is handled via
+send and receive IR operations. Procs may invoke functions.
+
+TODO(meheff): 2021/11/04 Expand to include more details.
+
+### Block
+
+A Block is an RTL-level abstraction used for code generation. It corresponds to
+a single Verilog module. Procs and functions are converted to blocks as part of
+the code generation process. Blocks may “invoke” other blocks via instantiation.
+A block includes explicit representations of RTL constructs: ports, registers,
+and instantiations. The constructs are scoped within the block.
+
+#### Port
+
+A port is a representation of an input or output to the block. These correspond
+to ports on Verilog modules. Ports can be arbitrarily-typed. In the block, each
+port is represented with a `input_port` or `output_port` operation.
+
+#### Register
+
+A register is a representation of a hardware register (flop). Registers can be
+arbitrarily-typed. Each register must have a single `register_read` and one or
+more `register_write` operations for reading and writing the register
+respectively. Only a single `register_write` can fire each cycle.
+
+Each register may optionally specify a reset value. The reset signal and reset
+behavior (e.g., active low) is set as a block attribute. If specified the reset
+value must match the type of the register. If no reset behavior is specified
+then the `reset` argument of `register_write` must be unset.
+
+#### Instantiation
+
+An instantiation is a block-scoped construct that represents a module
+instantiation at the Verilog level. Three kinds of instantiations are supported:
+
+-   **block instantiation**: An instantiation of block defined elsewhere in the
+    package.
+
+-   **FIFO instantiation**: An instantiation of a FIFO. The instantiation
+    includes parameters of the FIFO such as depth and data type.
+
+-   **Delay line instantiation**: An instantiation of a delay line which is a
+    chain of registers of fixed length (the *latency*) extending from the input
+    port to the output port.
+
+-   **Extern instantiation**: An instantiation of an externally defined Verilog
+    module.
+
+Instantiations are integrated into the instantiating block with
+`instantiation_input` and `instantiation_output` operations. There is a
+one-to-one mapping between the instantiation input/output and the ports of the
+instantiated objects.
+
+#### Inner Attributes
+
+##### **`reset`**
+
+Defines the reset port and reset behavior of the block.
+
+**Syntax**
+
+```
+#![reset(port="<port>", asynchronous=<asynchronous>, active_low=<active_low>)]`
+```
+
+**Keyword arguments**
+
+<!-- mdformat off(multiline table cells not supported in mkdocs) -->
+
+| Keyword        | Description                                                                          |
+| -------------- | ------------------------------------------------------------------------------------ |
+| `port`         | Name of the reset input port.                                                        |
+| `asynchronous` | Boolean value (`true` or `false`) indicating whether the reset is asynchronous.      |
+| `active_low`   | Boolean value (`true` or `false`) indicating whether the reset signal is active-low. |
+
+<!-- mdformat on -->
 
 ## Operations
 
@@ -98,8 +192,8 @@ result = operation(pos_arg_0, ..., pos_arg_N, keyword_0=value0, ..., keyword_M=v
 
 <!-- mdformat off(multiline table cells not supported in mkdocs) -->
 
-| Keyword | Type             | Required | Default | Description           |
-| ------- | ---------------- | -------- | ------- | --------------------- |
+| Keyword | Type             | Required | Default | Description                                                                                                                          |
+| ------- | ---------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `pos`   | `SourceLocation` | no       |         | The source location associated with this operation. The syntax is a triplet of comma-separated integer values: `Fileno,Lineno,Colno` |
 
 <!-- mdformat on -->
@@ -132,30 +226,63 @@ Operation  | Opcode          | Semantics
 ### Variadic bitwise operations
 
 Performs a bit-wise operation on one-or-more identically-typed bits operands. If
-only a single argument is provided the operation is a no-op.
+only a single argument is provided, the operations `and`, `or`, and `xor` are a
+no-op, while `nand` and `nor` act as a bit-wise not.
 
 **Syntax**
 
 ```
 result = and(operand_{0}, ..., operand_{N-1})
+result = nand(operand_{0}, ..., operand_{N-1})
 result = or(operand_{0}, ..., operand_{N-1})
+result = nor(operand_{0}, ..., operand_{N-1})
 result = xor(operand_{0}, ..., operand_{N-1})
 ```
 
 **Types**
 
-Value            | Type
----------------- | ---------
-`operand_{i}`    | `bits[N]`
-`result`         | `bits[N]`
+Value         | Type
+------------- | ---------
+`operand_{i}` | `bits[N]`
+`result`      | `bits[N]`
 
 **Operations**
 
-Operation | Opcode     | Semantics
---------- | ---------- | ---------------------
-`and`     | `Op::kAnd` | `result = lhs & rhs & ...`
-`or`      | `Op::kOr`  | `result = lhs \| rhs \| ...`
-`xor`     | `Op::kXor` | `result = lhs ^ rhs ^ ...`
+Operation | Opcode      | Semantics
+--------- | ----------- | -------------------------------
+`and`     | `Op::kAnd`  | `result = lhs & rhs & ...`
+`nand`    | `Op::kNand` | `result = ~(lhs & rhs & ...)`
+`or`      | `Op::kOr`   | `result = lhs \| rhs \| ...`
+`nor`     | `Op::kNor`  | `result = ~(lhs \| rhs \| ...)`
+`xor`     | `Op::kXor`  | `result = lhs ^ rhs ^ ...`
+
+### Bitwise Reduction Operations
+
+Performs a bit-wise reduction operation on all bits of a single bits-typed
+operand, producing a single bit. For an operand of width 1, they act as no-ops.
+
+**Syntax**
+
+```
+result = and_reduce(operand)
+result = or_reduce(operand)
+result = xor_reduce(operand)
+```
+
+**Types**
+
+Value     | Type
+--------- | ---------
+`operand` | `bits[N]`
+`result`  | `bits[1]`
+
+**Operations**
+
+Operation    | Opcode           | Semantics
+------------ | ---------------- | ------------------------------------------
+`and_reduce` | `Op::kAndReduce` | `result = operand[0] & operand[1] & ...`
+`or_reduce`  | `Op::kOrReduce`  | `result = operand[0] \| operand[1] \| ...`
+`xor_reduce` | `Op::kXorReduce` | `result = operand[0] ^ operand[1] ^ ...`
 
 ### Arithmetic unary operations
 
@@ -192,54 +319,93 @@ result = add(lhs, rhs)
 result = smul(lhs, rhs)
 result = umul(lhs, rhs)
 result = sdiv(lhs, rhs)
+result = smod(lhs, rhs)
 result = sub(lhs, rhs)
 result = udiv(lhs, rhs)
+result = umod(lhs, rhs)
+result = smulp(lhs, rhs)
+result = umulp(lhs, rhs)
 ```
 
 **Types**
 
-Currently signed and unsigned multiply support arbitrary width operands and
-result. For all other arithmetic operations the operands and the result are the
-same width. The expectation is that all arithmetic operations will eventually
-support arbitrary widths.
+Currently signed and unsigned multiply, as wells as their partial product
+variants, support arbitrary width operands and result. For all other arithmetic
+operations the operands and the result are the same width. The expectation is
+that all arithmetic operations will eventually support arbitrary widths.
 
 **Operations**
 
-Operation | Opcode      | Semantics
---------- | ----------- | --------------------------------------------
-`add`     | `Op::kAdd`  | `result = lhs + rhs`
-`sdiv`    | `Op::kSDiv` | `result = $signed(lhs) / $signed(rhs)` * **
-`smod`    | `Op::kSMod` | `result = $signed(lhs) % $signed(rhs)` * ***
-`smul`    | `Op::kSMul` | `result = $signed(lhs) * $signed(rhs)`
-`sub`     | `Op::kSub`  | `result = lhs - rhs`
-`udiv`    | `Op::kUDiv` | `result = lhs / rhs` * **
-`umod`    | `Op::kUMod` | `result = lhs % rhs` *
-`umul`    | `Op::kUMul` | `result = lhs * rhs`
+<!-- mdformat off(multiline table cells not supported in mkdocs) -->
+
+| Operation | Opcode       | Semantics                                                      |
+| --------- | ------------ | -------------------------------------------------------------- |
+| `add`     | `Op::kAdd`   | `result = lhs + rhs`                                           |
+| `sdiv`    | `Op::kSDiv`  | `result = $signed(lhs) / $signed(rhs)` * \*\*                  |
+| `smod`    | `Op::kSMod`  | `result = $signed(lhs) % $signed(rhs)` * \*\*\*                |
+| `smul`    | `Op::kSMul`  | `result = $signed(lhs) * $signed(rhs)`                         |
+| `smulp`   | `Op::kSMulp` | `result[0] + result[1] = $signed(lhs) * $signed(rhs)` \*\*\*\* |
+| `sub`     | `Op::kSub`   | `result = lhs - rhs`                                           |
+| `udiv`    | `Op::kUDiv`  | `result = lhs / rhs` * \*\*                                    |
+| `umod`    | `Op::kUMod`  | `result = lhs % rhs` \*                                        |
+| `umul`    | `Op::kUMul`  | `result = lhs * rhs`                                           |
+| `umulp`   | `Op::kUMulp` | `result[0] + result[1] = lhs * rhs` \*\*\*\*                   |
+
+<!-- mdformat on -->
 
 \* Synthesizing division or modulus can lead to failing synthesis and/or
 problems with timing closure. It is usually best not to rely on this Verilog
 operator in practice, but instead explicitly instantiate a divider of choice.
 
-\** Division rounds toward zero. For unsigned division this is the same as
+\*\* Division rounds toward zero. For unsigned division this is the same as
 truncation. If the divisor is zero, unsigned division produces a maximal
 positive value. For signed division, if the divisor is zero the result is the
 maximal positive value if the dividend is non-negative or the maximal negative
 value if the dividend is negative.
 
-\*** The sign of the result of modulus matches the sign of the left operand. If
-the right operand is zero the result is zero.
+\*\*\* The sign of the result of modulus matches the sign of the left operand.
+If the right operand is zero the result is zero.
 
-### Comparison operations
+\*\*\*\* The partial product multiply variants return a two-element tuple with
+both elements having the same type. The outputs are not fully constrained; the
+operations are free to return any values that sum to the product `lhs * rhs`.
 
-Performs a comparison on a pair of identically-typed bits operands. Unsigned
-operations are prefixed with a 'u', and signed operations are prefixed with a
-'s'. Produces a result of bits[1] type.
+### Equality comparison operations
+
+Performs an equality comparison on a pair of identically-typed operands.
+Produces a result of bits[1] type.
 
 **Syntax**
 
 ```
 result = eq(lhs, rhs)
 result = ne(lhs, rhs)
+```
+
+**Types**
+
+Value    | Type
+-------- | ---------
+`lhs`    | `T`
+`rhs`    | `T`
+`result` | `bits[1]`
+
+**Operations**
+
+Operation | Opcode    | Semantics
+--------- | --------- | ---------------------
+`eq`      | `Op::kEq` | `result = lhs == rhs`
+`ne`      | `Op::kNe` | `result = lhs != rhs`
+
+### Numeric comparison operations
+
+Performs a numeric comparison on a pair of identically-typed bits operands.
+Unsigned operations are prefixed with a 'u', and signed operations are prefixed
+with a 's'. Produces a result of bits[1] type.
+
+**Syntax**
+
+```
 result = sge(lhs, rhs)
 result = sgt(lhs, rhs)
 result = sle(lhs, rhs)
@@ -262,8 +428,6 @@ Value    | Type
 
 Operation | Opcode     | Semantics
 --------- | ---------- | ---------------------
-`eq`      | `Op::kEq`  | `result = lhs == rhs`
-`ne`      | `Op::kNe`  | `result = lhs != rhs`
 `sge`     | `Op::kSGe` | `result = lhs >= rhs`
 `sgt`     | `Op::kSGt` | `result = lhs > rhs`
 `sle`     | `Op::kSLe` | `result = lhs <= rhs`
@@ -294,16 +458,17 @@ the shift amount may be arbitrary.
 **Operations**
 
 Operation | Opcode      | Semantics
---------- | ----------- | --------------------------------------------------
-`shll`    | `Op::kShll` | `result = lhs << rhs` *
-`shra`    | `Op::kShra` | `result = lhs >>> rhs` (arithmetic shift right) **
-`shrl`    | `Op::kShrl` | `result = lhs >> rhs` *
+--------- | ----------- | ----------------------------------------------------
+`shll`    | `Op::kShll` | `result = lhs << rhs` \*
+`shra`    | `Op::kShra` | `result = lhs >>> rhs` (arithmetic shift right) \*\*
+`shrl`    | `Op::kShrl` | `result = lhs >> rhs` \*
 
 \* Logically shifting greater than or equal to the number of bits in the `lhs`
 produces a result of zero.
 
-** Arithmetic right shifting greater than or equal to the number of bits in the
-`lhs` produces a result equal to all of the bits set to the sign of the `lhs`.
+\*\* Arithmetic right shifting greater than or equal to the number of bits in
+the `lhs` produces a result equal to all of the bits set to the sign of the
+`lhs`.
 
 ### Extension operations
 
@@ -336,8 +501,8 @@ filling zeroes in the most significant bits.
 Sign-extends a value: turns its bit-length into the new target bit-length by
 filling in the most significant bits (MSbs) with the following policy:
 
-*   ones in the MSbs if the MSb of the original value was set, or
-*   zeros in the MSbs if the MSb of the original value was unset.
+-   ones in the MSbs if the MSb of the original value was set, or
+-   zeros in the MSbs if the MSb of the original value was unset.
 
 ### Channel operations
 
@@ -347,55 +512,35 @@ in a single transaction.
 
 #### **`receive`**
 
-Receives data values from a specified channel. The number of data values `N` and
-their type is determined by the channel.
+Receives a data value from a specified channel. The type of the data value is
+determined by the channel. An optional predicate value conditionally enables the
+receive operation. An optional `blocking` attribute determines whether the
+receive operation is blocking. A blocking receive waits (or blocks) until valid
+data is present at the channel. Compared to a blocking receive, a non-blocking
+receive has an additional entry in its return tuple of type `bits[1]` denoting
+whether the data read is valid.
 
 ```
-result = receive(tkn, channel_id=<ch>)
-```
-
-**Types**
-
-Value    | Type
--------- | -------------------------------
-`tkn`    | `token`
-`result` | `(token, T_{0}, ... , T_{N-1})`
-
-**Keyword arguments**
-
-<!-- mdformat off(multiline table cells not supported in mkdocs) -->
-
-| Keyword      | Type    | Required | Default | Description              |
-| ------------ | ------- | -------- | ------- | ------------------------ |
-| `channel_id` | `int64_t` | yes      |         | The ID of the channel to receive data from |
-
-<!-- mdformat on -->
-
-#### **`receive_if`**
-
-Receives data values from a specified channel if and only if the predicate
-operand is true. The number of data values `N` and their type is determined by
-the channel.
-
-```
-result = receive_if(tkn, pred, channel_id=<ch>)
+result = receive(tkn, predicate=<pred>, blocking=<bool>, channel_id=<ch>)
 ```
 
 **Types**
 
 Value    | Type
--------- | -------------------------------
+-------- | ---------------------------------------------------------------
 `tkn`    | `token`
 `pred`   | `bits[1]`
-`result` | `(token, T_{0}, ... , T_{N-1})`
+`result` | `(token, T)` if `blocking` == `true` else `(token, T, bits[1])`
 
 **Keyword arguments**
 
 <!-- mdformat off(multiline table cells not supported in mkdocs) -->
 
-| Keyword      | Type    | Required | Default | Description              |
-| ------------ | ------- | -------- | ------- | ------------------------ |
-| `channel_id` | `int64_t` | yes      |         | The ID of the channel to receive data from |
+| Keyword      | Type      | Required | Default | Description                                 |
+| ------------ | --------- | -------- | ------- | ------------------------------------------- |
+| `predicate`  | `bits[1]` | no       |         | A value is received iff `predicate` is true |
+| `blocking`   | `bool`    | no       | `true`  | Whether the receive is blocking             |
+| `channel_id` | `int64_t` | yes      |         | The ID of the channel to receive data from  |
 
 <!-- mdformat on -->
 
@@ -403,62 +548,33 @@ If the predicate is false the data values in the result are zero-filled.
 
 #### **`send`**
 
-Sends data values to a specified channel. The number of data values `N` and
-their type is determined by the channel.
+Sends data to a specified channel. The type of the data values is determined by
+the channel. An optional predicate value conditionally enables the send
+operation.
 
 ```
-result = send(tkn, data_{0}, ..., data_{N-1}, channel_id=<ch>)
+result = send(tkn, data, predicate=<pred>, channel_id=<ch>)
 ```
 
 **Types**
 
-Value      | Type
----------- | -------
-`tkn`      | `token`
-`data_{i}` | `T_{i}`
-`result`   | `token`
+Value    | Type
+-------- | ---------
+`tkn`    | `token`
+`data`   | `T`
+`pred`   | `bits[1]`
+`result` | `token`
 
-The types of operands `data_{i}` and the number `N` must match the types and
-number of data elements supported by the channel.
+The type of `data` must match the type supported by the channel.
 
 **Keyword arguments**
 
 <!-- mdformat off(multiline table cells not supported in mkdocs) -->
 
-| Keyword      | Type    | Required | Default | Description                   |
-| ------------ | ------- | -------- | ------- | ----------------------------- |
-| `channel_id` | `int64_t` | yes      |         | The ID of the channel to send data to. |
-
-<!-- mdformat on -->
-
-#### **`send_if`**
-
-Sends data values to a specified channel if and only if the predicate operand is
-true. The number and type of data values is determined by the channel.
-
-```
-result = send_if(tkn, pred, data_{0}, ..., data_{N-1}, channel_id=<ch>)
-```
-
-**Types**
-
-Value      | Type
----------- | ---------
-`tkn`      | `token`
-`pred`     | `bits[1]`
-`data_{i}` | `T_{i}`
-`result`   | `token`
-
-The types of operands `data_{i}` and the number `N` must match the types and
-number of data elements supported by the channel.
-
-**Keyword arguments**
-
-<!-- mdformat off(multiline table cells not supported in mkdocs) -->
-
-| Keyword      | Type    | Required | Default | Description                   |
-| ------------ | ------- | -------- | ------- | ----------------------------- |
-| `channel_id` | `int64_t` | yes      |         | The ID of the channel to send data to. |
+| Keyword      | Type      | Required | Default | Description                             |
+| ------------ | --------- | -------- | ------- | --------------------------------------- |
+| `predicate`  | `bits[1]` | no       |         | A value is sent iff `predicate` is true |
+| `channel_id` | `int64_t` | yes      |         | The ID of the channel to send data to.  |
 
 <!-- mdformat on -->
 
@@ -466,7 +582,7 @@ number of data elements supported by the channel.
 
 #### **`array`**
 
-Constructs a array of its operands.
+Constructs an array of its operands.
 
 ```
 result = array(operand_{0}, ..., operand_{N-1})
@@ -480,7 +596,7 @@ Value         | Type
 `result`      | `T[N]`
 
 Array can take an arbitrary number of operands including zero (which produces an
-empty array).
+empty array). The n-th operand becomes the n-th element of the array.
 
 #### **`array_index`**
 
@@ -489,7 +605,7 @@ Returns a single element from an array.
 **Syntax**
 
 ```
-result = array_index(array, indices=[idx_{0}, ... , idx_{N-1}])
+result = array_index(array, indices=[idx_{0}, ... , idx_{N-1}], assumed_in_bounds=<true|false>)
 ```
 
 **Types**
@@ -499,6 +615,16 @@ Value     | Type
 `array`   | Array of at least `N` dimensions
 `idx_{i}` | Arbitrary bits type
 `result`  | `T`
+
+**Keyword arguments**
+
+<!-- mdformat off(multiline table cells not supported in mkdocs) -->
+
+| Keyword             | Type   | Required | Default | Description                                                                                  |
+| ------------------- | ------ | -------- | ------- | -------------------------------------------------------------------------------------------- |
+| `assumed_in_bounds` | `bool` | no       | False   | Are all indices assumed to be in bounds in all circumstances where the result is observable. |
+
+<!-- mdformat on -->
 
 Returns the element of `array` indexed by the indices `idx_{0} ... idx_{N-1}`.
 The array must have at least as many dimensions as number of index elements `N`.
@@ -515,15 +641,52 @@ assuming input array operand `A`.
 
 <!-- mdformat off(multiline table cells not supported in mkdocs) -->
 
-| Indices   | Array type      | result type `T` | Result expression            |
-| --------- | --------------- | --------------- | ---------------------------- |
-| `{1, 2}`  | `bits[3][4][5]` | `bits[3]`       | `A[1][2]`                    |
+| Indices   | Array type      | result type `T` | Result expression                                                         |
+| --------- | --------------- | --------------- | ------------------------------------------------------------------------- |
+| `{1, 2}`  | `bits[3][4][5]` | `bits[3]`       | `A[1][2]`                                                                 |
 | `{10, 2}` | `bits[3][4][5]` | `bits[3]`       | `A[4][2]` (first index is out-of-bounds and clamped at the maximum index) |
-| `{1}`     | `bits[3][4][5]` | `bits[3][4]`    | `A[1]`                       |
-| `{}`      | `bits[3][4][5]` | `bits[3][4][5]` | `A`                          |
-| `{}`      | `bits[32]`      | `bits[32]`      | `A`                          |
+| `{1}`     | `bits[3][4][5]` | `bits[3][4]`    | `A[1]`                                                                    |
+| `{}`      | `bits[3][4][5]` | `bits[3][4][5]` | `A`                                                                       |
+| `{}`      | `bits[32]`      | `bits[32]`      | `A`                                                                       |
 
 <!-- mdformat on -->
+
+`assumed_in_bounds` is an optional parameter to the node which defaults to
+`false` if not present. This has no effect on the behavior of the node but
+informs other passes that the all indices in the node are proven to be
+'in-bounds' in cases where the result is visible. This should only be set by the
+`opt` pipeline passes. This information might be used in later optimization
+passes or during verilog codegen.
+
+#### **`array_slice`**
+
+Returns a slice of an array.
+
+**Syntax**
+
+```
+result = array_slice(array, start, width=<width>)
+```
+
+**Types**
+
+Value    | Type
+-------- | -------------------------------------------------------------
+`array`  | Array
+`start`  | Arbitrary bits type
+`result` | Array with same `element_type` as `array` and size of `width`
+
+**Keyword arguments**
+
+Keyword | Type      | Required | Default | Description
+------- | --------- | -------- | ------- | ----------------------------------
+`width` | `int64_t` | yes      |         | Width to make the resulting array.
+
+Returns a copy of the segment of the input array consisting of the `<width>`
+consecutive elements starting from `start`. If any element in that segment is
+out-of-bounds of the original array the value at the corresponding index is the
+final element in the array. This is consistent behavior with respect to the
+index operation.
 
 #### **`array_update`**
 
@@ -532,7 +695,7 @@ Returns a modified copy of an array.
 **Syntax**
 
 ```
-result = array_update(array, value, indices=[idx_{0}, ... , idx_{N-1}])
+result = array_update(array, value, indices=[idx_{0}, ... , idx_{N-1}], assumed_in_bounds=<true|false>)
 ```
 
 **Types**
@@ -544,13 +707,29 @@ Value     | Type
 `idx_{i}` | Arbitrary bits type
 `result`  | Same type as `array`
 
+**Keyword arguments**
+
+<!-- mdformat off(multiline table cells not supported in mkdocs) -->
+
+| Keyword             | Type   | Required | Default | Description                                                                                            |
+| ------------------- | ------ | -------- | ------- | ------------------------------------------------------------------------------------------------------ |
+| `assumed_in_bounds` | `bool` | no       | False   | Are all indices assumed to be in bounds in all cases where the result of this operation is observable. |
+
+<!-- mdformat on -->
+
 Returns a copy of the input array with the element at the given indices replaced
 with the given value. If any index is out of bounds, the result is identical to
 the input `array`. The indexing semantics is identical to `array_index` with the
 exception of out-of-bounds behavior.
 
-### Tuple operations
+`assumed_in_bounds` is an optional parameter to the node which defaults to
+`false` if not present. This has no effect on the behavior of the node but
+informs other passes that the all indices in the node may be assumed to be
+'in-bounds'. This should only be set by the `opt` pipeline passes. This
+information might be used in later optimization passes or during verilog
+codegen.
 
+### Tuple operations
 
 #### **`tuple`**
 
@@ -616,10 +795,10 @@ Value     | Type
 
 <!-- mdformat off(multiline table cells not supported in mkdocs) -->
 
-| Keyword | Type    | Required | Default | Description       |
-| ------- | ------- | -------- | ------- | ----------------- |
-| `start` | `int64_t` | yes      |         | The starting bit of the slice. `start` is is zero-indexed where zero is the least-significant bit of the operand. |
-| `width` | `int64_t` | yes      |         | The width of the slice. |
+| Keyword | Type      | Required | Default | Description                                                                                                       |
+| ------- | --------- | -------- | ------- | ----------------------------------------------------------------------------------------------------------------- |
+| `start` | `int64_t` | yes      |         | The starting bit of the slice. `start` is zero-indexed where zero is the least-significant bit of the operand. |
+| `width` | `int64_t` | yes      |         | The width of the slice.                                                                                           |
 
 <!-- mdformat on -->
 
@@ -660,8 +839,8 @@ are ignored. Examples:
 #### **`dynamic_bit_slice`**
 
 Slices a contiguous range of bits from a bits-typed operand, with variable
-starting index but fixed width. Out-of-bounds slicing is supported by
-treating all out-of-bounds bits as having value 0.
+starting index but fixed width. Out-of-bounds slicing is supported by treating
+all out-of-bounds bits as having value 0.
 
 **Syntax**
 
@@ -677,15 +856,15 @@ Value     | Type
 `start`   | `bits[M]`
 `result`  | `bits[<width>]`
 
-`start` can be of arbitrary bit width. It will be interpreted
-as an unsigned integer.
+`start` can be of arbitrary bit width. It will be interpreted as an unsigned
+integer.
 
 **Keyword arguments**
 
 <!-- mdformat off(multiline table cells not supported in mkdocs) -->
 
-| Keyword | Type    | Required | Default | Description       |
-| ------- | ------- | -------- | ------- | ----------------- |
+| Keyword | Type      | Required | Default | Description             |
+| ------- | --------- | -------- | ------- | ----------------------- |
 | `width` | `int64_t` | yes      |         | The width of the slice. |
 
 <!-- mdformat on -->
@@ -737,7 +916,7 @@ Value     | Type
 `operand` | `bits[N]`
 `result`  | `bits[M]`
 
-The result width `M` must be less than or equal to 2**`N` where `N` is the
+The result width `M` must be less than or equal to 2\*\*`N` where `N` is the
 operand width.
 
 **Keyword arguments**
@@ -749,7 +928,7 @@ Keyword | Type      | Required | Default | Description
 `decode` converts the binary-encoded operand value into a one-hot result. For an
 operand value of `n` interpreted as an unsigned number the `n`-th result bit and
 only the `n`-th result bit is set. The width of the `decode` operation may be
-less than the maximum value expressible by the input (2**`N` - 1). If the
+less than the maximum value expressible by the input (2\*\*`N` - 1). If the
 encoded operand value is larger than the number of bits of the result the result
 is zero.
 
@@ -758,7 +937,7 @@ is zero.
 Implements a binary encoder.
 
 ```
-result = encode(operand, width=<width>)
+result = encode(operand)
 ```
 
 **Types**
@@ -768,7 +947,7 @@ Value     | Type
 `operand` | `bits[N]`
 `result`  | `bits[M]`
 
-The result width `M` must be equal to $$\lceil \log_{2} N \rceil$$.
+The result width `M` must be equal to $\lceil \log_2 N \rceil$.
 
 `encode` converts the one-hot operand value into a binary-encoded value of the
 "hot" bit of the input. If the `n`-th bit and only the `n`-th bit of the operand
@@ -784,6 +963,17 @@ If no bits of the input are set the result is zero.
 
 Produces a bits value with exactly one bit set. The index of the set bit depends
 upon the input value.
+
+This operation can be thought of like a command: "canonicalize/normalize this
+input value to be one-hot", where `lsb_prio` indicates which side of the
+bitvector wins in the case that there are multiple input bits set. Contrast this
+with the [`decode`](#decode) operation which instead converts a binary-encoded
+operand value into a one-hot value.
+
+(Note: once this operation has been applied to a value, the optimizer knows that
+the output has the one-hot property [i.e. exactly one bit is set], which helps
+the optimizer know that one-hot-select operations that use the output value as a
+selector are selecting between distinct values.)
 
 **Syntax**
 
@@ -803,9 +993,9 @@ Value    | Type
 
 <!-- mdformat off(multiline table cells not supported in mkdocs) -->
 
-| Keyword    | Type     | Required | Default | Description                    |
-| ---------- | -------- | -------- | ------- | ------------------------------ |
-| `lsb_prio` | `bool`   | yes      |         | Whether the least significant bit (LSb) has priority. |
+| Keyword    | Type   | Required | Default | Description                                           |
+| ---------- | ------ | -------- | ------- | ----------------------------------------------------- |
+| `lsb_prio` | `bool` | yes      |         | Whether the least significant bit (LSb) has priority. |
 
 <!-- mdformat on -->
 
@@ -822,19 +1012,18 @@ significant bit in the output) is only set if no bits in the input are set.
 
 Examples:
 
-* `one_hot(0b0011, lsb_prio=true)` => `0b00001` -- note that an extra MSb has
-  been appended to the output to potentially represent the "all zeros" case.
-* `one_hot(0b0111, lsb_prio=false)` => `0b00100`.
-* `one_hot(0b00, lsb_prio=false)` => `0b100`.
-* `one_hot(0b00, lsb_prio=true)` => `0b100` -- note the output for `one_hot` is
-  the same for the all-zeros case regardless of whether `lsb_prio` is true or
-  false.
+-   `one_hot(0b0011, lsb_prio=true)` => `0b00001` -- note that an extra MSb has
+    been appended to the output to potentially represent the "all zeros" case.
+-   `one_hot(0b0111, lsb_prio=false)` => `0b00100`.
+-   `one_hot(0b00, lsb_prio=false)` => `0b100`.
+-   `one_hot(0b00, lsb_prio=true)` => `0b100` -- note the output for `one_hot`
+    is the same for the all-zeros case regardless of whether `lsb_prio` is true
+    or false.
 
 This operation is useful for constructing match or switch operation semantics
 where a condition is matched against an ordered set of cases and the first match
 is chosen. It is also useful for one-hot canonicalizing, e.g. as a prelude to
 counting leading/trailing zeros.
-
 
 ### Control-oriented operations
 
@@ -848,10 +1037,7 @@ interconnect is used for reconfiguration purposes.
 Towards this eager-evaluation-capable model, operations used within a function
 are generally not Turing-complete: operations such as `counted_for` require a
 finite bound so that they could be implemented using a finite amount of pipeline
-area. Operations such as `dynamic_counted_for` are an exception, where that
-operation will only be possible to use in a time-multiplexed code generation
-mode, such as the XLS sequential emitter, where arbitrary iteration to some
-dynamic bound is likely to be possible.
+area.
 
 #### **`param`**
 
@@ -871,20 +1057,30 @@ fn f(x: bits[32]) -> bits[32] {
 
 **Types**
 
-Value      | Type
----------- | ---------
-`name`     | `str`
-`type`     | `type`
+Value  | Type
+------ | ------
+`name` | `str`
+`type` | `type`
 
 #### **`sel`**
 
 Selects between operands based on a selector value.
+
+This behaves as if the `selector` indexes into the values given in `cases`,
+providing `default` if it is indexing beyond the given `cases`.
 
 **Syntax**
 
 ```
 result = sel(selector, cases=[case_{0}, ... , case_{N-1}], default=<default>)
 ```
+
+A default value must be provided **iff** the `selector` is not the correct width
+for the `cases` array. That is, if the number of cases is less than
+$2^{bitwidth(selector)}$ then a default value must be specified (because it must
+be well defined what happens when the selector takes on values outside the case
+range). If the selector is exactly the correct bitwidth a default value must not
+be provided.
 
 **Types**
 
@@ -897,10 +1093,11 @@ Value      | Type
 
 #### **`one_hot_sel`**
 
-Selects between operands based on a one-hot selector.
+Selects between operands based on a one-hot selector, `OR`-ing all selected
+cases if more than one case is selected.
 
 See `one_hot` for an example of the one-hot selector invariant. Note that when
-the one-hot selector is not one-hot, this operation is still well defined.
+the selector is not one-hot, this operation is still well defined.
 
 Note that when `one_hot` operations are used to precondition the `selector`
 operand to `one_hot_sel`, the XLS optimizer will try to determine when they are
@@ -924,6 +1121,40 @@ The result is the logical OR of all cases `case_{i}` for which the corresponding
 bit `i` is set in the selector. When selector is one-hot this performs a select
 operation.
 
+#### **`priority_sel`**
+
+Selects between operands based on a selector, choosing the highest-priority case
+if more than one case is selected. Each bit in the selector corresponds to a
+case, with the least significant bit corresponding to the first case and having
+the highest priority. If there are no bits in the selector set, no case is
+selected and the `default` value is chosen.
+
+See `one_hot` for an example of the one-hot selector invariant. Note that when
+the selector is not one-hot, this operation is still well defined.
+
+Note that when `one_hot` operations are used to precondition the `selector`
+operand to `priority_sel`, the XLS optimizer will try to determine when they are
+unnecessary and subsequently eliminate them.
+
+**Syntax**
+
+```
+result = priority_sel(selector, cases=[case_{0}, ... , case_{N-1}], default=<default>)
+```
+
+**Types**
+
+Value      | Type
+---------- | ---------
+`selector` | `bits[N]`
+`case_{i}` | `T`
+`default`  | `T`
+`result`   | `T`
+
+The result is the first case `case_{i}` for which the corresponding bit `i` is
+set in the selector. If the selector is known to be one-hot, then the
+`priority_sel()` operation is equivalent to a `one_hot_sel()`.
+
 #### **`invoke`**
 
 Invokes a function. The return value for the invoked function is the result
@@ -946,8 +1177,8 @@ Value    | Type
 
 <!-- mdformat off(multiline table cells not supported in mkdocs) -->
 
-| Keyword    | Type     | Required | Default | Description                    |
-| ---------- | -------- | -------- | ------- | ------------------------------ |
+| Keyword    | Type     | Required | Default | Description                                  |
+| ---------- | -------- | -------- | ------- | -------------------------------------------- |
 | `to_apply` | `string` | yes      |         | Name of the function to use as the loop body |
 
 <!-- mdformat on -->
@@ -974,70 +1205,11 @@ Value     | Type
 
 <!-- mdformat off(multiline table cells not supported in mkdocs) -->
 
-| Keyword    | Type     | Required | Default | Description                    |
-| ---------- | -------- | -------- | ------- | ------------------------------ |
+| Keyword    | Type     | Required | Default | Description                                                  |
+| ---------- | -------- | -------- | ------- | ------------------------------------------------------------ |
 | `to_apply` | `string` | yes      |         | Name of the function to apply to each element of the operand |
 
 <!-- mdformat on -->
-
-#### **`dynamic_counted_for`**
-
-Invokes a dynamic-trip count loop.
-
-**Syntax**
-
-```
-result = counted_for(init, trip_count, stride, body=<body>, invariant_args=<inv_args>)
-```
-
-**Types**
-
-Value        | Type
------------- | ------------------------------
-`init`       | `T`
-`trip_count` | `bits[N], treated as unsigned`
-`stride`     | `bits[M], treated as signed`,
-`result`     | `T`
-
-**Keyword arguments**
-
-<!-- mdformat off(multiline table cells not supported in mkdocs) -->
-
-| Keyword          | Type     | Required | Default | Description               |
-| ---------------- | -------- | -------- | ------- | ------------------------- |
-| `invariant_args` | array of | yes      |         | Names of the invariant operands as the loop body |
-| `body`           | `string` | yes      |         | Name of the function to use as the loop body |
-
-<!-- mdformat on -->
-
-`dynamic_counted_for` invokes the function `body` `trip_count` times, passing
-loop-carried data that starts with value `init`. The induction variable is
-incremented by `stride` after each iteration.
-
-*   The first argument passed to `body` is the induction variable -- presently,
-    the induction variable always starts at zero and increments by `stride`
-    after every trip.
-*   The second argument passed to `body` is the loop-carry data. The return type
-    of `body` must be the same as the type of the `init` loop carry data. The
-    value returned from the last trip is the result of the `counted_for`
-    expression.
-*   All subsequent arguments passed to `body` are passed from `invariant_args`;
-    e.g. if there are two members in `invariant_args` those values are passed as
-    the third and fourth arguments.
-
-Therefore `body` should have a signature that matches the following:
-
-```
-body(i, loop_carry_data, [invariant_arg0, invariant_arg1, ...])
-```
-
-Note that we currently inspect the `body` function to see what type of induction
-variable (`i` above) it accepts in order to pass an `i` value of that type.
-`trip_count` must have fewer bits than `i` and `stride` should have fewer than
-or equal number of bits to `i`.
-
-Code generation support for `dynamic_counted_for` is limited because the
-pipeline generator cannot handle an unkown trip count.
 
 #### **`counted_for`**
 
@@ -1060,26 +1232,26 @@ Value    | Type
 
 <!-- mdformat off(multiline table cells not supported in mkdocs) -->
 
-| Keyword          | Type     | Required | Default | Description               |
-| ---------------- | -------- | -------- | ------- | ------------------------- |
-| `trip_count`     | `int64_t`  | yes      |         | Trip count of the loop (number of times that the loop body will be executed) |
-| `stride`         | `int64_t`  | no       | 1       | Stride of the induction variable |
-| `invariant_args` | array of | yes      |         | Names of the invariant operands as the loop body |
-| `body`           | `string` | yes      |         | Name of the function to use as the loop body |
+| Keyword          | Type      | Required | Default | Description                                                                  |
+| ---------------- | --------- | -------- | ------- | ---------------------------------------------------------------------------- |
+| `trip_count`     | `int64_t` | yes      |         | Trip count of the loop (number of times that the loop body will be executed) |
+| `stride`         | `int64_t` | no       | 1       | Stride of the induction variable                                             |
+| `invariant_args` | array of  | yes      |         | Names of the invariant operands as the loop body                             |
+| `body`           | `string`  | yes      |         | Name of the function to use as the loop body                                 |
 
 <!-- mdformat on -->
 
 `counted_for` invokes the function `body` `trip_count` times, passing
 loop-carried data that starts with value `init`.
 
-*   The first argument passed to `body` is the induction variable -- presently,
+-   The first argument passed to `body` is the induction variable -- presently,
     the induction variable always starts at zero and increments by `stride`
     after every trip.
-*   The second argument passed to `body` is the loop-carry data. The return type
+-   The second argument passed to `body` is the loop-carry data. The return type
     of `body` must be the same as the type of the `init` loop carry data. The
     value returned from the last trip is the result of the `counted_for`
     expression.
-*   All subsequent arguments passed to `body` are passed from `invariant_args`;
+-   All subsequent arguments passed to `body` are passed from `invariant_args`;
     e.g. if there are two members in `invariant_args` those values are passed as
     the third and fourth arguments.
 
@@ -1098,9 +1270,7 @@ Some operations in XLS IR are sensitive to sequence order, similar to
 [channel operations](#channel-operations), but are not themselves
 channel-related. Tokens are used to determine the possible sequencing of these
 effects, and `after_all` can be used to join together tokens as a sequencing
-"merge point" for concurrent threads of execution described by different tokens.
-`assert` is a side-effecting operation that is tied into the XLS IR's dataflow
-graph by way of token sequencing.
+merge point for concurrent threads of execution described by different tokens.
 
 #### **`after_all`**
 
@@ -1119,6 +1289,75 @@ Value         | Type
 
 `after_all` can consume an arbitrary number of token operands including zero.
 
+### State-affecting operations
+
+Procs include a concept of local state, represented as a set of elements. Each
+activation can read the state values as they would be left by the previous
+activation, and can set the state values for subsequent activations to see.
+
+#### **`state_read`**
+
+Reads (and consumes) the value in the given state element. Every state element
+must have a corresponding `state_read` operation.
+
+```
+result = state_read(state_element=st)
+```
+
+**Types**
+
+Value    | Type
+-------- | ----
+`result` | `T`
+
+**Keyword arguments**
+
+<!-- mdformat off(multiline table cells not supported in mkdocs) -->
+
+| Keyword         | Type     | Required | Default | Description                       |
+| --------------- | -------- | -------- | ------- | --------------------------------- |
+| `state_element` | `string` | yes      |         | Name of the state element to read |
+
+<!-- mdformat on -->
+
+#### **`next_value`**
+
+If `predicate` is true or absent, sets the value that the next activation will
+see for the given state element. For each state element, at most one
+`next_value` node may fire in a given activation; otherwise, undefined behavior
+can result. For this reason, frontends & optimizations should be exceptionally
+careful when emitting predicated `next_value` nodes; for safety, frontends may
+choose instead to emit a single `next_value` node where `value` uses either a
+`sel` or a `priority_sel`, in which case optimizations may translate the result
+to multiple `next_value` nodes to potentially enable better throughput.
+
+```
+result = next_value(state_element=st, value=v, predicate=<pred>)
+```
+
+**Types**
+
+Value    | Type
+-------- | ----
+`result` | `()`
+
+**Keyword arguments**
+
+<!-- mdformat off(multiline table cells not supported in mkdocs) -->
+
+| Keyword     | Type      | Required | Default | Description                                                                          |
+| ----------- | --------- | -------- | ------- | ------------------------------------------------------------------------------------ |
+| `state_element` | `string`  | yes      |         | Name of the target state element                                                     |
+| `value`         | `T`       | yes      |         | The value to write to the target state element                                       |
+| `predicate`     | `bits[1]` | no       |         | The state element is set if `predicate` is true or absent. All `next_value` nodes for the same `state_element` must have mutually exclusive predicates. |
+
+<!-- mdformat on -->
+
+### Other side-effecting operations
+
+Aside from channel operations such as `send` and `receive`, several other
+operations have side-effects. Care must be taken when adding, removing, or
+transforming these operations, e.g., in the optimizer.
 
 #### **`assert`**
 
@@ -1146,9 +1385,281 @@ Value       | Type
 
 <!-- mdformat off(multiline table cells not supported in mkdocs) -->
 
-| Keyword   | Type              | Required | Default | Description     |
-| --------- | ----------------- | -------- | ------- | --------------- |
-| `message` | `string`          | yes      |         | Message to include in raised error |
+| Keyword   | Type              | Required | Default | Description                                                                   |
+| --------- | ----------------- | -------- | ------- | ----------------------------------------------------------------------------- |
+| `message` | `string`          | yes      |         | Message to include in raised error                                            |
 | `label`   | `optional string` | yes      |         | Label to associate with the assert statement in the generated (System)Verilog |
 
 <!-- mdformat on -->
+
+#### **`cover`**
+
+Records the number of times the given condition evaluates to true. Just like
+`assert`, this is a software-only construct and is not emitted in a final
+hardware design.
+
+```
+result = cover(condition, label=<string>)
+```
+
+**Types**
+
+Value       | Type
+----------- | ---------
+`condition` | `bits[1]`
+`result`    | `()`
+
+**Keyword arguments**
+
+Keyword | Type     | Required | Default | Description
+------- | -------- | -------- | ------- | ---------------------------------
+`label` | `string` | yes      |         | Name associated with the counter.
+
+#### **`gate`**
+
+Gates an arbitrarily-typed value based on a condition.
+
+The result of the operation is the data operand if the condition is true,
+otherwise the result is a zero value of the type of the data operand (i.e., the
+value is gated off). A helpful mnemonic is to think of this as analogous to an
+`AND` gate: if the condition is `true`, the value passes through, otherwise it's
+zeroed.
+
+This operation can reduce switching and may be used in power optimizations. This
+is intended for use in operand gating for power reduction, and the compiler may
+ultimately use it to perform register-level load-enable gating.
+
+The operation is considered side-effecting to prevent removal of the operation
+when the gated result (condition is false) is not observable. The 'side-effect'
+of this operation is the effect it can have on power consumption.
+
+Despite being 'side-effecting' this operation is special cased to still be
+eligible for total removal by various passes. This will only be done in cases
+where the gate is redundant, for example the condition is known to be false or
+the data is known to be zero.
+
+```
+result = gate(condition, data)
+```
+
+**Types**
+
+Value       | Type
+----------- | ---------
+`condition` | `bits[1]`
+`data`      | `T`
+`result`    | `T`
+
+### RTL-level operations
+
+These IR operations correspond to RTL-level constructs in the emitted Verilog.
+These operations are added and used in the code generation process and may only
+appear in blocks (not procs or functions).
+
+#### **`input_port`**
+
+Corresponds to an input port on a Verilog module.
+
+**Syntax**
+
+```
+result = input_port()
+```
+
+**Types**
+
+Value    | Type
+-------- | ----
+`result` | `T`
+
+An input_port operation can be an arbitrary type.
+
+#### **`output_port`**
+
+Corresponds to an output port on a Verilog module. The value sent to the output
+port is the data operand.
+
+**Syntax**
+
+```
+result = output_port(data)
+```
+
+**Types**
+
+Value    | Type
+-------- | ----
+`data`   | `T`
+`result` | `T`
+
+#### **`register_read`**
+
+Reads a value from a register.
+
+The register is defined on the block.
+
+**Syntax**
+
+```
+result = register_read(register=<register_name>)
+```
+
+**Types**
+
+Value    | Type
+-------- | ----
+`result` | `T`
+
+The type `T` of the result of the operation is the type of the register.
+
+**Keyword arguments**
+
+<!-- mdformat off(multiline table cells not supported in mkdocs) -->
+
+| Keyword    | Type     | Required | Default | Description                  |
+| ---------- | -------- | -------- | ------- | ---------------------------- |
+| `register` | `string` | yes      |         | Name of the register to read |
+
+<!-- mdformat on -->
+
+#### **`register_write`**
+
+Writes a value to a register.
+
+A write to the register may be conditioned upon an optional load-enable and/or
+reset signal. The register is defined on the block.
+
+If `reset` is given the `register` associated with this read **must** have a
+reset behavior set.
+
+If the `reset` value matches the reset-active value of the register then the
+`reset_value` of the register is written and the `data` is ignored.
+
+If the `load_enable` argument is present the register will only be written if
+the argument evaluates to `1`, remaining unchanged otherwise (i.e. if present it
+is equivalent to `register_write.REG(sel(load_enable, {register_read.REG,
+data}))`).
+
+A register may have multiple writes. If more than one activates (load enable is
+not present or is true) in a single cycle an error is raised at software
+run-time (IR interpreter/JIT).
+
+The `reset` and `load_enable` arguments affect the value written according to
+the following table.
+
+<!-- mdformat off(multiline table cells not supported in mkdocs) -->
+
+| `Register` reset behavior | `reset` value | `load_enable` value | New value     |
+| ------------------------- | ------------- | ------------------- | ------------- |
+| `active_low == false`     | `false` / `0` | Not present         | `data`        |
+| `active_low == false`     | `true` / `1`  | Not present         | `reset_value` |
+| `active_low == true`      | `false` / `0` | Not present         | `reset_value` |
+| `active_low == true`      | `true` / `1`  | Not present         | `data`        |
+| `active_low == false`     | `false` / `0` | `true` / `1`        | `data`        |
+| `active_low == false`     | `true` / `1`  | `true` / `1`        | `reset_value` |
+| `active_low == true`      | `false` / `0` | `true` / `1`        | `reset_value` |
+| `active_low == true`      | `true` / `1`  | `true` / `1`        | `data`        |
+| `active_low == false`     | `false` / `0` | `false` / `0`       | No change     |
+| `active_low == false`     | `true` / `1`  | `false` / `0`       | `reset_value` |
+| `active_low == true`      | `false` / `0` | `false` / `0`       | `reset_value` |
+| `active_low == true`      | `true` / `1`  | `false` / `0`       | No change     |
+| Not present               | Not present   | `true` / `1`        | `data`        |
+| Not present               | Not present   | `false` / `0`       | No change     |
+
+<!-- mdformat on -->
+
+**Syntax**
+
+```
+result = register_write(data, load_enable=<load_enable>, reset=<reset>, register=<register_name>)
+```
+
+**Types**
+
+Value         | Type
+------------- | --------------------
+`data`        | `T`
+`load_enable` | `bits[1]` (optional)
+`reset`       | `bits[1]` (optional)
+`result`      | `()` (empty tuple)
+
+**Keyword arguments**
+
+Keyword    | Type     | Required | Default | Description
+---------- | -------- | -------- | ------- | -----------------------------
+`register` | `string` | yes      |         | Name of the register to write
+
+The type `T` of the data operand must be the same as the type of the register.
+
+#### **`instantiation_input`**
+
+Corresponds to a single input port of an instantiation.
+
+An instantiation is a block-scoped construct that represents a module
+instantiation at the Verilog level. Each `instantiation_input` operation
+corresponds to a particular port of the instantiated object, so generally a
+single instantiation can have multiple associated `instantiation_input`
+operations (one for each input port).
+
+**Syntax**
+
+```
+result = instantiation_input(data, instantiation=<instantiation>, port_name=<port_name>)
+```
+
+**Types**
+
+Value    | Type
+-------- | ----
+`data`   | `T`
+`result` | `()`
+
+**Keyword arguments**
+
+<!-- mdformat off(multiline table cells not supported in mkdocs) -->
+
+| Keyword         | Type     | Required | Default | Description                                       |
+| --------------- | -------- | -------- | ------- | ------------------------------------------------- |
+| `instantiation` | `string` | yes      |         | Name of the instantiation.                        |
+| `port_name`     | `string` | yes      |         | Name of the associated port of the instantiation. |
+
+<!-- mdformat on -->
+
+The type `T` of the data operand must be the same as the type of the associated
+input port of the instantiated object.
+
+#### **`instantiation_output`**
+
+Corresponds to a single output port of an instantiation.
+
+An instantiation is a block-scoped construct that represents a module
+instantiation at the Verilog level. Each `instantiation_output` operation
+corresponds to a output particular port of the instantiated object, so generally
+a single instantiation can have multiple associated `instantiation_output`
+operations (one for each output port).
+
+**Syntax**
+
+```
+result = instantiation_output(instantiation=<instantiation>, port_name=<port_name>)
+```
+
+**Types**
+
+Value    | Type
+-------- | ----
+`result` | `T`
+
+**Keyword arguments**
+
+<!-- mdformat off(multiline table cells not supported in mkdocs) -->
+
+| Keyword         | Type     | Required | Default | Description                                       |
+| --------------- | -------- | -------- | ------- | ------------------------------------------------- |
+| `instantiation` | `string` | yes      |         | Name of the instantiation.                        |
+| `port_name`     | `string` | yes      |         | Name of the associated port of the instantiation. |
+
+<!-- mdformat on -->
+
+The type `T` of the result is type of the associated output port of the
+instantiated object.

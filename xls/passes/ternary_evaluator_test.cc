@@ -14,25 +14,34 @@
 
 #include "xls/passes/ternary_evaluator.h"
 
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_format.h"
-#include "xls/common/logging/logging.h"
+#include "absl/types/span.h"
 #include "xls/common/status/matchers.h"
 #include "xls/ir/bits.h"
 #include "xls/ir/bits_ops.h"
+#include "xls/ir/ternary.h"
 
 namespace xls {
 namespace {
 
-using status_testing::StatusIs;
+using ::absl_testing::StatusIs;
 using ::testing::ElementsAre;
 
 class TernaryLogicTest : public ::testing::Test {
  protected:
-  TernaryLogicTest() {}
+  TernaryLogicTest() = default;
 
-  TernaryVector FromString(absl::string_view s) {
+  TernaryVector FromString(std::string_view s) {
     return StringToTernaryVector(s).value();
   }
 
@@ -61,10 +70,10 @@ class TernaryLogicTest : public ::testing::Test {
   // Otherwise it is TernaryValue::kUnknown. Example: { 0b1000, 0b1100, 0b1001 }
   // => 0b1X0X
   TernaryVector ReduceFromBits(absl::Span<const Bits> bits_vector) {
-    XLS_CHECK(!bits_vector.empty());
+    CHECK(!bits_vector.empty());
     TernaryVector result = evaluator_.BitsToVector(bits_vector.front());
     for (const Bits& bits : bits_vector.subspan(1)) {
-      XLS_CHECK_EQ(bits.bit_count(), result.size());
+      CHECK_EQ(bits.bit_count(), result.size());
       for (int64_t i = 0; i < result.size(); ++i) {
         bool same = ((bits.Get(i) && result[i] == TernaryValue::kKnownOne) ||
                      (!bits.Get(i) && result[i] == TernaryValue::kKnownZero));
@@ -241,14 +250,16 @@ TEST_F(TernaryLogicTest, ULessThan) {
       std::vector<Bits> results;
       for (const Bits& lhs_bits : ExpandToBits(lhs)) {
         for (const Bits& rhs_bits : ExpandToBits(rhs)) {
-          results.push_back(UBits(bits_ops::ULessThan(lhs_bits, rhs_bits), 1));
+          results.push_back(UBits(
+              static_cast<uint64_t>(bits_ops::ULessThan(lhs_bits, rhs_bits)),
+              1));
         }
       }
       TernaryValue expected = ReduceFromBits(results)[0];
       TernaryValue actual = evaluator_.ULessThan(lhs, rhs);
       std::string message = absl::StrFormat("%s < %s => %s", ToString(lhs),
                                             ToString(rhs), ToString(expected));
-      XLS_VLOG(1) << message;
+      VLOG(1) << message;
       EXPECT_EQ(expected, actual) << message << ", but result is " << actual;
     }
   }
@@ -273,7 +284,7 @@ TEST_F(TernaryLogicTest, BinarySelect) {
         std::string message = absl::StrFormat(
             "Sel(%s, cases=[%s, %s]) => %s", ToString(selector),
             ToString(on_false), ToString(on_true), ToString(expected));
-        XLS_VLOG(1) << message;
+        VLOG(1) << message;
 
         EXPECT_EQ(expected, actual)
             << message << ", but result is " << ToString(actual);
@@ -318,7 +329,7 @@ TEST_F(TernaryLogicTest, ThreeWaySelectWithDefault) {
                 "Sel(%s, cases=[%s, %s, %s], default=%s) => %s",
                 ToString(selector), ToString(case0), ToString(case1),
                 ToString(case2), ToString(default_case), ToString(expected));
-            XLS_VLOG(1) << message;
+            VLOG(1) << message;
 
             EXPECT_EQ(expected, actual)
                 << message << ", but result is " << ToString(actual);
@@ -358,7 +369,7 @@ TEST_F(TernaryLogicTest, OneHotSelectSelectorCanBeZero) {
           std::string message = absl::StrFormat(
               "OneHotSel(%s, cases=[%s, %s, %s]) => %s", ToString(selector),
               ToString(a), ToString(b), ToString(c), ToString(expected));
-          XLS_VLOG(1) << message;
+          VLOG(1) << message;
 
           EXPECT_EQ(expected, actual)
               << message << ", but result is " << ToString(actual);
@@ -402,7 +413,7 @@ TEST_F(TernaryLogicTest, OneHotSelectSelectorCannotBeZero) {
               "OneHotSel(%s, cases=[%s, %s, %s]) && selector != 0 => %s",
               ToString(selector), ToString(a), ToString(b), ToString(c),
               ToString(expected));
-          XLS_VLOG(1) << message;
+          VLOG(1) << message;
 
           EXPECT_EQ(expected, actual)
               << message << ", but result is " << ToString(actual);
@@ -428,7 +439,7 @@ TEST_F(TernaryLogicTest, ShiftRightLogical3wide) {
       std::string message =
           absl::StrFormat("%s >> %s => %s", ToString(input), ToString(amount),
                           ToString(expected));
-      XLS_VLOG(1) << message;
+      VLOG(1) << message;
       EXPECT_EQ(expected, actual) << message << ", but result is " << actual;
     }
   }
@@ -450,7 +461,7 @@ TEST_F(TernaryLogicTest, ShiftRightLogical4x2) {
       std::string message =
           absl::StrFormat("%s >> %s => %s", ToString(input), ToString(amount),
                           ToString(expected));
-      XLS_VLOG(1) << message;
+      VLOG(1) << message;
       EXPECT_EQ(expected, actual) << message << ", but result is " << actual;
     }
   }
@@ -472,7 +483,7 @@ TEST_F(TernaryLogicTest, ShiftRightArith3wide) {
       std::string message =
           absl::StrFormat("%s >>> %s => %s", ToString(input), ToString(amount),
                           ToString(expected));
-      XLS_VLOG(1) << message;
+      VLOG(1) << message;
       EXPECT_EQ(expected, actual) << message << ", but result is " << actual;
     }
   }
@@ -494,7 +505,7 @@ TEST_F(TernaryLogicTest, ShiftRightArith4x2) {
       std::string message =
           absl::StrFormat("%s >>> %s => %s", ToString(input), ToString(amount),
                           ToString(expected));
-      XLS_VLOG(1) << message;
+      VLOG(1) << message;
       EXPECT_EQ(expected, actual) << message << ", but result is " << actual;
     }
   }
@@ -516,7 +527,7 @@ TEST_F(TernaryLogicTest, ShiftLeftLogical3wide) {
       std::string message =
           absl::StrFormat("%s << %s => %s", ToString(input), ToString(amount),
                           ToString(expected));
-      XLS_VLOG(1) << message;
+      VLOG(1) << message;
       EXPECT_EQ(expected, actual) << message << ", but result is " << actual;
     }
   }
@@ -538,7 +549,7 @@ TEST_F(TernaryLogicTest, ShiftLeftLogical4x2) {
       std::string message =
           absl::StrFormat("%s << %s => %s", ToString(input), ToString(amount),
                           ToString(expected));
-      XLS_VLOG(1) << message;
+      VLOG(1) << message;
       EXPECT_EQ(expected, actual) << message << ", but result is " << actual;
     }
   }
@@ -555,7 +566,7 @@ TEST_F(TernaryLogicTest, OneHotLsbToMsb) {
     TernaryVector actual = evaluator_.OneHotLsbToMsb(input);
     std::string message = absl::StrFormat("OneHotLsbToMsb(%s) => %s",
                                           ToString(input), ToString(expected));
-    XLS_VLOG(1) << message;
+    VLOG(1) << message;
     EXPECT_EQ(expected, actual) << message << ", but result is " << actual;
   }
 }
@@ -621,7 +632,7 @@ TEST_F(TernaryLogicTest, OneHotMsbToLsb) {
     TernaryVector actual = evaluator_.OneHotMsbToLsb(input);
     std::string message = absl::StrFormat("OneHotMsbToLsb(%s) => %s",
                                           ToString(input), ToString(expected));
-    XLS_VLOG(1) << message;
+    VLOG(1) << message;
     EXPECT_EQ(expected, actual) << message << ", but result is " << actual;
   }
 }

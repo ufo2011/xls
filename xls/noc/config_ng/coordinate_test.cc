@@ -14,7 +14,12 @@
 
 #include "xls/noc/config_ng/coordinate.h"
 
+#include <cstdint>
+#include <optional>
+
 #include "gtest/gtest.h"
+#include "xls/data_structures/inline_bitmap.h"
+#include "xls/noc/config_ng/dimension_bounds.h"
 
 namespace xls::noc {
 namespace {
@@ -80,7 +85,7 @@ TEST(CoordinateTest, GetDifferentDimensionLocationsWith) {
 
   // Test with invalid dimension count
   EXPECT_EQ(Coordinate({0, 1, 2}).GetDifferentDimensionLocationsWith({2, 0}),
-            absl::nullopt);
+            std::nullopt);
 }
 
 TEST(CoordinateTest, GetNumDifferentDimensionLocationsWith) {
@@ -96,7 +101,7 @@ TEST(CoordinateTest, GetNumDifferentDimensionLocationsWith) {
             2);
   // Test with invalid dimension count
   EXPECT_EQ(Coordinate({0, 1, 2}).GetDifferentDimensionLocationsWith({2, 0}),
-            absl::nullopt);
+            std::nullopt);
 }
 
 TEST(CoordinateTest, GetUniqueDifferentDimensionIndex) {
@@ -106,10 +111,10 @@ TEST(CoordinateTest, GetUniqueDifferentDimensionIndex) {
       2);
   // Test with more than one difference at the dimensions.
   EXPECT_EQ(Coordinate({0, 1, 2}).GetUniqueDifferentDimensionIndex({2, 0, 2}),
-            absl::nullopt);
+            std::nullopt);
   // Test with no dimensions that differ.
   EXPECT_EQ(Coordinate({2, 0, 2}).GetUniqueDifferentDimensionIndex({2, 0, 2}),
-            absl::nullopt);
+            std::nullopt);
 }
 
 TEST(CoordinateTest, EqualOperator) {

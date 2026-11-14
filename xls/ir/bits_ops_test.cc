@@ -14,38 +14,31 @@
 
 #include "xls/ir/bits_ops.h"
 
-#include "gmock/gmock.h"
+#include <array>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "benchmark/benchmark.h"
 #include "gtest/gtest.h"
-#include "xls/common/math_util.h"
+#include "xls/common/fuzzing/fuzztest.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/strings/str_join.h"
+#include "absl/strings/str_split.h"
 #include "xls/common/status/matchers.h"
+#include "xls/data_structures/inline_bitmap.h"
+#include "xls/ir/bits.h"
+#include "xls/ir/bits_test_utils.h"
+#include "xls/ir/format_preference.h"
 #include "xls/ir/number_parser.h"
-#include "xls/ir/value.h"
 
 namespace xls {
 namespace {
 
-// Create a Bits of the given bit count with the prime number index bits set to
-// one.
-Bits PrimeBits(int64_t bit_count) {
-  auto is_prime = [](int64_t n) {
-    if (n < 2) {
-      return false;
-    }
-    for (int64_t i = 2; i * i < n; ++i) {
-      if (n % i == 0) {
-        return false;
-      }
-    }
-    return true;
-  };
-
-  std::vector<uint8_t> bytes(CeilOfRatio(bit_count, int64_t{8}), 0);
-  for (int64_t i = 0; i < bit_count; ++i) {
-    if (is_prime(i)) {
-      bytes[bytes.size() - 1 - i / 8] |= 1 << (i % 8);
-    }
-  }
-  return Bits::FromBytes(bytes, bit_count);
+std::string ToPlainString(const std::string& s) {
+  return absl::StrJoin(absl::StrSplit(s.substr(2), '_'), "");
 }
 
 TEST(BitsOpsTest, LogicalOps) {
@@ -103,7 +96,7 @@ TEST(BitsOpsTest, Concat) {
   Bits deadbeef2 = UBits(0xdeadbeefdeadbeefULL, 64);
   Bits fofo = UBits(0xf0f0f0f0f0f0f0f0ULL, 64);
   EXPECT_EQ(
-      bits_ops::Concat({deadbeef2, fofo}).ToString(FormatPreference::kHex),
+      BitsToString(bits_ops::Concat({deadbeef2, fofo}), FormatPreference::kHex),
       "0xdead_beef_dead_beef_f0f0_f0f0_f0f0_f0f0");
 }
 
@@ -123,8 +116,9 @@ TEST(BitsOpsTest, Add) {
   XLS_ASSERT_OK_AND_ASSIGN(
       Bits wide_rhs,
       ParseNumber("0x1000_0000_0000_0000_0001_1234_4444_3333_0000_1234"));
-  EXPECT_EQ(bits_ops::Add(wide_lhs, wide_rhs).ToString(FormatPreference::kHex),
-            "0x1000_0000_0000_0000_0000_1234_4444_3333_0000_1276");
+  EXPECT_EQ(
+      BitsToString(bits_ops::Add(wide_lhs, wide_rhs), FormatPreference::kHex),
+      "0x1000_0000_0000_0000_0000_1234_4444_3333_0000_1276");
 }
 
 TEST(BitsOpsTest, Sub) {
@@ -146,7 +140,7 @@ TEST(BitsOpsTest, Sub) {
         Bits wide_rhs,
         ParseNumber("0x1000_0000_0000_0000_0001_1234_4444_3333_0000_1234"));
     EXPECT_EQ(
-        bits_ops::Sub(wide_lhs, wide_rhs).ToString(FormatPreference::kHex),
+        BitsToString(bits_ops::Sub(wide_lhs, wide_rhs), FormatPreference::kHex),
         "0xfff_ffff_ffff_ffff_fffd_edcb_bbbb_cccc_ffff_ee0e");
   }
   {
@@ -156,10 +150,69 @@ TEST(BitsOpsTest, Sub) {
         ParseNumber("0x1000_0000_0000_0000_0000_0000_0000_0000_0000"));
     Bits wide_rhs = UBits(42, wide_lhs.bit_count());
     EXPECT_EQ(
-        bits_ops::Sub(wide_lhs, wide_rhs).ToString(FormatPreference::kHex),
+        BitsToString(bits_ops::Sub(wide_lhs, wide_rhs), FormatPreference::kHex),
         "0xfff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffd6");
   }
 }
+
+TEST(BitsOpsTest, Increment) {
+  EXPECT_EQ(bits_ops::Increment(Bits()), Bits());
+  EXPECT_EQ(bits_ops::Increment(UBits(23, 64)), UBits(24, 64));
+
+  // Test overflow conditions.
+  EXPECT_EQ(bits_ops::Increment(UBits(15, 4)), UBits(0, 4));
+  EXPECT_EQ(
+      bits_ops::Increment(UBits(std::numeric_limits<uint64_t>::max(), 64)),
+      UBits(0, 64));
+
+  // Test wide values.
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Bits wide_value,
+      ParseNumber("0x1000_0000_0000_0000_0042_1fff_ffff_ffff_ffff_ffff"));
+  EXPECT_EQ(
+      BitsToString(bits_ops::Increment(wide_value), FormatPreference::kHex),
+      "0x1000_0000_0000_0000_0042_2000_0000_0000_0000_0000");
+}
+
+void IncrementEqualsAdd1(const Bits& bits) {
+  EXPECT_EQ(bits_ops::Increment(bits),
+            bits_ops::Add(bits, UBits(1, bits.bit_count())));
+}
+FUZZ_TEST(BitsOpsFuzzTest, IncrementEqualsAdd1).WithDomains(NonemptyBits());
+
+TEST(BitsOpsTest, Decrement) {
+  EXPECT_EQ(bits_ops::Decrement(Bits()), Bits());
+  EXPECT_EQ(bits_ops::Decrement(UBits(55, 64)), UBits(54, 64));
+
+  // Test underflow conditions.
+  EXPECT_EQ(bits_ops::Decrement(UBits(0, 4)), UBits(15, 4));
+  EXPECT_EQ(bits_ops::Decrement(UBits(0, 64)),
+            UBits(std::numeric_limits<uint64_t>::max(), 64));
+  EXPECT_EQ(bits_ops::Decrement(SBits(-8, 4)), SBits(7, 4));
+
+  // Test wide values.
+  {
+    XLS_ASSERT_OK_AND_ASSIGN(
+        Bits wide_value,
+        ParseNumber("0x1234_5678_1234_5678_0000_0000_0000_0000_0000_0000"));
+    EXPECT_EQ(
+        BitsToString(bits_ops::Decrement(wide_value), FormatPreference::kHex),
+        "0x1234_5678_1234_5677_ffff_ffff_ffff_ffff_ffff_ffff");
+  }
+  {
+    // Test an underflow case.
+    Bits wide_zero(144);
+    EXPECT_EQ(
+        BitsToString(bits_ops::Decrement(wide_zero), FormatPreference::kHex),
+        "0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff");
+  }
+}
+
+void DecrementEqualsSub1(const Bits& bits) {
+  EXPECT_EQ(bits_ops::Decrement(bits),
+            bits_ops::Sub(bits, UBits(1, bits.bit_count())));
+}
+FUZZ_TEST(BitsOpsFuzzTest, DecrementEqualsSub1).WithDomains(NonemptyBits());
 
 TEST(BitsOpsTest, UMul) {
   EXPECT_EQ(bits_ops::UMul(Bits(), Bits()), Bits());
@@ -174,13 +227,14 @@ TEST(BitsOpsTest, UMul) {
   XLS_ASSERT_OK_AND_ASSIGN(
       Bits wide_rhs,
       ParseNumber("0x1000_0000_0000_0000_0001_1234_4444_3333_0000_1234"));
-  EXPECT_EQ(bits_ops::UMul(wide_lhs, wide_rhs).ToString(FormatPreference::kHex),
-            "0x200_0000_0000_0000_0000_1246_8888_8666_6000_0249_8dcb_bbbb_cccc_"
-            "ffff_ee12_b179_9995_3326_0004_b168");
+  EXPECT_EQ(
+      BitsToString(bits_ops::UMul(wide_lhs, wide_rhs), FormatPreference::kHex),
+      "0x200_0000_0000_0000_0000_1246_8888_8666_6000_0249_8dcb_bbbb_cccc_"
+      "ffff_ee12_b179_9995_3326_0004_b168");
 
   Bits result = bits_ops::UMul(Bits::AllOnes(65), Bits::AllOnes(65));
   EXPECT_EQ(result.bit_count(), 130);
-  EXPECT_EQ(result.ToString(FormatPreference::kHex),
+  EXPECT_EQ(BitsToString(result, FormatPreference::kHex),
             "0x3_ffff_ffff_ffff_fffc_0000_0000_0000_0001");
 }
 
@@ -198,9 +252,10 @@ TEST(BitsOpsTest, SMul) {
   XLS_ASSERT_OK_AND_ASSIGN(
       Bits wide_rhs,
       ParseNumber("0x1000_0000_0000_0000_0001_1234_4444_3333_0000_1234"));
-  EXPECT_EQ(bits_ops::SMul(wide_lhs, wide_rhs).ToString(FormatPreference::kHex),
-            "0xfff_ffff_ffff_ffff_fffa_cdcb_bbbb_cccc_ffff_ee12_b179_9995_3326_"
-            "0004_b168");
+  EXPECT_EQ(
+      BitsToString(bits_ops::SMul(wide_lhs, wide_rhs), FormatPreference::kHex),
+      "0xfff_ffff_ffff_ffff_fffa_cdcb_bbbb_cccc_ffff_ee12_b179_9995_3326_"
+      "0004_b168");
 }
 
 TEST(BitsOpsTest, UDiv) {
@@ -219,9 +274,10 @@ TEST(BitsOpsTest, UDiv) {
       Bits wide_lhs,
       ParseNumber("0xffff_ffff_ffff_ffff_ffff_0000_0000_0000_0000_0000"));
   XLS_ASSERT_OK_AND_ASSIGN(Bits wide_rhs, ParseNumber("0x1000_0000_0000_0000"));
-  EXPECT_EQ(bits_ops::UDiv(wide_lhs,
-                           bits_ops::ZeroExtend(wide_rhs, wide_lhs.bit_count()))
-                .ToString(FormatPreference::kHex),
+  EXPECT_EQ(BitsToString(
+                bits_ops::UDiv(wide_lhs, bits_ops::ZeroExtend(
+                                             wide_rhs, wide_lhs.bit_count())),
+                FormatPreference::kHex),
             "0xf_ffff_ffff_ffff_ffff_fff0_0000");
 }
 
@@ -241,9 +297,10 @@ TEST(BitsOpsTest, UMod) {
       Bits wide_lhs,
       ParseNumber("0xffff_ffff_ffff_ffff_ffff_0000_0000_1002_3004_5006"));
   XLS_ASSERT_OK_AND_ASSIGN(Bits wide_rhs, ParseNumber("0x1000_0000_0000_0000"));
-  EXPECT_EQ(bits_ops::UMod(wide_lhs,
-                           bits_ops::ZeroExtend(wide_rhs, wide_lhs.bit_count()))
-                .ToString(FormatPreference::kHex),
+  EXPECT_EQ(BitsToString(
+                bits_ops::UMod(wide_lhs, bits_ops::ZeroExtend(
+                                             wide_rhs, wide_lhs.bit_count())),
+                FormatPreference::kHex),
             "0x1002_3004_5006");
 }
 
@@ -280,9 +337,10 @@ TEST(BitsOpsTest, SDiv) {
       Bits wide_lhs,
       ParseNumber("0xffff_ffff_ffff_ffff_ffff_0000_0000_0000_0000_0000"));
   XLS_ASSERT_OK_AND_ASSIGN(Bits wide_rhs, ParseNumber("0x1000_0000_0000_0000"));
-  EXPECT_EQ(bits_ops::SDiv(wide_lhs,
-                           bits_ops::ZeroExtend(wide_rhs, wide_lhs.bit_count()))
-                .ToString(FormatPreference::kHex),
+  EXPECT_EQ(BitsToString(
+                bits_ops::SDiv(wide_lhs, bits_ops::ZeroExtend(
+                                             wide_rhs, wide_lhs.bit_count())),
+                FormatPreference::kHex),
             "0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_fff0_0000");
 }
 
@@ -315,9 +373,10 @@ TEST(BitsOpsTest, SMod) {
       Bits wide_lhs,
       ParseNumber("0xffff_ffff_ffff_ffff_ffff_0000_0000_a000_b000_c000"));
   XLS_ASSERT_OK_AND_ASSIGN(Bits wide_rhs, ParseNumber("0x1000_0000_0000_0000"));
-  EXPECT_EQ(bits_ops::SMod(wide_lhs,
-                           bits_ops::ZeroExtend(wide_rhs, wide_lhs.bit_count()))
-                .ToString(FormatPreference::kHex),
+  EXPECT_EQ(BitsToString(
+                bits_ops::SMod(wide_lhs, bits_ops::ZeroExtend(
+                                             wide_rhs, wide_lhs.bit_count())),
+                FormatPreference::kHex),
             "0xffff_ffff_ffff_ffff_ffff_ffff_f000_a000_b000_c000");
 }
 
@@ -362,6 +421,48 @@ TEST(BitsOpsTest, UnsignedComparisons) {
   EXPECT_FALSE(bits_ops::ULessThan(huger, huge));
   EXPECT_TRUE(bits_ops::ULessThan(huge, huger));
   EXPECT_TRUE(bits_ops::ULessThan(bits_ops::ZeroExtend(huge, 10000), huger));
+}
+
+TEST(BitsOpsTest, UAtLeastPredecessor) {
+  // 0-width
+  EXPECT_TRUE(bits_ops::UAtLeastPredecessor(Bits(0), Bits(0)));
+
+  // 1-width
+  EXPECT_TRUE(
+      bits_ops::UAtLeastPredecessor(UBits(0, 1), UBits(0, 1)));  // b == c
+  EXPECT_TRUE(
+      bits_ops::UAtLeastPredecessor(UBits(1, 1), UBits(0, 1)));  // b > c
+  EXPECT_TRUE(
+      bits_ops::UAtLeastPredecessor(UBits(0, 1), UBits(1, 1)));  // b + 1 == c
+
+  // 8-width
+  EXPECT_TRUE(bits_ops::UAtLeastPredecessor(UBits(10, 8), UBits(10, 8)));
+  EXPECT_TRUE(bits_ops::UAtLeastPredecessor(UBits(11, 8), UBits(10, 8)));
+  EXPECT_TRUE(bits_ops::UAtLeastPredecessor(UBits(9, 8), UBits(10, 8)));
+  EXPECT_FALSE(bits_ops::UAtLeastPredecessor(UBits(8, 8), UBits(10, 8)));
+  EXPECT_TRUE(bits_ops::UAtLeastPredecessor(
+      UBits(255, 8), UBits(0, 8)));  // b >= c (also wrap)
+
+  // 64-width
+  EXPECT_TRUE(bits_ops::UAtLeastPredecessor(UBits(0, 64), UBits(0, 64)));
+  EXPECT_TRUE(bits_ops::UAtLeastPredecessor(UBits(1, 64), UBits(0, 64)));
+  EXPECT_TRUE(bits_ops::UAtLeastPredecessor(UBits(0, 64), UBits(1, 64)));
+  EXPECT_TRUE(bits_ops::UAtLeastPredecessor(UBits(0xFFFFFFFFFFFFFFFFULL, 64),
+                                            UBits(0, 64)));
+  EXPECT_TRUE(bits_ops::UAtLeastPredecessor(UBits(0xFFFFFFFFFFFFFFFEULL, 64),
+                                            UBits(0xFFFFFFFFFFFFFFFFULL, 64)));
+
+  // 128-width
+  Bits b_128_1 =
+      bits_ops::Concat({UBits(0, 64), UBits(0xFFFFFFFFFFFFFFFFULL, 64)});
+  Bits c_128_1 = bits_ops::Concat({UBits(1, 64), UBits(0, 64)});
+  EXPECT_TRUE(bits_ops::UAtLeastPredecessor(b_128_1, c_128_1));  // b + 1 == c
+
+  Bits b_128_2 =
+      bits_ops::Concat({UBits(0, 64), UBits(0xFFFFFFFFFFFFFFFEULL, 64)});
+  EXPECT_FALSE(bits_ops::UAtLeastPredecessor(b_128_2, c_128_1));
+
+  EXPECT_TRUE(bits_ops::UAtLeastPredecessor(c_128_1, b_128_1));  // b > c
 }
 
 TEST(BitsOpsTest, UnsignedEqualComparisons) {
@@ -756,7 +857,7 @@ TEST(BitsOpsTest, DropLeadingZeroes) {
 }
 
 TEST(BitsOpsTest, BitSliceUpdate) {
-  // Sanity check a few values.
+  // Validate a few values.
   EXPECT_EQ(bits_ops::BitSliceUpdate(Bits(), 0, Bits()), Bits());
   EXPECT_EQ(bits_ops::BitSliceUpdate(Bits(), 42, Bits()), Bits());
   EXPECT_EQ(bits_ops::BitSliceUpdate(UBits(0x1234abcd, 32), 0, UBits(7, 4)),
@@ -793,6 +894,381 @@ TEST(BitsOpsTest, BitSliceUpdate) {
     }
   }
 }
+
+// Will initialize a bunch of boolean arrays with numbers in the following tests
+// NOLINTBEGIN(readability-implicit-bool-conversion)
+// NOLINTBEGIN(modernize-use-bool-literals)
+TEST(BitsOpsTest, LongestCommonPrefixLSBTypical) {
+  // Simple typical example
+  Bits x(absl::InlinedVector<bool, 1>{1, 1, 0, 1, 1});
+  Bits y(absl::InlinedVector<bool, 1>{1, 1, 0, 0, 1});
+  Bits expected(absl::InlinedVector<bool, 1>{1, 1, 0});
+  EXPECT_EQ(bits_ops::LongestCommonPrefixLSB({x, y}), expected);
+}
+
+TEST(BitsOpsTest, LongestCommonPrefixLSBEmptyResult) {
+  // Differ in the first bit => common prefix is the empty bitstring
+  Bits x(absl::InlinedVector<bool, 1>{0, 1, 0, 1, 1});
+  Bits y(absl::InlinedVector<bool, 1>{1, 1, 0, 0, 1});
+  Bits expected(0);
+  EXPECT_EQ(bits_ops::LongestCommonPrefixLSB({x, y}), expected);
+}
+
+TEST(BitsOpsTest, LongestCommonPrefixLSBSame) {
+  // Everything the same => common prefix is the entire bitstring
+  Bits x(absl::InlinedVector<bool, 1>{1, 1, 0, 0, 1});
+  Bits y(absl::InlinedVector<bool, 1>{1, 1, 0, 0, 1});
+  Bits expected(absl::InlinedVector<bool, 1>{1, 1, 0, 0, 1});
+  EXPECT_EQ(bits_ops::LongestCommonPrefixLSB({x, y}), expected);
+}
+
+TEST(BitsOpsTest, LongestCommonPrefixLSBMoreThan2) {
+  // Example with more than 2 bitstrings
+  Bits x(absl::InlinedVector<bool, 1>{0, 1, 1, 1, 1});
+  Bits y(absl::InlinedVector<bool, 1>{0, 1, 1, 0, 1});
+  Bits z(absl::InlinedVector<bool, 1>{0, 1, 1, 1, 0});
+  Bits expected(absl::InlinedVector<bool, 1>{0, 1, 1});
+  EXPECT_EQ(bits_ops::LongestCommonPrefixLSB({x, y, z}), expected);
+}
+
+TEST(BitsOpsTest, LongestCommonPrefixMSBTypical) {
+  // Simple typical example
+  Bits x(absl::InlinedVector<bool, 1>{1, 1, 0, 1, 1});
+  Bits y(absl::InlinedVector<bool, 1>{1, 0, 0, 1, 1});
+  Bits expected(absl::InlinedVector<bool, 1>{0, 1, 1});
+  EXPECT_EQ(bits_ops::LongestCommonPrefixMSB({x, y}), expected)
+      << "lcp: " << bits_ops::LongestCommonPrefixMSB({x, y}).ToDebugString()
+      << " , expected: " << expected.ToDebugString();
+}
+
+TEST(BitsOpsTest, LongestCommonPrefixMSBEmptyResult) {
+  // Differ in the first bit => common prefix is the empty bitstring
+  Bits x(absl::InlinedVector<bool, 1>{1, 1, 0, 1, 0});
+  Bits y(absl::InlinedVector<bool, 1>{1, 0, 0, 1, 1});
+  Bits expected(0);
+  EXPECT_EQ(bits_ops::LongestCommonPrefixMSB({x, y}), expected);
+}
+
+TEST(BitsOpsTest, LongestCommonPrefixMSBSame) {
+  // Everything the same => common prefix is the entire bitstring
+  Bits x(absl::InlinedVector<bool, 1>{1, 0, 0, 1, 1});
+  Bits y(absl::InlinedVector<bool, 1>{1, 0, 0, 1, 1});
+  Bits expected(absl::InlinedVector<bool, 1>{1, 0, 0, 1, 1});
+  EXPECT_EQ(bits_ops::LongestCommonPrefixMSB({x, y}), expected);
+}
+
+TEST(BitsOpsTest, LongestCommonPrefixMSBMoreThan2) {
+  // Example with more than 2 bitstrings
+  Bits x(absl::InlinedVector<bool, 1>{1, 1, 1, 1, 0});
+  Bits y(absl::InlinedVector<bool, 1>{1, 0, 1, 1, 0});
+  Bits z(absl::InlinedVector<bool, 1>{0, 1, 1, 1, 0});
+  Bits expected(absl::InlinedVector<bool, 1>{1, 1, 0});
+  EXPECT_EQ(bits_ops::LongestCommonPrefixMSB({x, y, z}), expected);
+}
+
+// NOLINTEND(modernize-use-bool-literals)
+// NOLINTEND(readability-implicit-bool-conversion)
+
+void TestBinary(const Bits& b, const std::string& expected) {
+  EXPECT_EQ(BitsToString(b, FormatPreference::kBinary), expected);
+  EXPECT_EQ(BitsToString(b, FormatPreference::kPlainBinary),
+            ToPlainString(expected));
+}
+
+void TestHex(const Bits& b, const std::string& expected) {
+  EXPECT_EQ(BitsToString(b, FormatPreference::kHex), expected);
+  EXPECT_EQ(BitsToString(b, FormatPreference::kPlainHex),
+            ToPlainString(expected));
+}
+
+void TestDecimal(const Bits& b, const std::string& unsigned_str,
+                 const std::string& signed_str) {
+  EXPECT_EQ(BitsToString(b, FormatPreference::kUnsignedDecimal), unsigned_str);
+  EXPECT_EQ(BitsToString(b, FormatPreference::kSignedDecimal), signed_str);
+}
+
+TEST(BitsOpsTest, ToStringEmptyBits) {
+  Bits empty_bits(0);
+  EXPECT_EQ(BitsToString(empty_bits, FormatPreference::kUnsignedDecimal), "0");
+  EXPECT_EQ(BitsToString(empty_bits, FormatPreference::kSignedDecimal), "0");
+  TestHex(empty_bits, "0x0");
+  TestBinary(empty_bits, "0b0");
+  TestDecimal(empty_bits, "0", "0");
+  EXPECT_EQ(BitsToString(empty_bits, FormatPreference::kUnsignedDecimal,
+                         /*include_bit_count=*/true),
+            "0 [0 bits]");
+  EXPECT_EQ(BitsToString(empty_bits, FormatPreference::kSignedDecimal,
+                         /*include_bit_count=*/true),
+            "0 [0 bits]");
+}
+
+TEST(BitsOpsTest, U128HighBit) {
+  auto b = Bits(128).UpdateWithSet(127, true);
+  TestHex(b, "0x8000_0000_0000_0000_0000_0000_0000_0000");
+  TestBinary(b,
+             "0b1000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_"
+             "0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_"
+             "0000_0000_0000_0000_0000_0000_0000");
+  TestDecimal(b, "170141183460469231731687303715884105728",
+              "-170141183460469231731687303715884105728");
+}
+
+TEST(BitsOpsTest, ToStringValue1U1) {
+  Bits b1 = UBits(1, 1);
+  EXPECT_EQ(BitsToString(b1, FormatPreference::kUnsignedDecimal), "1");
+  EXPECT_EQ(BitsToString(b1, FormatPreference::kSignedDecimal), "-1");
+  TestHex(b1, "0x1");
+  TestBinary(b1, "0b1");
+  TestDecimal(b1, "1", "-1");
+}
+
+TEST(BitsOptTest, ToStringValue1U16) {
+  const Bits b = UBits(1, 16);
+  TestBinary(b, "0b1");
+  TestHex(b, "0x1");
+  TestDecimal(b, "1", "1");
+}
+
+TEST(BitsOptTest, ToStringValue42U7) {
+  Bits b42 = UBits(42, 7);
+  EXPECT_EQ(BitsToString(b42, FormatPreference::kUnsignedDecimal), "42");
+  EXPECT_EQ(BitsToString(b42, FormatPreference::kSignedDecimal), "42");
+  TestHex(b42, "0x2a");
+  TestBinary(b42, "0b10_1010");
+  TestDecimal(b42, "42", "42");
+}
+
+TEST(BitsOptTest, ToStringPrimeBits64) {
+  const Bits prime64 = PrimeBits(64);
+  EXPECT_EQ(
+      prime64.ToDebugString(),
+      "0b0010100000100010100010100010000010100010100010100010101010111100");
+  EXPECT_EQ(BitsToString(prime64, FormatPreference::kUnsignedDecimal),
+            "2892025783495830204");
+  EXPECT_EQ(BitsToString(prime64, FormatPreference::kSignedDecimal),
+            "2892025783495830204");
+  TestHex(prime64, "0x2822_8a20_a28a_2abc");
+  TestBinary(prime64,
+             "0b10_1000_0010_0010_1000_1010_0010_0000_1010_0010_1000_1010_0010_"
+             "1010_1011_1100");
+  TestDecimal(prime64, "2892025783495830204", "2892025783495830204");
+}
+
+TEST(BitsOptTest, ToStringPrimeBits65) {
+  // Test widths wider than 64. Decimal output for wide bit counts is not
+  // supported.
+  const Bits b = PrimeBits(65);
+  EXPECT_EQ(
+      b.ToDebugString(),
+      "0b00010100000100010100010100010000010100010100010100010101010111100");
+  TestHex(b, "0x2822_8a20_a28a_2abc");
+  TestBinary(b,
+             "0b10_1000_0010_0010_1000_1010_0010_0000_1010_0010_1000_1010_0010_"
+             "1010_1011_1100");
+  TestDecimal(b, "2892025783495830204", "2892025783495830204");
+}
+
+TEST(BitsOptTest, ToStringPrimeBits96) {
+  const Bits b = PrimeBits(96);
+  EXPECT_EQ(b.ToDebugString(),
+            "0b0000001000001000100000101000100000101000001000101000101000100000"
+            "10100010100010100010101010111100");
+  TestHex(b, "0x208_8288_2822_8a20_a28a_2abc");
+  TestBinary(b,
+             "0b10_0000_1000_1000_0010_1000_1000_0010_1000_0010_0010_1000_1010_"
+             "0010_0000_1010_0010_1000_1010_0010_1010_1011_1100");
+  TestDecimal(b, "629257845491600032719841980", "629257845491600032719841980");
+}
+
+TEST(BitsOpsTest, ToRawStringEmptyBits) {
+  Bits empty_bits(0);
+  EXPECT_EQ(empty_bits.ToDebugString(), "0b");
+  EXPECT_EQ(BitsToRawDigits(empty_bits, FormatPreference::kUnsignedDecimal),
+            "0");
+  EXPECT_EQ(BitsToRawDigits(empty_bits, FormatPreference::kSignedDecimal), "0");
+  EXPECT_EQ(BitsToRawDigits(empty_bits, FormatPreference::kHex), "0");
+  EXPECT_EQ(BitsToRawDigits(empty_bits, FormatPreference::kBinary), "0");
+  EXPECT_EQ(BitsToRawDigits(empty_bits, FormatPreference::kHex,
+                            /*emit_leading_zeros=*/true),
+            "0");
+  EXPECT_EQ(BitsToRawDigits(empty_bits, FormatPreference::kBinary,
+                            /*emit_leading_zeros=*/true),
+            "0");
+}
+
+TEST(BitsOpsTest, ToRawDigitsValue1U16) {
+  EXPECT_EQ(UBits(1, 16).ToDebugString(), "0b0000000000000001");
+  EXPECT_EQ(BitsToRawDigits(UBits(1, 16), FormatPreference::kBinary), "1");
+  EXPECT_EQ(BitsToRawDigits(UBits(1, 16), FormatPreference::kHex), "1");
+  EXPECT_EQ(BitsToRawDigits(UBits(1, 16), FormatPreference::kBinary,
+                            /*emit_leading_zeros=*/true),
+            "0000_0000_0000_0001");
+  EXPECT_EQ(BitsToRawDigits(UBits(1, 16), FormatPreference::kPlainBinary,
+                            /*emit_leading_zeros=*/true),
+            "0000000000000001");
+  EXPECT_EQ(BitsToRawDigits(UBits(1, 16), FormatPreference::kHex,
+                            /*emit_leading_zeros=*/true),
+            "0001");
+  EXPECT_EQ(BitsToRawDigits(UBits(1, 16), FormatPreference::kPlainHex,
+                            /*emit_leading_zeros=*/true),
+            "0001");
+}
+
+TEST(BitsOpsTest, ToRawDigitsValue0x1bU13) {
+  EXPECT_EQ(UBits(0x1b, 13).ToDebugString(), "0b0000000011011");
+  EXPECT_EQ(BitsToRawDigits(UBits(0x1b, 13), FormatPreference::kBinary),
+            "1_1011");
+  EXPECT_EQ(BitsToRawDigits(UBits(0x1b, 13), FormatPreference::kHex), "1b");
+  EXPECT_EQ(BitsToRawDigits(UBits(0x1b, 13), FormatPreference::kBinary,
+                            /*emit_leading_zeros=*/true),
+            "0_0000_0001_1011");
+  EXPECT_EQ(BitsToRawDigits(UBits(0x1b, 13), FormatPreference::kPlainBinary,
+                            /*emit_leading_zeros=*/true),
+            "0000000011011");
+  EXPECT_EQ(BitsToRawDigits(UBits(0x1b, 13), FormatPreference::kHex,
+                            /*emit_leading_zeros=*/true),
+            "001b");
+  EXPECT_EQ(BitsToRawDigits(UBits(0x1b, 13), FormatPreference::kPlainHex,
+                            /*emit_leading_zeros=*/true),
+            "001b");
+}
+
+TEST(BitsOpsTest, ToRawDigitsValue0x55U17) {
+  EXPECT_EQ(UBits(0x55, 17).ToDebugString(), "0b00000000001010101");
+  EXPECT_EQ(BitsToRawDigits(UBits(0x55, 17), FormatPreference::kBinary,
+                            /*emit_leading_zeros=*/true),
+            "0_0000_0000_0101_0101");
+  EXPECT_EQ(BitsToRawDigits(UBits(0x55, 17), FormatPreference::kPlainBinary,
+                            /*emit_leading_zeros=*/true),
+            "00000000001010101");
+  EXPECT_EQ(BitsToRawDigits(UBits(0x55, 17), FormatPreference::kHex,
+                            /*emit_leading_zeros=*/true),
+            "0_0055");
+  EXPECT_EQ(BitsToRawDigits(UBits(0x55, 17), FormatPreference::kPlainHex,
+                            /*emit_leading_zeros=*/true),
+            "00055");
+}
+
+void BM_Increment(benchmark::State& state) {
+  Bits f = Bits::AllOnes(state.range(0));
+  for (auto _ : state) {
+    auto v = bits_ops::Increment(f);
+    benchmark::DoNotOptimize(v);
+  }
+}
+BENCHMARK(BM_Increment)->Range(64, 1 << 20);
+
+void BM_AddNewOne(benchmark::State& state) {
+  Bits f = Bits::AllOnes(state.range(0));
+  for (auto _ : state) {
+    auto b = InlineBitmap::FromWord(1, state.range(0));
+    benchmark::DoNotOptimize(b);
+    auto one = Bits::FromBitmap(b);
+    benchmark::DoNotOptimize(one);
+    auto v = bits_ops::Add(f, one);
+    benchmark::DoNotOptimize(v);
+  }
+}
+BENCHMARK(BM_AddNewOne)->Range(64, 1 << 20);
+
+void BM_AddCachedOne(benchmark::State& state) {
+  Bits f = Bits::AllOnes(state.range(0));
+  Bits one = Bits::FromBitmap(InlineBitmap::FromWord(1, state.range(0)));
+  for (auto _ : state) {
+    auto v = bits_ops::Add(f, one);
+    benchmark::DoNotOptimize(v);
+  }
+}
+BENCHMARK(BM_AddCachedOne)->Range(64, 1 << 20);
+
+void BM_Decrement(benchmark::State& state) {
+  Bits f(state.range(0));
+  for (auto _ : state) {
+    auto v = bits_ops::Decrement(f);
+    benchmark::DoNotOptimize(v);
+  }
+}
+BENCHMARK(BM_Decrement)->Range(64, 1 << 20);
+
+void BM_SubNewOne(benchmark::State& state) {
+  Bits f(state.range(0));
+  for (auto _ : state) {
+    auto b = InlineBitmap::FromWord(1, state.range(0));
+    benchmark::DoNotOptimize(b);
+    auto one = Bits::FromBitmap(b);
+    benchmark::DoNotOptimize(one);
+    auto v = bits_ops::Sub(f, one);
+    benchmark::DoNotOptimize(v);
+  }
+}
+BENCHMARK(BM_SubNewOne)->Range(64, 1 << 20);
+
+void BM_SubCachedOne(benchmark::State& state) {
+  Bits f(state.range(0));
+  Bits one = Bits::FromBitmap(InlineBitmap::FromWord(1, state.range(0)));
+  for (auto _ : state) {
+    auto v = bits_ops::Sub(f, one);
+    benchmark::DoNotOptimize(v);
+  }
+}
+BENCHMARK(BM_SubCachedOne)->Range(64, 1 << 20);
+
+void BM_Truncate(benchmark::State& state) {
+  for (auto _ : state) {
+    Bits f(256);
+    auto v = bits_ops::Truncate(f, state.range(0));
+    benchmark::DoNotOptimize(v);
+    benchmark::DoNotOptimize(f);
+  }
+}
+BENCHMARK(BM_Truncate)->Range(0, 255);
+
+void BM_SignExtend(benchmark::State& state) {
+  for (auto _ : state) {
+    Bits f = state.range(0) ? Bits(32) : Bits::AllOnes(32);
+    auto v = bits_ops::SignExtend(f, state.range(1));
+    benchmark::DoNotOptimize(v);
+    benchmark::DoNotOptimize(f);
+  }
+}
+BENCHMARK(BM_SignExtend)->RangePair(0, 1, 33, 1 << 20);
+
+void BM_ZeroExtend(benchmark::State& state) {
+  for (auto _ : state) {
+    Bits f(32);
+    auto v = bits_ops::ZeroExtend(f, state.range(0));
+    benchmark::DoNotOptimize(v);
+    benchmark::DoNotOptimize(f);
+  }
+}
+BENCHMARK(BM_ZeroExtend)->Range(33, 1 << 20);
+
+void BM_TruncateMove(benchmark::State& state) {
+  for (auto _ : state) {
+    Bits f(256);
+    auto v = bits_ops::Truncate(std::move(f), state.range(0));
+    benchmark::DoNotOptimize(v);
+  }
+}
+BENCHMARK(BM_TruncateMove)->Range(0, 255);
+
+void BM_SignExtendMove(benchmark::State& state) {
+  for (auto _ : state) {
+    Bits f = state.range(0) ? Bits(32) : Bits::AllOnes(32);
+    auto v = bits_ops::SignExtend(std::move(f), state.range(1));
+    benchmark::DoNotOptimize(v);
+  }
+}
+BENCHMARK(BM_SignExtendMove)->RangePair(0, 1, 33, 1 << 20);
+
+void BM_ZeroExtendMove(benchmark::State& state) {
+  for (auto _ : state) {
+    Bits f(32);
+    auto v = bits_ops::ZeroExtend(std::move(f), state.range(0));
+    benchmark::DoNotOptimize(v);
+  }
+}
+BENCHMARK(BM_ZeroExtendMove)->Range(33, 1 << 20);
 
 }  // namespace
 }  // namespace xls

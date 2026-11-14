@@ -14,6 +14,14 @@
 #ifndef XLS_COMMON_THREAD_H_
 #define XLS_COMMON_THREAD_H_
 
-#include "xls/common/thread.inc"
+namespace xls {
+
+class Thread;
+
+int AvailableCPUs();
+
+}  // namespace xls
+
+#include "xls/common/thread.inc"  // IWYU pragma: keep
 
 #endif  // XLS_COMMON_THREAD_H_

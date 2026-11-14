@@ -12,13 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import xls.dslx.tests.mod_parametric_id_indirect
+import xls.dslx.tests.mod_parametric_id_indirect;
 
-fn main(x: u32) -> u32 {
-  mod_parametric_id_indirect::id_indirect(x)
-}
+fn main(x: u32) -> u32 { mod_parametric_id_indirect::id_indirect(x) }
 
-#![test]
-fn main_test() {
-  assert_eq(u32:42, main(u32:42))
-}
+#[test]
+fn main_test() { assert_eq(u32:42, main(u32:42)) }

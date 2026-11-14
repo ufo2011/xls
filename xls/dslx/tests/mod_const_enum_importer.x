@@ -12,17 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import xls.dslx.tests.mod_simple_const_enum
+import xls.dslx.tests.mod_simple_const_enum;
 
 type MyEnum = mod_simple_const_enum::MyEnum;
 
-fn main(x: MyEnum) -> bool {
-  x == mod_simple_const_enum::MY_FOO
-}
+fn main(x: MyEnum) -> bool { x == mod_simple_const_enum::MY_FOO }
 
-#![test]
+#[test]
 fn main_test() {
-  let _ = assert_eq(main(MyEnum::FOO), true);
-  let _ = assert_eq(main(MyEnum::BAR), false);
-  ()
+    assert_eq(main(MyEnum::FOO), true);
+    assert_eq(main(MyEnum::BAR), false);
 }

@@ -12,8 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
 package(
+    default_applicable_licenses = ["//:license"],
     default_visibility = ["//xls:xls_internal"],
+    features = [
+        "layering_check",
+        "parse_headers",
+    ],
     licenses = ["notice"],  # Apache 2.0
 )
 
@@ -23,13 +31,19 @@ cc_library(
     hdrs = [
         "basic_integration_algorithm.h",
         "integration_algorithm.h",
-        "integration_algorithm_implementation.h",
     ],
     deps = [
-        "@com_google_absl//absl/status:statusor",
+        "//xls/common/status:ret_check",
+        "//xls/common/status:status_macros",
         "//xls/contrib/integrator:integration_options",
         "//xls/contrib/integrator:ir_integrator",
         "//xls/ir",
+        "//xls/ir:op",
+        "//xls/ir:verifier",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -37,15 +51,17 @@ cc_test(
     name = "basic_integration_algorithm_test",
     srcs = ["basic_integration_algorithm_test.cc"],
     deps = [
-        ":basic_integration_algorithm",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
         "//xls/contrib/integrator:integration_builder",
+        "//xls/contrib/integrator:integration_options",
         "//xls/contrib/integrator:ir_integrator",
         "//xls/ir",
+        "//xls/ir:bits",
         "//xls/ir:ir_matcher",
-        "//xls/ir:ir_parser",
         "//xls/ir:ir_test_base",
-        "@com_google_googletest//:gtest",
+        "//xls/ir:source_location",
+        "//xls/ir:verifier",
+        "@googletest//:gtest",
     ],
 )

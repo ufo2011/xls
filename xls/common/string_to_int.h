@@ -16,9 +16,9 @@
 #define XLS_COMMON_STRING_TO_INT_H_
 
 #include <cstdint>
+#include <string_view>
 
 #include "absl/status/statusor.h"
-#include "absl/strings/string_view.h"
 
 namespace xls {
 
@@ -33,7 +33,7 @@ namespace xls {
 //
 // InvalidArgumentError: if invalid digits are present in the string for the
 // determined base, or if the value overflows a 64-bit value.
-absl::StatusOr<int64_t> StrTo64Base(absl::string_view s, int base);
+absl::StatusOr<int64_t> StrTo64Base(std::string_view s, int base);
 
 }  // namespace xls
 

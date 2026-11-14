@@ -14,11 +14,12 @@
 
 #include "xls/noc/simulation/parameters.h"
 
-#include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "xls/common/status/matchers.h"
+#include "xls/noc/config/link_config_proto_builder.h"
 #include "xls/noc/config/network_config.pb.h"
 #include "xls/noc/config/network_config_proto_builder.h"
+#include "xls/noc/simulation/common.h"
 
 namespace xls {
 namespace noc {
@@ -26,6 +27,11 @@ namespace {
 
 TEST(SimParametersTest, NetworkAndLinkParam) {
   NetworkConfigProtoBuilder builder("Test");
+
+  builder.WithVirtualChannel("VCA").WithFlitBitWidth(128).WithDepth(13);
+  builder.WithVirtualChannel("VCB").WithFlitBitWidth(256).WithDepth(34);
+  builder.WithVirtualChannel("VCC").WithFlitBitWidth(64).WithDepth(5);
+
   LinkConfigProtoBuilder link = builder.WithLink("Link0");
 
   link.WithPhitBitWidth(10);
@@ -39,6 +45,15 @@ TEST(SimParametersTest, NetworkAndLinkParam) {
 
   EXPECT_EQ(network_param.GetName(), "Test");
   EXPECT_EQ(&network_param.GetNetworkProto(), &nc_proto);
+  EXPECT_EQ(network_param.VirtualChannelCount(), 3);
+  EXPECT_EQ(network_param.GetVirtualChannels().at(0).GetDepth(), 13);
+  EXPECT_EQ(network_param.GetVirtualChannels().at(1).GetDepth(), 34);
+  EXPECT_EQ(network_param.GetVirtualChannels().at(2).GetDepth(), 5);
+  EXPECT_EQ(network_param.GetVirtualChannels().at(0).GetFlitDataBitWidth(),
+            128);
+  EXPECT_EQ(network_param.GetVirtualChannels().at(1).GetFlitDataBitWidth(),
+            256);
+  EXPECT_EQ(network_param.GetVirtualChannels().at(2).GetFlitDataBitWidth(), 64);
 
   LinkParam link_param(nc_proto, link_proto);
 
@@ -173,19 +188,19 @@ TEST(SimParametersTest, NocParametersMap) {
   param_map.SetNetworkComponentParam(router_id, router_param);
   param_map.SetNetworkComponentParam(link_id, link_param);
 
-  EXPECT_EQ(absl::get<NetworkInterfaceSrcParam>(
+  EXPECT_EQ(std::get<NetworkInterfaceSrcParam>(
                 *param_map.GetNetworkComponentParam(ni_src_id))
                 .GetName(),
             "Ingress0");
-  EXPECT_EQ(absl::get<NetworkInterfaceSinkParam>(
+  EXPECT_EQ(std::get<NetworkInterfaceSinkParam>(
                 *param_map.GetNetworkComponentParam(ni_sink_id))
                 .GetName(),
             "Egress0");
   EXPECT_EQ(
-      absl::get<RouterParam>(*param_map.GetNetworkComponentParam(router_id))
+      std::get<RouterParam>(*param_map.GetNetworkComponentParam(router_id))
           .GetName(),
       "Router0");
-  EXPECT_EQ(absl::get<LinkParam>(*param_map.GetNetworkComponentParam(link_id))
+  EXPECT_EQ(std::get<LinkParam>(*param_map.GetNetworkComponentParam(link_id))
                 .GetName(),
             "Link0");
 

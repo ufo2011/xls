@@ -14,13 +14,20 @@
 
 #include "xls/passes/verifier_checker.h"
 
+#include "absl/status/status.h"
 #include "xls/ir/verifier.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/pass_base.h"
 
 namespace xls {
 
-absl::Status VerifierChecker::Run(Package* p, const PassOptions& options,
-                                  PassResults* results) const {
-  return VerifyPackage(p);
+absl::Status VerifierChecker::Run(Package* p,
+                                  const OptimizationPassOptions& options,
+                                  PassResults* results,
+                                  OptimizationContext& context) const {
+  return VerifyPackage(
+      p, /*codegen=*/false,
+      /*topo_sort=*/[&](FunctionBase* fb) { return context.TopoSort(fb); });
 }
 
 }  // namespace xls

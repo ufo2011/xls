@@ -16,16 +16,22 @@
 #define XLS_SOLVERS_Z3_LEC_H_
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/types/optional.h"
+#include "xls/ir/node.h"
 #include "xls/ir/package.h"
 #include "xls/netlist/netlist.h"
 #include "xls/scheduling/pipeline_schedule.h"
 #include "xls/solvers/z3_ir_translator.h"
 #include "xls/solvers/z3_netlist_translator.h"
+#include "z3/src/api/z3.h"  // IWYU pragma: keep
+#include "z3/src/api/z3_api.h"
 
 namespace xls {
 namespace solvers {
@@ -85,9 +91,9 @@ class Lec {
   Z3_context ctx() { return ir_translator_->ctx(); }
 
  private:
-  Lec(Package* ir_package, Function* ir_function,
-      netlist::rtl::Netlist* netlist, const std::string& netlist_module_name,
-      absl::optional<PipelineSchedule> schedule, int stage);
+  Lec(Function* ir_function, netlist::rtl::Netlist* netlist,
+      const std::string& netlist_module_name,
+      std::optional<PipelineSchedule> schedule, int stage);
   absl::Status Init();
   absl::Status CreateIrTranslator();
   absl::Status CreateNetlistTranslator();
@@ -124,7 +130,7 @@ class Lec {
       const Node* node);
 
   // Returns the name of the netlist wire corresponding to the input node.
-  std::string NodeToNetlistName(const Node* node, absl::optional<int> bit_index,
+  std::string NodeToNetlistName(const Node* node, std::optional<int> bit_index,
                                 bool is_cell = true);
 
   // Gets strings comparing the IR to netlist values of the given node under the
@@ -137,7 +143,6 @@ class Lec {
   void MarkDontCareBits(const std::vector<Z3_ast>& nl_bits,
                         std::string& nl_string);
 
-  Package* ir_package_;
   Function* ir_function_;
   std::unique_ptr<IrTranslator> ir_translator_;
 
@@ -152,17 +157,17 @@ class Lec {
   std::vector<Z3_ast> ir_outputs_;
   std::vector<Z3_ast> netlist_outputs_;
 
-  absl::optional<PipelineSchedule> schedule_;
+  std::optional<PipelineSchedule> schedule_;
   int stage_;
 
   // Z3 elements are, under the hood, void pointers, but let's respect the
-  // interface and use absl::optional to determine live-ness.
-  absl::optional<Z3_solver> solver_;
+  // interface and use std::optional to determine live-ness.
+  std::optional<Z3_solver> solver_;
 
   // Satisfiable is equivalent to "model_.has_value()", but having an explicit
   // value is more understandable.
   bool satisfiable_;
-  absl::optional<Z3_model> model_;
+  std::optional<Z3_model> model_;
 };
 
 }  // namespace z3

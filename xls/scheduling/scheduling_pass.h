@@ -15,11 +15,17 @@
 #ifndef XLS_SCHEDULING_SCHEDULING_PASS_H_
 #define XLS_SCHEDULING_SCHEDULING_PASS_H_
 
-#include "absl/types/optional.h"
-#include "xls/delay_model/delay_estimator.h"
+#include <variant>
+#include <vector>
+
+#include "absl/status/statusor.h"
+#include "xls/estimators/delay_model/delay_estimator.h"
+#include "xls/fdo/synthesizer.h"
+#include "xls/ir/function_base.h"
 #include "xls/ir/package.h"
 #include "xls/passes/pass_base.h"
 #include "xls/scheduling/pipeline_schedule.h"
+#include "xls/scheduling/scheduling_options.h"
 
 namespace xls {
 
@@ -28,31 +34,60 @@ namespace xls {
 
 // Data structure operated on by scheduling passes. Contains the IR and the
 // associated schedule.
-struct SchedulingUnit {
-  Package* package;
-  absl::optional<PipelineSchedule> schedule;
+class SchedulingContext {
+ public:
+  // Create a SchedulingContext that operates only on `f`.
+  static SchedulingContext CreateForSingleFunction(FunctionBase* f);
+  // Create a SchedulingContext that operates on all functions and procs in `p`.
+  static SchedulingContext CreateForWholePackage(Package* p);
 
-  // Methods required by CompoundPassBase.
-  std::string DumpIr() const;
-  std::string name() const { return package->name(); }
+  SchedulingContext() = delete;
+
+  const PackageSchedule& package_schedule() const { return package_schedule_; }
+  PackageSchedule& package_schedule() { return package_schedule_; }
+
+  // Gets list of FunctionBases to be operated on by scheduling passes.
+  absl::StatusOr<std::vector<FunctionBase*>> GetSchedulableFunctions() const;
+  // Returns true if every function in `GetSchedulableFunctions()` has a
+  // schedule in `package_schedule()`.
+  bool IsScheduled() const;
+
+  const TransformMetrics& transform_metrics() const {
+    return ir_->transform_metrics();
+  }
+
+ protected:
+  explicit SchedulingContext(Package* p)
+      : schedulable_unit_(p), ir_(p), package_schedule_(p) {}
+  explicit SchedulingContext(FunctionBase* fb_to_schedule)
+      : schedulable_unit_(fb_to_schedule),
+        ir_(fb_to_schedule->package()),
+        package_schedule_(fb_to_schedule->package()) {}
+
+ private:
+  // If FunctionBase, only schedule the FunctionBase, else schedule the whole
+  // package.
+  std::variant<Package*, FunctionBase*> schedulable_unit_;
+  Package* ir_;
+  PackageSchedule package_schedule_;
 };
 
 // Options passed to each scheduling pass.
-struct SchedulingPassOptions : public PassOptions {
+struct SchedulingPassOptions : public PassOptionsBase {
   // The options to use when creating and mutating the schedule.
   SchedulingOptions scheduling_options;
 
   // Delay estimator to use for scheduling.
   const DelayEstimator* delay_estimator = nullptr;
+  const synthesis::Synthesizer* synthesizer = nullptr;
 };
 
-using SchedulingPassResults = PassResults;
-using SchedulingPass =
-    PassBase<SchedulingUnit, SchedulingPassOptions, SchedulingPassResults>;
+using SchedulingPass = PassBase<SchedulingPassOptions, SchedulingContext>;
 using SchedulingCompoundPass =
-    CompoundPassBase<SchedulingUnit, SchedulingPassOptions,
-                     SchedulingPassResults>;
+    CompoundPassBase<SchedulingPassOptions, SchedulingContext>;
 using SchedulingInvariantChecker = SchedulingCompoundPass::InvariantChecker;
+using SchedulingFunctionBasePass =
+    FunctionBasePass<SchedulingPassOptions, SchedulingContext>;
 
 }  // namespace xls
 

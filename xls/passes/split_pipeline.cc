@@ -1,0 +1,467 @@
+// Copyright 2026 The XLS Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "xls/passes/split_pipeline.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/algorithm/container.h"
+#include "absl/cleanup/cleanup.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/functional/function_ref.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/log/vlog_is_on.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
+#include "absl/types/span.h"
+#include "cppitertools/enumerate.hpp"
+#include "xls/common/status/status_macros.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/optimization_pass_pipeline.h"
+#include "xls/passes/optimization_pass_pipeline.pb.h"
+#include "xls/passes/optimization_pass_registry.h"
+
+namespace xls {
+
+namespace {
+constexpr int64_t kDefaultMinOptLevel = 0;
+constexpr int64_t kDefaultCapOptLevel = 5;
+
+struct PassInfo {
+  std::string name;
+  int64_t min_opt_level;
+  int64_t cap_opt_level;
+};
+
+// Recursively walks the given compound pass and accumulates a list of leaf pass
+// names along with their opt level ranges.
+absl::Status GetLeafPassHelper(
+    std::string_view pass_name,
+    const absl::flat_hash_map<std::string,
+                              OptimizationPipelineProto::CompoundPass>&
+        name_to_compound_pass_map,
+    const absl::flat_hash_set<std::string>& split_pass_names,
+    std::vector<PassInfo>& leaf_passes,
+    absl::flat_hash_set<std::string>& active_path,
+    int64_t default_min_opt_level = kDefaultMinOptLevel,
+    int64_t default_cap_opt_level = kDefaultCapOptLevel) {
+  if (active_path.contains(pass_name)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Cycle detected involving pass '", pass_name,
+                     "' and active path: ", absl::StrJoin(active_path, ", ")));
+  }
+
+  auto compound_pass_it = name_to_compound_pass_map.find(pass_name);
+  if (compound_pass_it == name_to_compound_pass_map.end()) {
+    leaf_passes.push_back(PassInfo{
+        .name = std::string(pass_name),
+        .min_opt_level = default_min_opt_level,
+        .cap_opt_level = default_cap_opt_level,
+    });
+    return absl::OkStatus();
+  }
+  const OptimizationPipelineProto::CompoundPass& compound_pass =
+      compound_pass_it->second;
+  const int64_t min_opt_level = compound_pass.options().has_min_opt_level()
+                                    ? compound_pass.options().min_opt_level()
+                                    : default_min_opt_level;
+  const int64_t cap_opt_level = compound_pass.options().has_cap_opt_level()
+                                    ? compound_pass.options().cap_opt_level()
+                                    : default_cap_opt_level;
+
+  if (split_pass_names.contains(pass_name)) {
+    leaf_passes.push_back(PassInfo{
+        .name = std::string(pass_name),
+        .min_opt_level = min_opt_level,
+        .cap_opt_level = cap_opt_level,
+    });
+    return absl::OkStatus();
+  }
+  if (compound_pass.fixedpoint()) {
+    leaf_passes.push_back(PassInfo{
+        .name = std::string(pass_name),
+        .min_opt_level = min_opt_level,
+        .cap_opt_level = cap_opt_level,
+    });
+    return absl::OkStatus();
+  }
+
+  active_path.insert(std::string(pass_name));
+  absl::Cleanup remove_from_path = [&active_path, pass_name] {
+    active_path.erase(pass_name);
+  };
+
+  for (const std::string_view pass : compound_pass.passes()) {
+    XLS_RETURN_IF_ERROR(GetLeafPassHelper(
+        pass, name_to_compound_pass_map, split_pass_names, leaf_passes,
+        active_path, min_opt_level, cap_opt_level));
+  }
+  return absl::OkStatus();
+}
+
+// Recursively walks the given optimization pipeline proto and returns a list
+// of leaf optimization pass infos. Leaf passes are passes that are not
+// CompoundPasses or that have fixedpoint set to true.
+absl::StatusOr<std::vector<PassInfo>> GetLeafPassInfos(
+    const OptimizationPipelineProto& pipeline_proto,
+    const absl::flat_hash_map<std::string,
+                              OptimizationPipelineProto::CompoundPass>&
+        name_to_compound_pass_map,
+    const absl::flat_hash_set<std::string>& split_pass_names) {
+  std::vector<PassInfo> leaf_passes;
+  absl::flat_hash_set<std::string> active_path;
+  for (const std::string_view pass : pipeline_proto.default_pipeline()) {
+    XLS_RETURN_IF_ERROR(GetLeafPassHelper(pass, name_to_compound_pass_map,
+                                          split_pass_names, leaf_passes,
+                                          active_path));
+  }
+  return leaf_passes;
+}
+
+// A segment of an optimization pipeline, consisting of a list of passes and
+// the top-level compound pass that contains them.
+struct CreateSegmentResult {
+  std::vector<OptimizationPipelineProto::CompoundPass> passes;
+  std::string top_level_pass_name;
+};
+
+// Creates a compound pass containing the given leaf passes. Will attempt to
+// create the minimum number of compound passes necessary to maintain the opt
+// levels of the input passes; this will be a single compound pass if all leaf
+// passes have the same opt level or two levels of compound passes otherwise.
+CreateSegmentResult CreateSegmentPass(
+    absl::Span<const PassInfo> passes,
+    absl::FunctionRef<std::string()> name_generator) {
+  CHECK(!passes.empty());
+  std::vector<OptimizationPipelineProto::CompoundPass> generated_passes;
+  generated_passes.reserve(passes.size() + 1);
+
+  for (const PassInfo& pass : passes) {
+    if (!generated_passes.empty()) {
+      OptimizationPipelineProto::CompoundPass& current_pass =
+          generated_passes.back();
+      if (current_pass.options().min_opt_level() == pass.min_opt_level &&
+          current_pass.options().cap_opt_level() == pass.cap_opt_level) {
+        current_pass.add_passes(pass.name);
+        continue;
+      }
+    }
+    OptimizationPipelineProto::CompoundPass new_pass;
+    new_pass.set_short_name(name_generator());
+    new_pass.mutable_options()->set_min_opt_level(pass.min_opt_level);
+    new_pass.mutable_options()->set_cap_opt_level(pass.cap_opt_level);
+    new_pass.add_passes(pass.name);
+    generated_passes.emplace_back(std::move(new_pass));
+  }
+
+  if (generated_passes.size() == 1) {
+    std::string_view top_level_pass_name =
+        generated_passes.front().short_name();
+    return CreateSegmentResult{
+        .passes = std::move(generated_passes),
+        .top_level_pass_name = std::string(top_level_pass_name),
+    };
+  }
+
+  // Create a second tier to contain the generated compound passes.
+  OptimizationPipelineProto::CompoundPass top_level_pass;
+  std::string top_level_pass_name = name_generator();
+  top_level_pass.set_short_name(top_level_pass_name);
+  for (const OptimizationPipelineProto::CompoundPass& generated_pass :
+       generated_passes) {
+    top_level_pass.add_passes(generated_pass.short_name());
+  }
+  generated_passes.emplace_back(std::move(top_level_pass));
+  return CreateSegmentResult{
+      .passes = std::move(generated_passes),
+      .top_level_pass_name = std::string(top_level_pass_name),
+  };
+}
+
+struct SplitPassResult {
+  std::vector<SplitPipelineFactory::SplitPassInfo> split_pass_infos;
+  std::vector<OptimizationPipelineProto::CompoundPass> generated_passes;
+};
+
+// Returns an ordered list of pass information splitting the optimization
+// pipeline up based on the defined split passes, using the default pipeline
+// order.
+absl::StatusOr<SplitPassResult> GetSplitPassInfos(
+    const OptimizationPipelineProto& pipeline_proto,
+    absl::Span<const std::string> split_passes) {
+  VLOG(5) << "Creating split pass info for splits:";
+  VLOG(5) << "  " << absl::StrJoin(split_passes, ", ");
+
+  absl::flat_hash_map<std::string, OptimizationPipelineProto::CompoundPass>
+      pass_name_to_compound_pass;
+  for (const OptimizationPipelineProto::CompoundPass& compound_pass :
+       pipeline_proto.compound_passes()) {
+    pass_name_to_compound_pass[compound_pass.short_name()] = compound_pass;
+  }
+
+  absl::flat_hash_set<std::string> split_pass_names(split_passes.begin(),
+                                                    split_passes.end());
+  XLS_ASSIGN_OR_RETURN(
+      std::vector<PassInfo> leaf_passes,
+      GetLeafPassInfos(pipeline_proto, pass_name_to_compound_pass,
+                       split_pass_names));
+
+  // Determine splits
+  absl::flat_hash_set<std::string> seen_splits;
+  std::vector<size_t> split_indices;
+  for (size_t i = 0; i < leaf_passes.size(); ++i) {
+    const PassInfo& pass_info = leaf_passes[i];
+    if (!split_pass_names.contains(pass_info.name)) {
+      continue;
+    }
+    if (!seen_splits.insert(pass_info.name).second) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Multiple instances of split pass '", pass_info.name,
+                       "' found in pipeline"));
+    }
+    split_indices.push_back(i);
+  }
+
+  if (seen_splits.size() < split_pass_names.size()) {
+    std::vector<std::string> missing_passes;
+    for (const std::string& name : split_pass_names) {
+      if (!seen_splits.contains(name)) {
+        missing_passes.push_back(name);
+      }
+    }
+    return absl::InvalidArgumentError(
+        absl::StrCat("Requested split passes not found as valid leaf passes: ",
+                     absl::StrJoin(missing_passes, ", ")));
+  }
+
+  auto unique_pass_name_generator = [&pass_name_to_compound_pass,
+                                     counter =
+                                         int64_t{0}]() mutable -> std::string {
+    std::string pass_name;
+    do {
+      pass_name = absl::StrCat("GEN_PASS_", counter);
+      ++counter;
+    } while (pass_name_to_compound_pass.contains(pass_name));
+    return pass_name;
+  };
+
+  std::vector<OptimizationPipelineProto::CompoundPass> generated_passes;
+  generated_passes.reserve(leaf_passes.size() + split_indices.size() + 1);
+
+  std::vector<SplitPipelineFactory::SplitPassInfo> split_pass_infos;
+  std::optional<size_t> last_split_index;
+  for (size_t split_index : split_indices) {
+    // Add split info for passes between last split pass and current split pass.
+    size_t start_index =
+        last_split_index.has_value() ? *last_split_index + 1 : 0;
+    if (split_index > start_index) {
+      CreateSegmentResult segment_result = CreateSegmentPass(
+          absl::MakeSpan(leaf_passes)
+              .subspan(start_index, split_index - start_index),
+          unique_pass_name_generator);
+      generated_passes.insert(generated_passes.end(),
+                              segment_result.passes.begin(),
+                              segment_result.passes.end());
+      split_pass_infos.emplace_back(SplitPipelineFactory::SplitPassInfo{
+          .default_pass_name = segment_result.top_level_pass_name,
+          .split_pass_name = std::nullopt});
+    }
+
+    const PassInfo& split_info = leaf_passes[split_index];
+    CreateSegmentResult segment_result =
+        CreateSegmentPass(absl::MakeSpan(leaf_passes).subspan(split_index, 1),
+                          unique_pass_name_generator);
+    generated_passes.insert(generated_passes.end(),
+                            segment_result.passes.begin(),
+                            segment_result.passes.end());
+    split_pass_infos.emplace_back(SplitPipelineFactory::SplitPassInfo{
+        .default_pass_name = segment_result.top_level_pass_name,
+        .split_pass_name = std::string(split_info.name)});
+    last_split_index = split_index;
+  }
+
+  // Add any remaining passes after the last split.
+  if (last_split_index.has_value() &&
+      *last_split_index + 1 < leaf_passes.size()) {
+    CreateSegmentResult segment_result = CreateSegmentPass(
+        absl::MakeSpan(leaf_passes).subspan(*last_split_index + 1),
+        unique_pass_name_generator);
+    generated_passes.insert(generated_passes.end(),
+                            segment_result.passes.begin(),
+                            segment_result.passes.end());
+    split_pass_infos.emplace_back(SplitPipelineFactory::SplitPassInfo{
+        .default_pass_name = segment_result.top_level_pass_name,
+        .split_pass_name = std::nullopt});
+  }
+
+  SplitPassResult result;
+  result.split_pass_infos = std::move(split_pass_infos);
+  result.generated_passes = std::move(generated_passes);
+  return result;
+}
+
+}  // namespace
+
+absl::StatusOr<std::unique_ptr<SplitPipelineFactory>>
+SplitPipelineFactory::Create(OptimizationPassRegistry& registry,
+                             absl::Span<const std::string> split_passes,
+                             const OptimizationPipelineProto& pipeline_proto) {
+  VLOG(1) << "Creating SplitPipelineFactory";
+
+  OptimizationPassRegistry registry_clone = registry.OverridableClone();
+  XLS_ASSIGN_OR_RETURN(SplitPassResult split_result,
+                       GetSplitPassInfos(pipeline_proto, split_passes));
+
+  OptimizationPipelineProto split_pipeline_proto = pipeline_proto;
+
+  split_pipeline_proto.mutable_compound_passes()->Add(
+      split_result.generated_passes.begin(),
+      split_result.generated_passes.end());
+  split_pipeline_proto.mutable_default_pipeline()->Clear();
+  for (const SplitPassInfo& pass_info : split_result.split_pass_infos) {
+    split_pipeline_proto.add_default_pipeline(pass_info.default_pass_name);
+  }
+
+  XLS_RETURN_IF_ERROR(registry_clone.RegisterPipelineProto(split_pipeline_proto,
+                                                           "split_pipeline"));
+
+  absl::flat_hash_map<std::string, size_t> split_pass_name_to_index;
+
+  if (VLOG_IS_ON(5)) {
+    VLOG(5) << "Created " << split_result.split_pass_infos.size()
+            << " optimization splits";
+
+    for (const SplitPassInfo& pass_info : split_result.split_pass_infos) {
+      VLOG(5) << "  Default pass: " << pass_info.default_pass_name
+              << ", Split pass: " << pass_info.split_pass_name.value_or("null");
+    }
+  }
+
+  for (const auto& [i, pass_info] :
+       iter::enumerate(split_result.split_pass_infos)) {
+    const std::optional<std::string>& split_pass_name =
+        pass_info.split_pass_name;
+    if (split_pass_name.has_value()) {
+      split_pass_name_to_index[*split_pass_name] = i;
+    }
+  }
+
+  return std::make_unique<SplitPipelineFactory>(
+      std::move(split_result.split_pass_infos),
+      std::move(split_pass_name_to_index), std::move(registry_clone));
+}
+
+absl::StatusOr<std::unique_ptr<OptimizationCompoundPass>>
+SplitPipelineFactory::GetPipelineBeforeSplit(std::string_view pass_name) const {
+  auto split_it = split_pass_name_to_index_.find(pass_name);
+  if (split_it == split_pass_name_to_index_.end()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Split pass ", pass_name, " not found in split pipeline"));
+  }
+  size_t split_index = split_it->second;
+  if (split_index == 0) {
+    return GetOptimizationPipelineGenerator(registry_).GeneratePipeline("");
+  }
+
+  std::vector<std::string_view> pass_names;
+  pass_names.reserve(split_index);
+  for (const SplitPassInfo& pass_info :
+       absl::MakeSpan(split_pass_infos_).subspan(0, split_index)) {
+    pass_names.push_back(pass_info.default_pass_name);
+  }
+  return GetOptimizationPipelineGenerator(registry_).GeneratePipeline(
+      absl::StrJoin(pass_names, " "));
+}
+
+absl::StatusOr<std::unique_ptr<OptimizationCompoundPass>>
+SplitPipelineFactory::GetPipelineBetweenSplits(
+    std::string_view from_pass_name, std::string_view to_pass_name) const {
+  auto from_it = split_pass_name_to_index_.find(from_pass_name);
+  if (from_it == split_pass_name_to_index_.end()) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Split pass ", from_pass_name, " not found in split pipeline"));
+  }
+  auto to_it = split_pass_name_to_index_.find(to_pass_name);
+  if (to_it == split_pass_name_to_index_.end()) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Split pass ", to_pass_name, " not found in split pipeline"));
+  }
+  size_t from_index = from_it->second + 1;
+  size_t to_index = to_it->second;
+  if (from_index > to_index) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Split pass '", from_pass_name, "' must precede '",
+                     to_pass_name, "' in split pipeline"));
+  }
+
+  // There are no passes between the two split passes.
+  if (from_index == to_index) {
+    return GetOptimizationPipelineGenerator(registry_).GeneratePipeline("");
+  }
+
+  std::vector<std::string_view> pass_names;
+  pass_names.reserve(to_index - from_index);
+  for (const SplitPassInfo& pass_info :
+       absl::MakeSpan(split_pass_infos_)
+           .subspan(from_index, to_index - from_index)) {
+    pass_names.push_back(pass_info.default_pass_name);
+  }
+  return GetOptimizationPipelineGenerator(registry_).GeneratePipeline(
+      absl::StrJoin(pass_names, " "));
+}
+
+absl::StatusOr<std::unique_ptr<OptimizationCompoundPass>>
+SplitPipelineFactory::GetPipelineAfterSplit(std::string_view pass_name) const {
+  auto split_it = split_pass_name_to_index_.find(pass_name);
+  if (split_it == split_pass_name_to_index_.end()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Split pass ", pass_name, " not found in split pipeline"));
+  }
+  size_t split_index = split_it->second;
+  if (split_index >= split_pass_infos_.size() - 1) {
+    return GetOptimizationPipelineGenerator(registry_).GeneratePipeline("");
+  }
+
+  std::vector<std::string_view> pass_names;
+  pass_names.reserve(split_pass_infos_.size() - split_index - 1);
+  for (const SplitPassInfo& pass_info :
+       absl::MakeSpan(split_pass_infos_).subspan(split_index + 1)) {
+    pass_names.push_back(pass_info.default_pass_name);
+  }
+  return GetOptimizationPipelineGenerator(registry_).GeneratePipeline(
+      absl::StrJoin(pass_names, " "));
+}
+
+std::vector<std::string> SplitPipelineFactory::GetOrderedSplitPasses() const {
+  std::vector<std::string> ordered_passes;
+  for (const SplitPassInfo& pass_info : split_pass_infos_) {
+    if (pass_info.split_pass_name.has_value()) {
+      ordered_passes.push_back(*pass_info.split_pass_name);
+    }
+  }
+  return ordered_passes;
+}
+
+}  // namespace xls

@@ -16,6 +16,10 @@
 
 #include <system_error>  // NOLINT(build/c++11)
 
+#include "absl/status/status.h"
+#include "absl/status/status_builder.h"
+#include "xls/common/source_location.h"
+
 namespace xls {
 
 absl::StatusCode ErrorCodeToStatusCode(const std::error_code& ec) {
@@ -26,7 +30,17 @@ absl::StatusCode ErrorCodeToStatusCode(const std::error_code& ec) {
     return absl::StatusCode::kUnknown;
   }
 
-  switch (static_cast<std::errc>(ec.value())) {
+  std::errc ec_value = static_cast<std::errc>(ec.value());
+
+  // Note: EOPNOTSUPP and ENOTSUP have the same value on Linux, but are
+  // different on BSD derivatives. The compiler complains about duplicate case
+  // values on Linux, so handle them specially outside the switch.
+  if (ec_value == std::errc::operation_not_supported ||  // EOPNOTSUPP
+      ec_value == std::errc::not_supported) {            // ENOTSUP
+    return absl::StatusCode::kUnimplemented;
+  }
+
+  switch (ec_value) {
     case std::errc::address_family_not_supported:  // EAFNOSUPPORT
       return absl::StatusCode::kUnavailable;
     case std::errc::address_in_use:  // EADDRINUSE
@@ -135,8 +149,6 @@ absl::StatusCode ErrorCodeToStatusCode(const std::error_code& ec) {
       return absl::StatusCode::kFailedPrecondition;
     case std::errc::not_enough_memory:  // ENOMEM
       return absl::StatusCode::kResourceExhausted;
-    case std::errc::not_supported:  // ENOTSUP
-      return absl::StatusCode::kUnimplemented;
     case std::errc::operation_canceled:  // ECANCELED
       return absl::StatusCode::kCancelled;
     case std::errc::operation_in_progress:  // EINPROGRESS
@@ -155,6 +167,8 @@ absl::StatusCode ErrorCodeToStatusCode(const std::error_code& ec) {
       return absl::StatusCode::kPermissionDenied;
     case std::errc::resource_deadlock_would_occur:  // EDEADLK
       return absl::StatusCode::kAborted;
+    // Note: this case has the same value as resource_unavailable_try_again.
+    // case std::errc::operation_would_block:  // EWOULDBLOCK
     case std::errc::resource_unavailable_try_again:  // EAGAIN
       return absl::StatusCode::kUnavailable;
     case std::errc::result_out_of_range:  // ERANGE
@@ -184,14 +198,16 @@ absl::StatusCode ErrorCodeToStatusCode(const std::error_code& ec) {
   }
 }
 
-xabsl::StatusBuilder ErrorCodeToStatus(const std::error_code& ec) {
-  return xabsl::StatusBuilder(
-      absl::Status(ErrorCodeToStatusCode(ec), ec.message()));
+absl::StatusBuilder ErrorCodeToStatus(const std::error_code& ec,
+                                      xabsl::SourceLocation loc) {
+  return absl::StatusBuilder(
+      absl::Status(ErrorCodeToStatusCode(ec), ec.message()), loc);
 }
 
-xabsl::StatusBuilder ErrnoToStatus(int errno_value) {
-  return xabsl::StatusBuilder(
-      ErrorCodeToStatus(std::error_code(errno_value, std::generic_category())));
+absl::StatusBuilder ErrnoToStatus(int errno_value, xabsl::SourceLocation loc) {
+  return absl::StatusBuilder(
+      ErrorCodeToStatus(std::error_code(errno_value, std::generic_category())),
+      loc);
 }
 
 }  // namespace xls

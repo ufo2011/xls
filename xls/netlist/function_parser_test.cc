@@ -14,7 +14,8 @@
 
 #include "xls/netlist/function_parser.h"
 
-#include "gmock/gmock.h"
+#include <string>
+
 #include "gtest/gtest.h"
 #include "xls/common/status/matchers.h"
 

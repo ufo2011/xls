@@ -14,14 +14,16 @@
 
 #include "xls/noc/config_ng/channel_options_proto_builder.h"
 
-#include "xls/common/logging/logging.h"
-#include "xls/common/proto_adaptor_utils.h"
+#include <string_view>
+
+#include "absl/log/die_if_null.h"
+#include "xls/noc/config_ng/topology_options_network_config_builder.pb.h"
 
 namespace xls::noc {
 
 ChannelOptionsProtoBuilder::ChannelOptionsProtoBuilder(
     ChannelOptionsProto* proto_ptr)
-    : proto_ptr_(XLS_DIE_IF_NULL(proto_ptr)) {}
+    : proto_ptr_(ABSL_DIE_IF_NULL(proto_ptr)) {}
 
 ChannelOptionsProtoBuilder::ChannelOptionsProtoBuilder(
     ChannelOptionsProto* proto_ptr, const ChannelOptionsProto& default_proto)
@@ -36,14 +38,14 @@ ChannelOptionsProtoBuilder& ChannelOptionsProtoBuilder::CopyFrom(
 }
 
 ChannelOptionsProtoBuilder& ChannelOptionsProtoBuilder::SetSourceNodeName(
-    absl::string_view source_node_name) {
-  proto_ptr_->set_source_node_name(xls::ToProtoString(source_node_name));
+    std::string_view source_node_name) {
+  proto_ptr_->set_source_node_name(source_node_name);
   return *this;
 }
 
 ChannelOptionsProtoBuilder& ChannelOptionsProtoBuilder::SetSinkNodeName(
-    absl::string_view sink_node_name) {
-  proto_ptr_->set_sink_node_name(xls::ToProtoString(sink_node_name));
+    std::string_view sink_node_name) {
+  proto_ptr_->set_sink_node_name(sink_node_name);
   return *this;
 }
 

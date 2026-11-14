@@ -15,12 +15,12 @@
 #include "xls/data_structures/union_find_map.h"
 
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
 #include "gtest/gtest.h"
 #include "absl/container/flat_hash_set.h"
-#include "absl/types/optional.h"
 
 namespace xls {
 namespace {
@@ -75,9 +75,9 @@ TEST(UnionFindMapTest, BasicUsage) {
 
   {
     std::vector<char> keys{'a', 'b', 'c', 'd', 'e', 'f'};
-    absl::optional<std::pair<char, int32_t>> expected({'c', 60});
+    std::optional<std::pair<char, int32_t>> expected({'c', 60});
     for (char key : keys) {
-      absl::optional<std::pair<char, int32_t>> actual(ufm.Find(key));
+      std::optional<std::pair<char, int32_t>> actual(ufm.Find(key));
       EXPECT_EQ(actual, expected);
     }
   }

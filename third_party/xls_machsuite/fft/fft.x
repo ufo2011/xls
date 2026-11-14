@@ -33,12 +33,9 @@
 // Based on:
 // https://github.com/breagen/MachSuite/blob/master/fft/strided/fft.c
 
-import float32
-import std
-import third_party.xls_machsuite.fft.test_data.dslx_test_data
-import xls.modules.fpadd_2x32
-import xls.modules.fpsub_2x32
-import xls.modules.fpmul_2x32
+import float32;
+import std;
+import third_party.xls_machsuite.fft.test_data.dslx_test_data;
 
 type F32 = float32::F32;
 
@@ -46,48 +43,52 @@ const FFT_SIZE = u32:1024;
 const FFT_HALF_SIZE = u32:512;
 
 fn fft_root_twiddle(root_index: u32, odd: u32, even: u32,
-                    real: F32[FFT_SIZE], img: F32[FFT_SIZE],
+                    real_values: F32[FFT_SIZE], img: F32[FFT_SIZE],
                     real_twid: F32[FFT_HALF_SIZE],
                     img_twid: F32[FFT_HALF_SIZE])
                     -> (F32[FFT_SIZE], F32[FFT_SIZE]) {
   // Would be neat if we could overload operators for F32
   // or other types.
-  let diff = fpsub_2x32::fpsub_2x32(
-               fpmul_2x32::fpmul_2x32(real_twid[root_index],
-                                      real[odd]),
-               fpmul_2x32::fpmul_2x32(img_twid[root_index],
+  let diff = float32::sub(
+               float32::mul(real_twid[root_index],
+                                      real_values[odd]),
+               float32::mul(img_twid[root_index],
                                       img[odd]));
-  let sum = fpadd_2x32::fpadd_2x32(
-               fpmul_2x32::fpmul_2x32(real_twid[root_index],
+  let sum = float32::add(
+               float32::mul(real_twid[root_index],
                                       img[odd]),
-               fpmul_2x32::fpmul_2x32(img_twid[root_index],
-                                      real[odd]));
+               float32::mul(img_twid[root_index],
+                                      real_values[odd]));
   let img = update(img, odd, sum);
-  let real = update(real, odd, diff);
-  (real, img)
+  let real_values = update(real_values, odd, diff);
+  (real_values, img)
 }
 
 
 // This does the bulk of the work in the body of the nested fft loop.
-fn fft_inner_loop_body(log: u32, odd: u32, span: u32, real: F32[FFT_SIZE],
+fn fft_inner_loop_body(log: u32, odd: u32, span: u32, real_values: F32[FFT_SIZE],
                        img: F32[FFT_SIZE], real_twid: F32[FFT_HALF_SIZE],
                        img_twid: F32[FFT_HALF_SIZE])
                        -> (F32[FFT_SIZE], F32[FFT_SIZE]) {
   let even = odd ^ span;
 
-  let real_sum = fpadd_2x32::fpadd_2x32(real[even], real[odd]);
-  let real_diff = fpsub_2x32::fpsub_2x32(real[even], real[odd]);
-  let real = update(real, odd, real_diff);
-  let real = update(real, even, real_sum);
+  let real_sum = float32::add(real_values[even], real_values[odd]);
+  let real_diff = float32::sub(real_values[even], real_values[odd]);
+  let real_values = update(real_values, odd, real_diff);
+  let real_values = update(real_values, even, real_sum);
 
-  let img_sum = fpadd_2x32::fpadd_2x32(img[even], img[odd]);
-  let img_diff = fpsub_2x32::fpsub_2x32(img[even], img[odd]);
+  let img_sum = float32::add(img[even], img[odd]);
+  let img_diff = float32::sub(img[even], img[odd]);
   let img = update(img, odd, img_diff);
   let img = update(img, even, img_sum);
 
   let root_index = (even << log) & (FFT_SIZE - u32:1);
-  fft_root_twiddle(root_index, odd, even, real, img, real_twid, img_twid)
-    if root_index != u32:0 else (real, img)
+  if root_index != u32:0 {
+    fft_root_twiddle(
+        root_index, odd, even, real_values, img, real_twid, img_twid)
+  } else {
+    (real_values, img)
+  }
 }
 
 // FFT_SIZE-input fast fourier transform, where inputs
@@ -96,20 +97,17 @@ fn fft_inner_loop_body(log: u32, odd: u32, span: u32, real: F32[FFT_SIZE],
 // imaginary components.
 // TODO(jbaileyhandle): Can we make this parametric in the
 // number of inputs?
-fn fft(real: F32[FFT_SIZE], img: F32[FFT_SIZE], real_twid: F32[FFT_HALF_SIZE],
-       img_twid: F32[FFT_HALF_SIZE]) -> (F32[FFT_SIZE], F32[FFT_SIZE]) {
+fn fft(
+    real_values: F32[FFT_SIZE], img: F32[FFT_SIZE],
+    real_twid: F32[FFT_HALF_SIZE], img_twid: F32[FFT_HALF_SIZE])
+    -> (F32[FFT_SIZE], F32[FFT_SIZE]) {
 
-  for (log, (real, img)): (u32, (F32[FFT_SIZE], F32[FFT_SIZE]))
-    in range(u32:0, std::clog2(FFT_SIZE)) {
+  for (log, (real_values, img)): (u32, (F32[FFT_SIZE], F32[FFT_SIZE]))
+    in u32:0..std::clog2(FFT_SIZE) {
     let span = FFT_SIZE >> log + u32:1;
 
-    for (odd, (real, img)): (u32, (F32[FFT_SIZE], F32[FFT_SIZE]))
-      in range(u32:0, u32:1024) {
-      // ^  Weirdly, this won't compile if we use FFT_SIZE instead of
-      // u32:1024. Build complains about AST node with non-const IR
-      // value, even though FFT_SIZE is a const and it is used in the
-      // range of the outer loop without issue.
-
+    for (odd, (real_values, img)): (u32, (F32[FFT_SIZE], F32[FFT_SIZE]))
+      in u32:0..FFT_SIZE {
       // We want to loop dynamically, going from span to 1023
       // while skipping half of the numbers in the range.
       // However, dslx restricts us to simply incrementing though a
@@ -119,15 +117,18 @@ fn fft(real: F32[FFT_SIZE], img: F32[FFT_SIZE], real_twid: F32[FFT_HALF_SIZE],
       // iterations should be removed.  However, if we try to reuse the
       // same hardware for each iteration, the module may be idle
       // over half of the time...
-      fft_inner_loop_body(log, odd, span, real, img, real_twid, img_twid)
-        if odd >= span && ((odd & span) != u32:0)
-        else (real, img)
+      if odd >= span && ((odd & span) != u32:0) {
+        fft_inner_loop_body(
+            log, odd, span, real_values, img, real_twid, img_twid)
+      } else {
+        (real_values, img)
+      }
 
-    } ((real, img))
-  } ((real, img))
+    } ((real_values, img))
+  } ((real_values, img))
 }
 
-#![test]
+#[test]
 fn test_fft() {
   // Grab and format data.
   let real_in: F32[FFT_SIZE] =
@@ -149,7 +150,6 @@ fn test_fft() {
      img_in,
      real_twid_in,
      img_twid_in);
-  let _ = assert_eq(real_out_observed, real_out_expected);
-  let _ = assert_eq(img_out_observed, img_out_expected);
-  ()
+  assert_eq(real_out_observed, real_out_expected);
+  assert_eq(img_out_observed, img_out_expected);
 }

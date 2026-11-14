@@ -11,27 +11,40 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#include <cstdint>
+#include <filesystem>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "absl/flags/flag.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_format.h"
-#include "absl/strings/string_view.h"
-#include "xls/codegen/combinational_generator.h"
-#include "xls/codegen/module_signature.pb.h"
-#include "xls/codegen/pipeline_generator.h"
+#include "xls/codegen/codegen_result.h"
+#include "xls/codegen/module_signature.h"
+#include "xls/common/exit_status.h"
 #include "xls/common/file/filesystem.h"
 #include "xls/common/init_xls.h"
-#include "xls/common/logging/logging.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
-#include "xls/delay_model/delay_estimator.h"
-#include "xls/delay_model/delay_estimators.h"
+#include "xls/dev_tools/tool_timeout.h"
 #include "xls/ir/ir_parser.h"
-#include "xls/passes/standard_pipeline.h"
+#include "xls/ir/verifier.h"
 #include "xls/scheduling/pipeline_schedule.h"
-#include "xls/scheduling/scheduling_pass.h"
+#include "xls/scheduling/scheduling_options.h"
+#include "xls/scheduling/scheduling_result.h"
+#include "xls/tools/codegen.h"
+#include "xls/tools/codegen_flags.h"
+#include "xls/tools/codegen_flags.pb.h"
+#include "xls/tools/scheduling_options_flags.h"
+#include "xls/tools/scheduling_options_flags.pb.h"
 
-const char kUsage[] = R"(
+static constexpr std::string_view kUsage = R"(
 Generates Verilog RTL from a given IR file. Writes a Verilog file and a module
 signature describing the module interface to a specified location. Example
 invocations:
@@ -46,178 +59,127 @@ Emit a feed-forward pipelined module:
        IR_FILE
 )";
 
-ABSL_FLAG(int64_t, clock_period_ps, 0, "Target clock period, in picoseconds.");
-ABSL_FLAG(int64_t, pipeline_stages, 0,
-          "The number of stages in the generated pipeline.");
-ABSL_FLAG(std::string, delay_model, "",
-          "Delay model name to use from registry.");
-ABSL_FLAG(
-    std::string, output_verilog_path, "",
-    "Specific output path for the Verilog generated. If not specified then "
-    "Verilog is written to stdout.");
-ABSL_FLAG(std::string, output_schedule_path, "",
-          "Specific output path for the generated pipeline schedule. "
-          "If not specified, then no schedule is output.");
-ABSL_FLAG(
-    std::string, output_signature_path, "",
-    "Specific output path for the module signature. If not specified then "
-    "no module signature is generated.");
-ABSL_FLAG(std::string, entry, "", "Entry function for the package.");
-ABSL_FLAG(std::string, generator, "pipeline",
-          "The generator to use when emitting the device function. Valid "
-          "values: pipeline, combinational.");
-ABSL_FLAG(
-    std::string, input_valid_signal, "",
-    "If specified, the emitted module will use an external \"valid\" signal "
-    "as the load enable for pipeline registers. The flag value is the "
-    "name of the input port for this signal.");
-ABSL_FLAG(std::string, output_valid_signal, "",
-          "The name of the output port which holds the pipelined valid signal. "
-          "Must be specified with --input_valid_signal.");
-ABSL_FLAG(
-    std::string, manual_load_enable_signal, "",
-    "If specified the load-enable of the pipeline registers of each stage is "
-    "controlled via an input port of the indicated name. The width of the "
-    "input port is equal to the number of pipeline stages. Bit N of the port "
-    "is the load-enable signal for the pipeline registers after stage N.");
-ABSL_FLAG(bool, flop_inputs, true,
-          "If true, inputs of the the module are flopped into registers before "
-          "use in generated pipelines. Only used with pipline generator.");
-ABSL_FLAG(bool, flop_outputs, true,
-          "If true, the module outputs are flopped into registers before "
-          "leaving module. Only used with pipline generator.");
-ABSL_FLAG(std::string, module_name, "",
-          "Explicit name to use for the generated module; if not provided the "
-          "mangled IR function name is used");
-ABSL_FLAG(int64_t, clock_margin_percent, 0,
-          "The percentage of clock period to set aside as a margin to ensure "
-          "timing is met. Effectively, this lowers the clock period by this "
-          "percentage amount for the purposes of scheduling.");
-// TODO(meheff): Rather than specify all reset (or codegen options in general)
-// as a multitude of flags, these can be specified via a separate file (like a
-// options proto).
-ABSL_FLAG(std::string, reset, "",
-          "Name of the reset signal. If empty, no reset signal is used.");
-ABSL_FLAG(bool, reset_active_low, false,
-          "Whether the reset signal is active low.");
-ABSL_FLAG(bool, reset_asynchronous, false,
-          "Whether the reset signal is asynchronous.");
-ABSL_FLAG(bool, use_system_verilog, true,
-          "If true, emit SystemVerilog otherwise emit Verilog.");
-
 namespace xls {
 namespace {
 
-absl::Status RealMain(absl::string_view ir_path, absl::string_view verilog_path,
-                      absl::string_view signature_path,
-                      absl::string_view schedule_path) {
+absl::Status RealMain(std::string_view ir_path) {
+  auto timeout = StartTimeoutTimer();
+  if (ir_path == "-") {
+    ir_path = "/dev/stdin";
+  }
   XLS_ASSIGN_OR_RETURN(std::string ir_contents, GetFileContents(ir_path));
   XLS_ASSIGN_OR_RETURN(std::unique_ptr<Package> p,
                        Parser::ParsePackage(ir_contents, ir_path));
 
-  Function* main;
-  if (absl::GetFlag(FLAGS_entry).empty()) {
-    XLS_ASSIGN_OR_RETURN(main, p->EntryFunction());
-  } else {
-    XLS_ASSIGN_OR_RETURN(main, p->GetFunction(absl::GetFlag(FLAGS_entry)));
+  XLS_ASSIGN_OR_RETURN(CodegenFlagsProto codegen_flags_proto,
+                       GetCodegenFlags());
+  // Note: the codegen version is resolved in xls/tools/codegen.cc. Packages
+  // with proc-scoped channels use codegen 1.5 by default; an explicitly
+  // requested incompatible version is reported as an error there rather than
+  // being silently overridden (google/xls#4554).
+  if (codegen_flags_proto.has_reference_residual_data()) {
+    return absl::UnimplementedError(
+        "Reference residual data is not supported in codegen_main; use "
+        "block_to_verilog_main");
+  }
+  if (!codegen_flags_proto.top().empty() && !p->GetTop().has_value()) {
+    XLS_RETURN_IF_ERROR(p->SetTopByName(codegen_flags_proto.top()));
   }
 
-  verilog::ModuleGeneratorResult result;
-  if (absl::GetFlag(FLAGS_generator) == "pipeline") {
-    XLS_QCHECK(absl::GetFlag(FLAGS_pipeline_stages) != 0 ||
-               absl::GetFlag(FLAGS_clock_period_ps) != 0)
-        << "Musts specify --pipeline_stages or --clock_period_ps (or both).";
+  XLS_RET_CHECK(p->GetTop().has_value())
+      << "Package " << p->name() << " needs a top function/proc.";
 
-    SchedulingPassOptions sched_options;
-    if (absl::GetFlag(FLAGS_pipeline_stages) != 0) {
-      sched_options.scheduling_options.pipeline_stages(
-          absl::GetFlag(FLAGS_pipeline_stages));
-    }
-    if (absl::GetFlag(FLAGS_clock_period_ps) != 0) {
-      sched_options.scheduling_options.clock_period_ps(
-          absl::GetFlag(FLAGS_clock_period_ps));
-    }
-    if (absl::GetFlag(FLAGS_clock_margin_percent) != 0) {
-      sched_options.scheduling_options.clock_margin_percent(
-          absl::GetFlag(FLAGS_clock_margin_percent));
-    }
-    XLS_ASSIGN_OR_RETURN(sched_options.delay_estimator,
-                         GetDelayEstimator(absl::GetFlag(FLAGS_delay_model)));
-    std::unique_ptr<SchedulingCompoundPass> scheduling_pipeline =
-        CreateStandardSchedulingPassPipeline();
-    SchedulingPassResults results;
-    SchedulingUnit scheduling_unit = {p.get(),
-                                      /*schedule=*/absl::nullopt};
-    absl::Status scheduling_status =
-        scheduling_pipeline->Run(&scheduling_unit, sched_options, &results)
-            .status();
-    if (!scheduling_status.ok()) {
-      if (absl::IsResourceExhausted(scheduling_status)) {
-        // Resource exhausted error indicates that the schedule was
-        // infeasible. Emit a meaningful error in this case.
-        if (sched_options.scheduling_options.pipeline_stages().has_value() &&
-            sched_options.scheduling_options.clock_period_ps().has_value()) {
-          // TODO(meheff): Add link to documentation with more information and
-          // guidance.
-          XLS_LOG(QFATAL) << absl::StreamFormat(
-              "Design cannot be scheduled in %d stages with a %dps clock.",
-              sched_options.scheduling_options.pipeline_stages().value(),
-              sched_options.scheduling_options.clock_period_ps().value());
-        }
-      }
-      return scheduling_status;
-    }
-    XLS_RET_CHECK(scheduling_unit.schedule.has_value());
+  XLS_ASSIGN_OR_RETURN(
+      SchedulingOptionsFlagsProto scheduling_options_flags_proto,
+      GetSchedulingOptionsFlagsProto());
+  XLS_ASSIGN_OR_RETURN(
+      bool delay_model_flag_passed,
+      IsDelayModelSpecifiedViaFlag(scheduling_options_flags_proto));
 
-    verilog::PipelineOptions pipeline_options;
-    if (!absl::GetFlag(FLAGS_module_name).empty()) {
-      pipeline_options.module_name(absl::GetFlag(FLAGS_module_name));
-    }
-    pipeline_options.use_system_verilog(
-        absl::GetFlag(FLAGS_use_system_verilog));
-    if (!absl::GetFlag(FLAGS_input_valid_signal).empty()) {
-      pipeline_options.valid_control(absl::GetFlag(FLAGS_input_valid_signal),
-                                     absl::GetFlag(FLAGS_output_valid_signal));
-    } else if (!absl::GetFlag(FLAGS_manual_load_enable_signal).empty()) {
-      pipeline_options.manual_control(
-          absl::GetFlag(FLAGS_manual_load_enable_signal));
-    }
-    pipeline_options.flop_inputs(absl::GetFlag(FLAGS_flop_inputs));
-    pipeline_options.flop_outputs(absl::GetFlag(FLAGS_flop_outputs));
-
-    if (!absl::GetFlag(FLAGS_reset).empty()) {
-      verilog::ResetProto reset_proto;
-      reset_proto.set_name(absl::GetFlag(FLAGS_reset));
-      reset_proto.set_asynchronous(absl::GetFlag(FLAGS_reset_asynchronous));
-      reset_proto.set_active_low(absl::GetFlag(FLAGS_reset_active_low));
-      pipeline_options.reset(reset_proto);
-    }
-
+  SchedulingResult scheduling_result;
+  if (codegen_flags_proto.generator() == GENERATOR_KIND_PIPELINE) {
     XLS_ASSIGN_OR_RETURN(
-        result, verilog::ToPipelineModuleText(*scheduling_unit.schedule, main,
-                                              pipeline_options));
-    if (!schedule_path.empty()) {
-      XLS_RETURN_IF_ERROR(
-          SetTextProtoFile(schedule_path, scheduling_unit.schedule->ToProto()));
-    }
-  } else if (absl::GetFlag(FLAGS_generator) == "combinational") {
-    XLS_ASSIGN_OR_RETURN(result,
-                         verilog::GenerateCombinationalModule(
-                             main, absl::GetFlag(FLAGS_use_system_verilog)));
-  } else {
-    XLS_LOG(QFATAL) << absl::StreamFormat(
-        "Invalid value for --generator: %s. Expected 'pipeline' or "
-        "'combinational'",
-        absl::GetFlag(FLAGS_generator));
+        scheduling_result,
+        Schedule(p.get(), scheduling_options_flags_proto, codegen_flags_proto));
   }
-  if (!signature_path.empty()) {
+  XLS_ASSIGN_OR_RETURN(
+      PackageSchedule schedules,
+      PackageSchedule::FromProto(p.get(), scheduling_result.package_schedule));
+
+  if (!absl::GetFlag(FLAGS_output_schedule_ir_path).empty()) {
+    XLS_RETURN_IF_ERROR(SetFileContents(
+        absl::GetFlag(FLAGS_output_schedule_ir_path), p->DumpIr()));
+  }
+
+  if (!absl::GetFlag(FLAGS_output_schedule_path).empty()) {
     XLS_RETURN_IF_ERROR(
-        SetTextProtoFile(signature_path, result.signature.proto()));
+        SetTextProtoFile(absl::GetFlag(FLAGS_output_schedule_path),
+                         scheduling_result.package_schedule));
   }
+
+  if (!absl::GetFlag(FLAGS_output_scheduling_pass_metrics_path).empty()) {
+    XLS_RETURN_IF_ERROR(SetTextProtoFile(
+        absl::GetFlag(FLAGS_output_scheduling_pass_metrics_path),
+        scheduling_result.pass_pipeline_metrics));
+  }
+
+  XLS_ASSIGN_OR_RETURN(
+      verilog::CodegenResult codegen_result,
+      Codegen(p.get(), scheduling_options_flags_proto, codegen_flags_proto,
+              delay_model_flag_passed, &schedules));
+
+  if (!absl::GetFlag(FLAGS_output_block_ir_path).empty()) {
+    QCHECK_GE(p->blocks().size(), 1)
+        << "There should be at least one block in the package after generating "
+           "module text.";
+    XLS_RETURN_IF_ERROR(SetFileContents(
+        absl::GetFlag(FLAGS_output_block_ir_path), p->DumpIr()));
+  }
+
+  if (!absl::GetFlag(FLAGS_output_signature_path).empty()) {
+    XLS_RETURN_IF_ERROR(
+        SetTextProtoFile(absl::GetFlag(FLAGS_output_signature_path),
+                         codegen_result.signature.proto()));
+  }
+
+  if (!absl::GetFlag(FLAGS_output_codegen_pass_metrics_path).empty()) {
+    XLS_RETURN_IF_ERROR(
+        SetTextProtoFile(absl::GetFlag(FLAGS_output_codegen_pass_metrics_path),
+                         codegen_result.pass_pipeline_metrics));
+  }
+
+  if (!absl::GetFlag(FLAGS_block_metrics_path).empty()) {
+    XLS_RETURN_IF_ERROR(SetTextProtoFile(
+        absl::GetFlag(FLAGS_block_metrics_path), codegen_result.block_metrics));
+  }
+
+  if (!absl::GetFlag(FLAGS_output_residual_data_path).empty()) {
+    XLS_RETURN_IF_ERROR(
+        SetTextProtoFile(absl::GetFlag(FLAGS_output_residual_data_path),
+                         codegen_result.residual_data));
+  }
+
+  const std::string& verilog_path = absl::GetFlag(FLAGS_output_verilog_path);
+  if (!verilog_path.empty()) {
+    for (int64_t i = 0; i < codegen_result.verilog_line_map.mapping_size();
+         ++i) {
+      codegen_result.verilog_line_map.mutable_mapping(i)->set_verilog_file(
+          verilog_path);
+    }
+  }
+
+  const std::string& verilog_line_map_path =
+      absl::GetFlag(FLAGS_output_verilog_line_map_path);
+  if (!verilog_line_map_path.empty()) {
+    XLS_RETURN_IF_ERROR(SetTextProtoFile(verilog_line_map_path,
+                                         codegen_result.verilog_line_map));
+  }
+
   if (verilog_path.empty()) {
-    std::cout << result.verilog_text;
+    std::cout << codegen_result.verilog_text;
   } else {
-    XLS_RETURN_IF_ERROR(SetFileContents(verilog_path, result.verilog_text));
+    XLS_RETURN_IF_ERROR(
+        SetFileContents(verilog_path, codegen_result.verilog_text));
   }
   return absl::OkStatus();
 }
@@ -226,17 +188,13 @@ absl::Status RealMain(absl::string_view ir_path, absl::string_view verilog_path,
 }  // namespace xls
 
 int main(int argc, char** argv) {
-  std::vector<absl::string_view> positional_arguments =
+  std::vector<std::string_view> positional_arguments =
       xls::InitXls(kUsage, argc, argv);
 
   if (positional_arguments.size() != 1) {
-    XLS_LOG(QFATAL) << absl::StreamFormat("Expected invocation: %s IR_FILE",
-                                          argv[0]);
+    LOG(QFATAL) << absl::StreamFormat("Expected invocation: %s IR_FILE",
+                                      argv[0]);
   }
-  absl::string_view ir_path = positional_arguments[0];
-  XLS_QCHECK_OK(xls::RealMain(ir_path, absl::GetFlag(FLAGS_output_verilog_path),
-                              absl::GetFlag(FLAGS_output_signature_path),
-                              absl::GetFlag(FLAGS_output_schedule_path)));
-
-  return EXIT_SUCCESS;
+  std::string_view ir_path = positional_arguments[0];
+  return xls::ExitStatus(xls::RealMain(ir_path));
 }

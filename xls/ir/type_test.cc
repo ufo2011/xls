@@ -14,18 +14,24 @@
 
 #include "xls/ir/type.h"
 
+#include <cstdint>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "xls/common/status/matchers.h"
-#include "xls/ir/function.h"
-#include "xls/ir/function_builder.h"
+#include "xls/ir/type_manager.h"
 
 namespace xls {
 namespace {
 
-using status_testing::IsOkAndHolds;
-using status_testing::StatusIs;
+using ::absl_testing::IsOkAndHolds;
+using ::absl_testing::StatusIs;
+using ::testing::ElementsAre;
 using ::testing::HasSubstr;
+using ::testing::Pair;
 
 TEST(TypeTest, TestVariousTypes) {
   BitsType b42(42);
@@ -108,7 +114,7 @@ TEST(TypeTest, TestVariousTypes) {
   EXPECT_EQ(t_of_a1.leaf_count(), 21);
   EXPECT_EQ(t_of_a3.leaf_count(), 17);
 
-  // Tuple types.
+  // Token types.
   TokenType token_0;
   TokenType token_1;
 
@@ -116,7 +122,7 @@ TEST(TypeTest, TestVariousTypes) {
   EXPECT_TRUE(token_0.IsEqualTo(&token_1));
   EXPECT_FALSE(token_0.IsEqualTo(&b42_2));
 
-  EXPECT_EQ(token_0.leaf_count(), 0);
+  EXPECT_EQ(token_0.leaf_count(), 1);
 
   // Function types.
   FunctionType f_type1({&b42, &a1}, &b42);
@@ -152,20 +158,213 @@ TEST(TypeTest, ArrayDimensionAndIndex) {
 
   EXPECT_THAT(GetIndexedElementType(&b32, 0), IsOkAndHolds(&b32));
   EXPECT_THAT(GetIndexedElementType(&b32, 1),
-              status_testing::StatusIs(
-                  absl::StatusCode::kInvalidArgument,
-                  testing::HasSubstr("Index has more elements (1) than type "
-                                     "bits[32] has array dimensions (0)")));
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Index has more elements (1) than type "
+                                 "bits[32] has array dimensions (0)")));
 
   EXPECT_THAT(GetIndexedElementType(&a_1d, 0), IsOkAndHolds(&a_1d));
   EXPECT_THAT(GetIndexedElementType(&a_1d, 1), IsOkAndHolds(&b32));
   EXPECT_THAT(GetIndexedElementType(&a_1d, 2),
-              status_testing::StatusIs(
-                  absl::StatusCode::kInvalidArgument,
-                  testing::HasSubstr("Index has more elements (2) than type "
-                                     "bits[32][7] has array dimensions (1)")));
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Index has more elements (2) than type "
+                                 "bits[32][7] has array dimensions (1)")));
 
   EXPECT_THAT(GetIndexedElementType(&a_3d, 3), IsOkAndHolds(&b32));
+}
+
+TEST(TypeTest, AsXTypeCallsWork) {
+  BitsType b32(32);
+  TupleType t_empty({});
+  TupleType t1({&b32, &b32});
+  ArrayType a1(7, &b32);
+
+  XLS_EXPECT_OK(b32.AsBits());
+  XLS_EXPECT_OK(t_empty.AsTuple());
+  XLS_EXPECT_OK(t1.AsTuple());
+  XLS_EXPECT_OK(a1.AsArray());
+
+  EXPECT_THAT(b32.AsArray(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Type is not an array: bits[32]")));
+  EXPECT_THAT(b32.AsTuple(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Type is not a tuple: bits[32]")));
+
+  EXPECT_THAT(t_empty.AsBits(), StatusIs(absl::StatusCode::kInvalidArgument,
+                                         HasSubstr("Type is not 'bits': ()")));
+  EXPECT_THAT(t_empty.AsArray(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Type is not an array: ()")));
+
+  EXPECT_THAT(t1.AsBits(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Type is not 'bits': (bits[32], bits[32])")));
+  EXPECT_THAT(
+      t1.AsArray(),
+      StatusIs(absl::StatusCode::kInvalidArgument,
+               HasSubstr("Type is not an array: (bits[32], bits[32])")));
+
+  EXPECT_THAT(a1.AsBits(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Type is not 'bits': bits[32][7]")));
+  EXPECT_THAT(a1.AsTuple(),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("Type is not a tuple: bits[32][7]")));
+}
+
+TEST(TypeTest, InstantiationType) {
+  TypeManager man;
+  InstantiationType it1(/*input_types=*/{{"foo", man.GetBitsType(32)}},
+                        /*output_types=*/{{"bar", man.GetBitsType(32)}});
+  InstantiationType it2(/*input_types=*/{{"foo", man.GetBitsType(32)}},
+                        /*output_types=*/{{"bar", man.GetBitsType(32)}});
+  EXPECT_EQ(it1, it2);
+  InstantiationType it3(/*input_types=*/{{"bar", man.GetBitsType(32)}},
+                        /*output_types=*/{{"foo", man.GetBitsType(32)}});
+  EXPECT_NE(it1, it3);
+  InstantiationType it4(/*input_types=*/{{"fooooooo", man.GetBitsType(32)}},
+                        /*output_types=*/{{"bar", man.GetBitsType(32)}});
+  EXPECT_NE(it1, it4);
+  InstantiationType it5(/*input_types=*/{{"foo", man.GetBitsType(32)}},
+                        /*output_types=*/{{"baaaaar", man.GetBitsType(32)}});
+  EXPECT_NE(it1, it5);
+  InstantiationType it6(/*input_types=*/{{"foo", man.GetBitsType(32)},
+                                         {"more", man.GetBitsType(32)}},
+                        /*output_types=*/{{"bar", man.GetBitsType(32)}});
+  EXPECT_NE(it1, it6);
+  InstantiationType it7(/*input_types=*/{{"foo", man.GetBitsType(32)}},
+                        /*output_types=*/{{"bar", man.GetBitsType(32)},
+                                          {"more", man.GetBitsType(32)}});
+  EXPECT_NE(it1, it7);
+  InstantiationType it8(/*input_types=*/{{"foo", man.GetBitsType(32)}},
+                        /*output_types=*/{{"bar", man.GetBitsType(3)}});
+  EXPECT_NE(it1, it8);
+  InstantiationType it9(/*input_types=*/{{"foo", man.GetBitsType(3)}},
+                        /*output_types=*/{{"bar", man.GetBitsType(32)}});
+  EXPECT_NE(it1, it9);
+}
+
+TEST(TypeTest, StructuralMetadataBitsAndToken) {
+  BitsType b32(32);
+  TokenType token;
+
+  EXPECT_THAT(b32.leaf_types(), ElementsAre(&b32));
+  EXPECT_EQ(b32.leaf_type(0), &b32);
+  EXPECT_THAT(b32.tree_index_vectors(), ElementsAre(ElementsAre()));
+  EXPECT_THAT(b32.tree_index(0), ElementsAre());
+  EXPECT_EQ(b32.GetLinearOffset({}), 0);
+
+  EXPECT_THAT(token.leaf_types(), ElementsAre(&token));
+  EXPECT_EQ(token.leaf_type(0), &token);
+  EXPECT_THAT(token.tree_index_vectors(), ElementsAre(ElementsAre()));
+  EXPECT_THAT(token.tree_index(0), ElementsAre());
+  EXPECT_EQ(token.GetLinearOffset({}), 0);
+}
+
+TEST(TypeTest, StructuralMetadataArrayOfTuples) {
+  BitsType b8(8);
+  BitsType b16(16);
+  TupleType tuple({&b8, &b16});
+  ArrayType array_of_tuples(2, &tuple);
+
+  EXPECT_EQ(array_of_tuples.leaf_count(), 4);
+  EXPECT_THAT(array_of_tuples.leaf_types(), ElementsAre(&b8, &b16, &b8, &b16));
+
+  EXPECT_THAT(array_of_tuples.tree_index(0), ElementsAre(0, 0));
+  EXPECT_THAT(array_of_tuples.tree_index(1), ElementsAre(0, 1));
+  EXPECT_THAT(array_of_tuples.tree_index(2), ElementsAre(1, 0));
+  EXPECT_THAT(array_of_tuples.tree_index(3), ElementsAre(1, 1));
+
+  EXPECT_EQ(array_of_tuples.GetLinearOffset({0, 0}), 0);
+  EXPECT_EQ(array_of_tuples.GetLinearOffset({0, 1}), 1);
+  EXPECT_EQ(array_of_tuples.GetLinearOffset({1, 0}), 2);
+  EXPECT_EQ(array_of_tuples.GetLinearOffset({1, 1}), 3);
+}
+
+TEST(TypeTest, StructuralMetadataTupleOfTuplesWithEmptyTuples) {
+  BitsType b8(8);
+  BitsType b16(16);
+  BitsType b32(32);
+  TupleType empty_tuple({});
+  TupleType inner1({&b8, &b16});
+  TupleType inner2({&b32});
+  TupleType tuple({&empty_tuple, &inner1, &empty_tuple, &inner2});
+
+  EXPECT_EQ(tuple.leaf_count(), 3);
+  EXPECT_THAT(tuple.leaf_types(), ElementsAre(&b8, &b16, &b32));
+  EXPECT_THAT(tuple.member_leaf_offsets(), ElementsAre(0, 0, 2, 2));
+
+  EXPECT_EQ(tuple.member_leaf_offset(0), 0);
+  EXPECT_EQ(tuple.member_leaf_offset(1), 0);
+  EXPECT_EQ(tuple.member_leaf_offset(2), 2);
+  EXPECT_EQ(tuple.member_leaf_offset(3), 2);
+
+  EXPECT_THAT(tuple.tree_index(0), ElementsAre(1, 0));
+  EXPECT_THAT(tuple.tree_index(1), ElementsAre(1, 1));
+  EXPECT_THAT(tuple.tree_index(2), ElementsAre(3, 0));
+
+  EXPECT_EQ(tuple.GetLinearOffset({1, 0}), 0);
+  EXPECT_EQ(tuple.GetLinearOffset({1, 1}), 1);
+  EXPECT_EQ(tuple.GetLinearOffset({3, 0}), 2);
+}
+
+TEST(TypeTest, StructuralMetadataTupleOfArrays) {
+  BitsType b8(8);
+  BitsType b16(16);
+  ArrayType a1(2, &b8);
+  ArrayType a2(3, &b16);
+  TupleType tuple({&a1, &a2});
+
+  EXPECT_EQ(tuple.leaf_count(), 5);
+  EXPECT_THAT(tuple.leaf_types(), ElementsAre(&b8, &b8, &b16, &b16, &b16));
+  EXPECT_THAT(tuple.member_leaf_offsets(), ElementsAre(0, 2));
+
+  EXPECT_THAT(tuple.tree_index(0), ElementsAre(0, 0));
+  EXPECT_THAT(tuple.tree_index(1), ElementsAre(0, 1));
+  EXPECT_THAT(tuple.tree_index(2), ElementsAre(1, 0));
+  EXPECT_THAT(tuple.tree_index(3), ElementsAre(1, 1));
+  EXPECT_THAT(tuple.tree_index(4), ElementsAre(1, 2));
+
+  EXPECT_EQ(tuple.GetLinearOffset({0, 0}), 0);
+  EXPECT_EQ(tuple.GetLinearOffset({0, 1}), 1);
+  EXPECT_EQ(tuple.GetLinearOffset({1, 0}), 2);
+  EXPECT_EQ(tuple.GetLinearOffset({1, 1}), 3);
+  EXPECT_EQ(tuple.GetLinearOffset({1, 2}), 4);
+}
+
+TEST(TypeTest, StructuralMetadataDeeplyNestedType) {
+  BitsType b8(8);
+  BitsType b16(16);
+  ArrayType inner_arr(2, &b8);
+  TupleType inner_tuple({&inner_arr, &b16});
+  ArrayType deep_type(2, &inner_tuple);
+
+  EXPECT_EQ(deep_type.leaf_count(), 6);
+  EXPECT_THAT(deep_type.leaf_types(),
+              ElementsAre(&b8, &b8, &b16, &b8, &b8, &b16));
+
+  EXPECT_THAT(deep_type.tree_index(0), ElementsAre(0, 0, 0));
+  EXPECT_THAT(deep_type.tree_index(1), ElementsAre(0, 0, 1));
+  EXPECT_THAT(deep_type.tree_index(2), ElementsAre(0, 1));
+  EXPECT_THAT(deep_type.tree_index(3), ElementsAre(1, 0, 0));
+  EXPECT_THAT(deep_type.tree_index(4), ElementsAre(1, 0, 1));
+  EXPECT_THAT(deep_type.tree_index(5), ElementsAre(1, 1));
+
+  EXPECT_EQ(deep_type.GetLinearOffset({0, 0, 0}), 0);
+  EXPECT_EQ(deep_type.GetLinearOffset({0, 0, 1}), 1);
+  EXPECT_EQ(deep_type.GetLinearOffset({0, 1}), 2);
+  EXPECT_EQ(deep_type.GetLinearOffset({1, 0, 0}), 3);
+  EXPECT_EQ(deep_type.GetLinearOffset({1, 0, 1}), 4);
+  EXPECT_EQ(deep_type.GetLinearOffset({1, 1}), 5);
+
+  EXPECT_EQ(deep_type.GetSubtype({0}), &inner_tuple);
+  EXPECT_EQ(deep_type.GetSubtype({0, 0}), &inner_arr);
+  EXPECT_EQ(deep_type.GetSubtype({0, 1}), &b16);
+
+  EXPECT_THAT(deep_type.GetSubtypeAndOffset({0}),
+              Pair(&inner_tuple, int64_t{0}));
+  EXPECT_THAT(deep_type.GetSubtypeAndOffset({1, 0}),
+              Pair(&inner_arr, int64_t{3}));
 }
 
 }  // namespace

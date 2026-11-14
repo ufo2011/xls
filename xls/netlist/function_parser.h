@@ -20,11 +20,13 @@
 #define XLS_NETLIST_FUNCTION_PARSER_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/types/optional.h"
 
 namespace xls {
 namespace netlist {
@@ -33,8 +35,8 @@ namespace function {
 // Represents a single token in a cell group "function" attribute.
 class Token {
  public:
-  // The "kind" of the token; the lexographic element it represents.
-  enum class Kind {
+  // The "kind" of the token; the lexicographic element it represents.
+  enum class Kind : uint8_t {
     kIdentifier,
     kOpenParen,
     kCloseParen,
@@ -54,8 +56,8 @@ class Token {
   static Token Simple(Kind kind, int64_t pos);
 
   Token(Kind kind, int64_t pos,
-        absl::optional<std::string> payload = absl::nullopt)
-      : kind_(kind), pos_(pos), payload_(payload) {}
+        std::optional<std::string> payload = std::nullopt)
+      : kind_(kind), pos_(pos), payload_(std::move(payload)) {}
 
   Kind kind() { return kind_; }
   int64_t pos() { return pos_; }
@@ -64,7 +66,7 @@ class Token {
  private:
   Kind kind_;
   int64_t pos_;
-  absl::optional<std::string> payload_;
+  std::optional<std::string> payload_;
 };
 
 // Scans a function attribute and returns the component tokens.
@@ -72,7 +74,7 @@ class Token {
 // an intervening Pop() will always return the same token.
 class Scanner {
  public:
-  Scanner(std::string function);
+  explicit Scanner(std::string function);
   absl::StatusOr<Token> Pop();
   absl::StatusOr<Token> Peek();
 
@@ -94,7 +96,7 @@ class Scanner {
 
   std::string function_;
   // Set if we've peeked @ a token. Calling Pop() will clear it.
-  absl::optional<Token> peeked_;
+  std::optional<Token> peeked_;
   int64_t current_pos_;
 };
 
@@ -104,7 +106,7 @@ class Ast {
  public:
   // Since our grammer is so simple, we'll squish all AST node types into one
   // enum.
-  enum class Kind {
+  enum class Kind : uint8_t {
     kIdentifier,
     kLiteralZero,
     kLiteralOne,
@@ -124,28 +126,26 @@ class Ast {
 
   static Ast Not(Ast expr, int64_t pos) {
     Ast ast(Kind::kNot, pos);
-    ast.children_.push_back(expr);
+    ast.children_.push_back(std::move(expr));
     return ast;
   }
 
   static Ast BinOp(Kind kind, Ast lhs, Ast rhs, int64_t pos) {
     Ast ast(kind, pos);
-    ast.children_.push_back(lhs);
-    ast.children_.push_back(rhs);
+    ast.children_.push_back(std::move(lhs));
+    ast.children_.push_back(std::move(rhs));
     return ast;
   }
 
   Ast(Kind kind, int64_t pos, std::string name = "")
-      : kind_(kind), pos_(pos), name_(name) {}
+      : kind_(kind), name_(std::move(name)) {}
 
   Kind kind() const { return kind_; }
-  int64_t pos() const { return pos_; }
   std::string name() const { return name_; }
   const std::vector<Ast>& children() const { return children_; }
 
  private:
   Kind kind_;
-  int64_t pos_;
   std::string name_;
   std::vector<Ast> children_;
 };
@@ -156,7 +156,7 @@ class Parser {
   static absl::StatusOr<Ast> ParseFunction(std::string function);
 
  private:
-  Parser(std::string function);
+  explicit Parser(std::string function);
 
   // Parsers for each syntactic element in a function, here ordered from highest
   // to lowest precedence.

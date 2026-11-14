@@ -14,33 +14,42 @@
 
 #include "xls/dslx/interp_bindings.h"
 
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_format.h"
+#include "absl/types/variant.h"
+#include "xls/dslx/frontend/ast.h"
+#include "xls/dslx/frontend/pos.h"
+#include "xls/dslx/interp_value.h"
+
 namespace xls::dslx {
 
-/* static */ InterpBindings InterpBindings::CloneWith(
-    InterpBindings* parent, NameDefTree* name_def_tree, InterpValue value) {
-  InterpBindings new_bindings(/*parent=*/parent);
-  new_bindings.AddValueTree(name_def_tree, value);
-  new_bindings.set_fn_ctx(parent->fn_ctx_);
-  return new_bindings;
-}
-
-/* static */ absl::string_view InterpBindings::VariantAsString(const Entry& e) {
-  if (absl::holds_alternative<InterpValue>(e)) {
+/* static */ std::string_view InterpBindings::VariantAsString(const Entry& e) {
+  if (std::holds_alternative<InterpValue>(e)) {
     return "Value";
   }
-  if (absl::holds_alternative<TypeDef*>(e)) {
-    return "TypeDef";
+  if (std::holds_alternative<TypeAlias*>(e)) {
+    return "TypeAlias";
   }
-  if (absl::holds_alternative<EnumDef*>(e)) {
+  if (std::holds_alternative<EnumDef*>(e)) {
     return "EnumDef";
   }
-  if (absl::holds_alternative<StructDef*>(e)) {
+  if (std::holds_alternative<StructDef*>(e)) {
     return "StructDef";
   }
-  if (absl::holds_alternative<Module*>(e)) {
+  if (std::holds_alternative<Module*>(e)) {
     return "Module";
   }
-  XLS_LOG(FATAL) << "Unhandled binding entry variant.";
+  LOG(FATAL) << "Unhandled binding entry variant.";
 }
 
 InterpBindings::InterpBindings(const InterpBindings* parent) : parent_(parent) {
@@ -49,34 +58,18 @@ InterpBindings::InterpBindings(const InterpBindings* parent) : parent_(parent) {
   }
 }
 
-void InterpBindings::AddValueTree(NameDefTree* name_def_tree,
-                                  InterpValue value) {
-  if (name_def_tree->is_leaf()) {
-    NameDefTree::Leaf leaf = name_def_tree->leaf();
-    if (absl::holds_alternative<NameDef*>(leaf)) {
-      NameDef* name_def = absl::get<NameDef*>(leaf);
-      AddValue(name_def->identifier(), value);
-    }
-    return;
-  }
-  for (int64_t i = 0; i < value.GetLength().value(); ++i) {
-    NameDefTree* sub_tree = name_def_tree->nodes()[i];
-    const InterpValue& sub_value = value.GetValuesOrDie()[i];
-    AddValueTree(sub_tree, sub_value);
-  }
-}
-
 absl::StatusOr<InterpValue> InterpBindings::ResolveValueFromIdentifier(
-    absl::string_view identifier, const Span* ref_span) const {
-  absl::optional<Entry> entry = ResolveEntry(identifier);
+    std::string_view identifier, const Span* ref_span,
+    const FileTable& file_table) const {
+  std::optional<Entry> entry = ResolveEntry(identifier);
   if (!entry.has_value()) {
     std::string span_str;
     if (ref_span != nullptr) {
-      span_str = " @ " + ref_span->ToString();
+      span_str = " @ " + ref_span->ToString(file_table);
     }
     return absl::NotFoundError(absl::StrFormat(
-        "Could not find bindings entry for identifier: \"%s\"%s", identifier,
-        span_str));
+        "InterpBindings could not find bindings entry for identifier: \"%s\"%s",
+        identifier, span_str));
   }
   InterpValue* value = absl::get_if<InterpValue>(&entry.value());
   if (value == nullptr) {
@@ -89,59 +82,18 @@ absl::StatusOr<InterpValue> InterpBindings::ResolveValueFromIdentifier(
 }
 
 absl::StatusOr<Module*> InterpBindings::ResolveModule(
-    absl::string_view identifier) const {
-  absl::optional<Entry> entry = ResolveEntry(identifier);
+    std::string_view identifier) const {
+  std::optional<Entry> entry = ResolveEntry(identifier);
   if (!entry.has_value()) {
     return absl::NotFoundError(
         absl::StrFormat("No binding for identifier \"%s\"", identifier));
   }
-  if (absl::holds_alternative<Module*>(entry.value())) {
-    return absl::get<Module*>(entry.value());
+  if (std::holds_alternative<Module*>(entry.value())) {
+    return std::get<Module*>(entry.value());
   }
   return absl::InvalidArgumentError(absl::StrFormat(
       "Attempted to resolve a module but identifier \"%s\" was bound to a %s",
       identifier, VariantAsString(entry.value())));
-}
-
-absl::StatusOr<TypeAnnotation*> InterpBindings::ResolveTypeAnnotation(
-    absl::string_view identifier) const {
-  absl::optional<Entry> entry = ResolveEntry(identifier);
-  if (!entry.has_value()) {
-    return absl::NotFoundError(
-        absl::StrFormat("No binding for identifier \"%s\"", identifier));
-  }
-  if (absl::holds_alternative<EnumDef*>(entry.value())) {
-    return absl::get<EnumDef*>(entry.value())->type();
-  }
-  if (absl::holds_alternative<TypeDef*>(entry.value())) {
-    return absl::get<TypeDef*>(entry.value())->type();
-  }
-  return absl::InvalidArgumentError(absl::StrFormat(
-      "Attempted to resolve a type but identifier \"%s\" was bound to a %s",
-      identifier, VariantAsString(entry.value())));
-}
-
-absl::StatusOr<absl::variant<TypeAnnotation*, EnumDef*, StructDef*>>
-InterpBindings::ResolveTypeDefinition(absl::string_view identifier) const {
-  absl::optional<Entry> entry = ResolveEntry(identifier);
-  if (!entry.has_value()) {
-    return absl::NotFoundError(absl::StrFormat(
-        "Could not resolve type definition for identifier: \"%s\"",
-        identifier));
-  }
-  if (absl::holds_alternative<TypeDef*>(entry.value())) {
-    return absl::get<TypeDef*>(entry.value())->type();
-  }
-  if (absl::holds_alternative<EnumDef*>(entry.value())) {
-    return absl::get<EnumDef*>(entry.value());
-  }
-  if (absl::holds_alternative<StructDef*>(entry.value())) {
-    return absl::get<StructDef*>(entry.value());
-  }
-  return absl::InvalidArgumentError(
-      absl::StrFormat("Attempted to resolve a type definition but identifier "
-                      "\"%s\" was bound to a %s",
-                      identifier, VariantAsString(entry.value())));
 }
 
 absl::flat_hash_set<std::string> InterpBindings::GetKeys() const {
@@ -156,8 +108,8 @@ absl::flat_hash_set<std::string> InterpBindings::GetKeys() const {
   return result;
 }
 
-absl::optional<InterpBindings::Entry> InterpBindings::ResolveEntry(
-    absl::string_view identifier) const {
+std::optional<InterpBindings::Entry> InterpBindings::ResolveEntry(
+    std::string_view identifier) const {
   auto it = map_.find(identifier);
   if (it != map_.end()) {
     return it->second;
@@ -167,7 +119,7 @@ absl::optional<InterpBindings::Entry> InterpBindings::ResolveEntry(
     return parent_->ResolveEntry(identifier);
   }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 }  // namespace xls::dslx

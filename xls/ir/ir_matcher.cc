@@ -14,36 +14,79 @@
 
 #include "xls/ir/ir_matcher.h"
 
+#include <array>
+#include <cstdint>
+#include <optional>
+#include <ostream>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include "gmock/gmock.h"
+#include "gtest/gtest.h"
+#include "absl/log/log.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
+#include "absl/types/span.h"
+#include "xls/ir/bits.h"
+#include "xls/ir/channel.h"
+#include "xls/ir/function_base.h"
+#include "xls/ir/instantiation.h"
+#include "xls/ir/lsb_or_msb.h"
+#include "xls/ir/node.h"
 #include "xls/ir/nodes.h"
+#include "xls/ir/op.h"
+#include "xls/ir/proc.h"
+#include "xls/ir/state_element.h"
+#include "xls/ir/type.h"
+#include "xls/ir/value.h"
 
 namespace xls {
 namespace op_matchers {
 
+namespace internal {
+bool NameMatcherInternal::MatchAndExplain(
+    std::string_view name, ::testing::MatchResultListener* listener) const {
+  if (name_ == name) {
+    return true;
+  }
+  *listener << absl::StreamFormat("%s has incorrect name, expected: %s.", name,
+                                  name_);
+  return false;
+}
+
+void NameMatcherInternal::DescribeTo(std::ostream* os) const { *os << name_; }
+
+void NameMatcherInternal::DescribeNegationTo(std::ostream* os) const {
+  *os << absl::StreamFormat("name not %s", name_);
+}
+}  // namespace internal
+
 bool ChannelMatcher::MatchAndExplain(
-    const ::xls::Channel* channel,
-    ::testing::MatchResultListener* listener) const {
-  if (!channel) {
-    return false;
-  }
-  *listener << channel->ToString();
-  if (id_.has_value() && channel->id() != id_.value()) {
-    *listener << absl::StreamFormat(" has incorrect id (%d), expected: %d",
-                                    channel->id(), id_.value());
+    ::xls::ChannelRef channel, ::testing::MatchResultListener* listener) const {
+  *listener << ChannelRefToString(channel);
+
+  if (name_.has_value() &&
+      !name_->MatchAndExplain(std::string{ChannelRefName(channel)}, listener)) {
     return false;
   }
 
-  if (name_.has_value() && channel->name() != name_.value()) {
-    *listener << absl::StreamFormat(" has incorrect name (%s), expected: %s",
-                                    channel->name(), name_.value());
+  if (kind_.has_value() && ChannelRefKind(channel) != kind_.value()) {
+    *listener << absl::StreamFormat(
+        " has incorrect kind (%s), expected: %s",
+        ChannelKindToString(ChannelRefKind(channel)),
+        ChannelKindToString(kind_.value()));
     return false;
   }
-
-  if (kind_.has_value() && channel->kind() != kind_.value()) {
-    *listener << absl::StreamFormat(" has incorrect kind (%s), expected: %s",
-                                    ChannelKindToString(channel->kind()),
-                                    ChannelKindToString(kind_.value()));
+  if (type_string_.has_value() &&
+      ChannelRefType(channel)->ToString() != type_string_.value()) {
+    *listener << absl::StreamFormat(" has incorrect type (%s), expected: %s",
+                                    ChannelRefType(channel)->ToString(),
+                                    type_string_.value());
     return false;
   }
   return true;
@@ -51,11 +94,12 @@ bool ChannelMatcher::MatchAndExplain(
 
 void ChannelMatcher::DescribeTo(::std::ostream* os) const {
   std::vector<std::string> pieces;
-  if (id_.has_value()) {
-    pieces.push_back(absl::StrFormat("id=%d", id_.value()));
-  }
   if (name_.has_value()) {
-    pieces.push_back(absl::StrFormat("name=%s", name_.value()));
+    std::stringstream ss;
+    ss << "name=\"";
+    name_->DescribeTo(&ss);
+    ss << '"';
+    pieces.push_back(ss.str());
   }
   if (kind_.has_value()) {
     pieces.push_back(
@@ -70,7 +114,8 @@ bool NodeMatcher::MatchAndExplain(
     return false;
   }
   if (node->op() != op_) {
-    *listener << " has incorrect op, expected: " << OpToString(op_);
+    *listener << " has incorrect op (" << OpToString(node->op())
+              << "), expected: " << OpToString(op_);
     return false;
   }
 
@@ -132,38 +177,164 @@ bool TypeMatcher::MatchAndExplain(
             << " has incorrect type, expected: " << type_str_;
   return false;
 }
-
-void TypeMatcher::DescribeTo(std::ostream* os) const { *os << type_str_; }
-
-bool NameMatcher::MatchAndExplain(
-    const Node* node, ::testing::MatchResultListener* listener) const {
-  if (name_ == node->GetName()) {
+bool TypeMatcher::MatchAndExplain(
+    const ::xls::Type* type, ::testing::MatchResultListener* listener) const {
+  if (type_str_ == type->ToString()) {
     return true;
   }
-  *listener << node->ToString() << " has incorrect name, expected: " << name_;
+  *listener << type->ToString()
+            << " has incorrect type, expected: " << type_str_;
   return false;
 }
 
-void NameMatcher::DescribeTo(std::ostream* os) const { *os << name_; }
+void TypeMatcher::DescribeTo(std::ostream* os) const { *os << type_str_; }
+
+void TypeMatcher::DescribeNegationTo(std::ostream* os) const {
+  *os << "is not " << type_str_;
+}
+
+bool StateElementMatcher::MatchAndExplain(
+    const class StateElement* state_element,
+    ::testing::MatchResultListener* listener) const {
+  if (!state_element) {
+    return false;
+  }
+  bool match = true;
+  if (::testing::StringMatchResultListener inner_listener;
+      name_matcher_.has_value() &&
+      !name_matcher_->MatchAndExplain(state_element->name(), &inner_listener)) {
+    if (listener->IsInterested()) {
+      if (match) {
+        *listener << "State element has";
+      }
+      *listener << " incorrect name, expected: ";
+      name_matcher_->DescribeTo(listener->stream());
+      std::string explanation = inner_listener.str();
+      if (!explanation.empty()) {
+        *listener << ", " << explanation;
+      }
+    }
+    match = false;
+  }
+  if (::testing::StringMatchResultListener inner_listener;
+      type_matcher_.has_value() &&
+      !type_matcher_->MatchAndExplain(state_element->type(), &inner_listener)) {
+    if (listener->IsInterested()) {
+      if (match) {
+        *listener << "State element has";
+      }
+      *listener << " incorrect type, expected: ";
+      type_matcher_->DescribeTo(listener->stream());
+      std::string explanation = inner_listener.str();
+      if (!explanation.empty()) {
+        *listener << ", " << explanation;
+      }
+    }
+    match = false;
+  }
+  if (::testing::StringMatchResultListener inner_listener;
+      initial_value_matcher_.has_value() &&
+      !initial_value_matcher_->MatchAndExplain(state_element->initial_value(),
+                                               &inner_listener)) {
+    if (listener->IsInterested()) {
+      if (match) {
+        *listener << "State element has";
+      }
+      *listener << " incorrect initial value, expected: ";
+      initial_value_matcher_->DescribeTo(listener->stream());
+      std::string explanation = inner_listener.str();
+      if (!explanation.empty()) {
+        *listener << ", " << explanation;
+      }
+    }
+    match = false;
+  }
+  return match;
+}
+
+void StateElementMatcher::DescribeTo(::std::ostream* os) const {
+  *os << "state element";
+  if (name_matcher_.has_value()) {
+    *os << " with name ";
+    name_matcher_->DescribeTo(os);
+  }
+}
+
+bool NameMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  return inner_matcher_.MatchAndExplain(node->GetName(), listener);
+}
+
+void NameMatcher::DescribeTo(std::ostream* os) const {
+  inner_matcher_.DescribeTo(os);
+}
+
+void NameMatcher::DescribeNegationTo(std::ostream* os) const {
+  inner_matcher_.DescribeNegationTo(os);
+}
 
 bool ParamMatcher::MatchAndExplain(
     const Node* node, ::testing::MatchResultListener* listener) const {
   if (!NodeMatcher::MatchAndExplain(node, listener)) {
     return false;
   }
-  if (name_.has_value() && node->GetName() != *name_) {
-    *listener << " has incorrect name, expected: " << *name_;
-    return false;
+  if (name_matcher_.has_value()) {
+    return name_matcher_->MatchAndExplain(node->GetName(), listener);
   }
   return true;
 }
 
 void ParamMatcher::DescribeTo(::std::ostream* os) const {
-  if (name_.has_value()) {
-    DescribeToHelper(os, {absl::StrFormat("name=\"%s\"", name_.value())});
-  } else {
-    DescribeToHelper(os, {});
+  std::vector<std::string> additional_fields;
+  if (name_matcher_.has_value()) {
+    std::stringstream ss;
+    ss << "name=\"";
+    name_matcher_->DescribeTo(&ss);
+    ss << '"';
+    additional_fields.push_back(ss.str());
   }
+  DescribeToHelper(os, additional_fields);
+}
+
+bool ArrayIndexMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (!assumed_in_bounds_.MatchAndExplain(
+          node->As<::xls::ArrayIndex>()->assumed_in_bounds(), listener)) {
+    *listener << "Unexpected value of assumed_in_bounds for " << node;
+    return false;
+  }
+  return true;
+}
+bool ArrayUpdateMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (!assumed_in_bounds_.MatchAndExplain(
+          node->As<::xls::ArrayUpdate>()->assumed_in_bounds(), listener)) {
+    *listener << "Unexpected value of assumed_in_bounds for " << node;
+    return false;
+  }
+  return true;
+}
+
+bool ArraySliceMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+
+  if (width_.has_value()) {
+    const auto* slice = node->As<::xls::ArraySlice>();
+    if (slice->width() != *width_) {
+      *listener << "width is " << slice->width() << ", expected " << *width_;
+      return false;
+    }
+  }
+  return true;
 }
 
 bool BitSliceMatcher::MatchAndExplain(
@@ -171,15 +342,39 @@ bool BitSliceMatcher::MatchAndExplain(
   if (!NodeMatcher::MatchAndExplain(node, listener)) {
     return false;
   }
-  if (start_.has_value() && node->As<::xls::BitSlice>()->start() != *start_) {
-    *listener << " has incorrect start, expected: " << *start_;
+  if (!start_.Matches(node->As<::xls::BitSlice>()->start())) {
+    if (listener->IsInterested()) {
+      *listener << "has incorrect start, expected start ";
+      start_.DescribeTo(listener->stream());
+    }
     return false;
   }
-  if (width_.has_value() && node->As<::xls::BitSlice>()->width() != *width_) {
-    *listener << " has incorrect width, expected: " << *width_;
+  if (!width_.Matches(node->As<::xls::BitSlice>()->width())) {
+    if (listener->IsInterested()) {
+      *listener << "has incorrect width, expected width ";
+      width_.DescribeTo(listener->stream());
+    }
     return false;
   }
   return true;
+}
+
+void BitSliceMatcher::DescribeTo(::std::ostream* os) const {
+  std::vector<std::string> additional_fields;
+  additional_fields.reserve(2);
+  {
+    std::stringstream ss;
+    ss << "start ";
+    start_.DescribeTo(&ss);
+    additional_fields.push_back(ss.str());
+  }
+  {
+    std::stringstream ss;
+    ss << "width ";
+    width_.DescribeTo(&ss);
+    additional_fields.push_back(ss.str());
+  }
+  DescribeToHelper(os, additional_fields);
 }
 
 bool DynamicBitSliceMatcher::MatchAndExplain(
@@ -229,18 +424,6 @@ bool LiteralMatcher::MatchAndExplain(
   return true;
 }
 
-bool DynamicCountedForMatcher::MatchAndExplain(
-    const Node* node, ::testing::MatchResultListener* listener) const {
-  if (!NodeMatcher::MatchAndExplain(node, listener)) {
-    return false;
-  }
-  if (node->As<::xls::DynamicCountedFor>()->body() != body_) {
-    *listener << " has incorrect body function, expected: " << body_->name();
-    return false;
-  }
-  return true;
-}
-
 bool SelectMatcher::MatchAndExplain(
     const Node* node, ::testing::MatchResultListener* listener) const {
   if (!NodeMatcher::MatchAndExplain(node, listener)) {
@@ -286,31 +469,27 @@ bool TupleIndexMatcher::MatchAndExplain(
 }
 
 static bool MatchChannel(
-    int64_t channel_id, Package* package,
-    const ::testing::Matcher<const ::xls::Channel*>& channel_matcher,
+    std::string_view channel, ::xls::Proc* proc, ChannelDirection direction,
+    const ::testing::Matcher<::xls::ChannelRef>& channel_matcher,
     ::testing::MatchResultListener* listener) {
-  absl::StatusOr<::xls::Channel*> channel_status =
-      package->GetChannel(channel_id);
+  absl::StatusOr<::xls::ChannelRef> channel_status =
+      proc->GetChannelRef(channel, direction);
   if (!channel_status.ok()) {
-    *listener << " has an invalid channel id: " << channel_id;
+    *listener << " has an invalid channel name: " << channel;
     return false;
   }
-  ::xls::Channel* ch = channel_status.value();
-  return channel_matcher.MatchAndExplain(ch, listener);
+  ::xls::ChannelRef ch_ref = channel_status.value();
+  return channel_matcher.MatchAndExplain(ch_ref, listener);
 }
 
-static int64_t GetChannelId(const Node* node) {
+static std::string_view GetChannelName(const Node* node) {
   switch (node->op()) {
     case Op::kReceive:
-      return node->As<::xls::Receive>()->channel_id();
-    case Op::kReceiveIf:
-      return node->As<::xls::ReceiveIf>()->channel_id();
+      return node->As<::xls::Receive>()->channel_name();
     case Op::kSend:
-      return node->As<::xls::Send>()->channel_id();
-    case Op::kSendIf:
-      return node->As<::xls::SendIf>()->channel_id();
+      return node->As<::xls::Send>()->channel_name();
     default:
-      XLS_LOG(FATAL) << "Node is not a channel node: " << node->ToString();
+      LOG(FATAL) << "Node is not a channel node: " << node->ToString();
   }
 }
 
@@ -322,7 +501,18 @@ bool ChannelNodeMatcher::MatchAndExplain(
   if (!channel_matcher_.has_value()) {
     return true;
   }
-  return MatchChannel(GetChannelId(node), node->package(),
+  ChannelDirection direction;
+  if (node->Is<::xls::Send>()) {
+    direction = ChannelDirection::kSend;
+  } else if (node->Is<::xls::Receive>()) {
+    direction = ChannelDirection::kReceive;
+  } else {
+    LOG(FATAL) << absl::StrFormat(
+        "Expected send or receive node, got node `%s` with op `%s`",
+        node->GetName(), OpToString(node->op()));
+  }
+  return MatchChannel(GetChannelName(node),
+                      node->function_base()->AsProcOrDie(), direction,
                       channel_matcher_.value(), listener);
 }
 
@@ -336,22 +526,492 @@ void ChannelNodeMatcher::DescribeTo(::std::ostream* os) const {
   NodeMatcher::DescribeToHelper(os, fields);
 }
 
+bool TraceVerbosityMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (!verbosity_.MatchAndExplain(node->As<::xls::Trace>()->verbosity(),
+                                  listener)) {
+    return false;
+  }
+  return true;
+}
+
+void TraceVerbosityMatcher::DescribeTo(::std::ostream* os) const {
+  std::stringstream ss;
+  ss << "trace_verbosity=\"";
+  verbosity_.DescribeTo(&ss);
+  ss << '"';
+  std::array<std::string, 1> additional_fields = {ss.str()};
+  DescribeToHelper(os, additional_fields);
+}
+
 bool InputPortMatcher::MatchAndExplain(
     const Node* node, ::testing::MatchResultListener* listener) const {
-  return matcher_.MatchAndExplain(node, listener);
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (name_matcher_.has_value() &&
+      !name_matcher_->MatchAndExplain(node->GetName(), listener)) {
+    return false;
+  }
+  return true;
 }
 
 void InputPortMatcher::DescribeTo(::std::ostream* os) const {
-  matcher_.DescribeTo(os);
+  std::vector<std::string> additional_fields;
+  if (name_matcher_.has_value()) {
+    std::stringstream ss;
+    ss << "name=\"";
+    name_matcher_->DescribeTo(&ss);
+    ss << '"';
+    additional_fields.push_back(ss.str());
+  }
+  DescribeToHelper(os, additional_fields);
 }
 
 bool OutputPortMatcher::MatchAndExplain(
     const Node* node, ::testing::MatchResultListener* listener) const {
-  return matcher_.MatchAndExplain(node, listener);
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (name_matcher_.has_value() &&
+      !name_matcher_->MatchAndExplain(node->GetName(), listener)) {
+    return false;
+  }
+  return true;
 }
 
 void OutputPortMatcher::DescribeTo(::std::ostream* os) const {
-  matcher_.DescribeTo(os);
+  std::vector<std::string> additional_fields;
+  if (name_matcher_.has_value()) {
+    std::stringstream ss;
+    ss << "name=\"";
+    name_matcher_->DescribeTo(&ss);
+    ss << '"';
+    additional_fields.push_back(ss.str());
+  }
+  DescribeToHelper(os, additional_fields);
+}
+
+bool StateReadMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (state_element_name_.has_value() &&
+      !state_element_name_->Matches(
+          node->As<xls::StateRead>()->state_element()->name())) {
+    *listener << " has incorrect state element ("
+              << node->As<xls::StateRead>()->state_element()->name()
+              << "), expected: ";
+    if (listener->stream() != nullptr) {
+      state_element_name_->DescribeTo(listener->stream());
+    }
+    return false;
+  }
+  if (label_.has_value() &&
+      !label_->MatchAndExplain(node->As<xls::StateRead>()->label(), listener)) {
+    *listener << " has incorrect label";
+    return false;
+  }
+  return true;
+}
+
+void StateReadMatcher::DescribeTo(::std::ostream* os) const {
+  std::vector<std::string> additional_fields;
+  if (state_element_name_.has_value()) {
+    std::stringstream ss;
+    ss << "state_element=\"";
+    state_element_name_->DescribeTo(&ss);
+    ss << '"';
+    additional_fields.push_back(ss.str());
+  }
+  if (label_.has_value()) {
+    std::stringstream ss;
+    ss << "label=";
+    label_->DescribeTo(&ss);
+    additional_fields.push_back(ss.str());
+  }
+  DescribeToHelper(os, additional_fields);
+}
+
+bool NextMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  const xls::Next* next = node->As<xls::Next>();
+  if (state_element_.has_value()) {
+    if (!state_element_->MatchAndExplain(next->state_element(), listener)) {
+      *listener << " has incorrect state element";
+      return false;
+    }
+  }
+  if (label_.has_value() && !label_->MatchAndExplain(next->label(), listener)) {
+    *listener << " has incorrect label";
+    return false;
+  }
+  return true;
+}
+
+void NextMatcher::DescribeTo(::std::ostream* os) const {
+  std::vector<std::string> additional_fields;
+  if (state_element_.has_value()) {
+    std::stringstream ss;
+    ss << "state_element=";
+    state_element_->DescribeTo(&ss);
+    additional_fields.push_back(ss.str());
+  }
+  if (label_.has_value()) {
+    std::stringstream ss;
+    ss << "label=";
+    label_->DescribeTo(&ss);
+    additional_fields.push_back(ss.str());
+  }
+  DescribeToHelper(os, additional_fields);
+}
+
+bool RegisterReadMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (register_name_.has_value() &&
+      !register_name_->Matches(
+          node->As<xls::RegisterRead>()->GetRegister()->name())) {
+    *listener << " has incorrect register ("
+              << node->As<xls::RegisterRead>()->GetRegister()->name()
+              << "), expected: ";
+    if (listener->stream() != nullptr) {
+      register_name_->DescribeTo(listener->stream());
+    }
+    return false;
+  }
+  return true;
+}
+
+void RegisterReadMatcher::DescribeTo(::std::ostream* os) const {
+  std::vector<std::string> additional_fields;
+  if (register_name_.has_value()) {
+    std::stringstream ss;
+    ss << "register=\"";
+    register_name_->DescribeTo(&ss);
+    ss << '"';
+    additional_fields.push_back(ss.str());
+  }
+  DescribeToHelper(os, additional_fields);
+}
+
+bool RegisterWriteMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (register_name_.has_value() &&
+      !register_name_->Matches(
+          node->As<xls::RegisterWrite>()->GetRegister()->name())) {
+    *listener << " has incorrect register ("
+              << node->As<xls::RegisterWrite>()->GetRegister()->name()
+              << "), expected: ";
+
+    if (listener->stream() != nullptr) {
+      register_name_->DescribeTo(listener->stream());
+    }
+    return false;
+  }
+  return true;
+}
+
+void RegisterWriteMatcher::DescribeTo(::std::ostream* os) const {
+  std::vector<std::string> additional_fields;
+  if (register_name_.has_value()) {
+    std::stringstream ss;
+    ss << "register=\"";
+    register_name_->DescribeTo(&ss);
+    ss << '"';
+    additional_fields.push_back(ss.str());
+  }
+  DescribeToHelper(os, additional_fields);
+}
+
+bool RegisterMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  // First match the output of the register. It should be a tuple-index of a
+  // receive operation.
+  if (!d_matcher_.MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (q_matcher_.has_value()) {
+    const std::string& register_name =
+        node->As<::xls::RegisterRead>()->GetRegister()->name();
+    xls::RegisterWrite* reg_write = nullptr;
+    for (Node* node : node->function_base()->nodes()) {
+      if (node->Is<::xls::RegisterWrite>() &&
+          node->As<::xls::RegisterWrite>()->GetRegister()->name() ==
+              register_name) {
+        reg_write = node->As<::xls::RegisterWrite>();
+        break;
+      }
+    }
+    if (reg_write == nullptr) {
+      *listener << " has no associated register write operation. IR may be "
+                   "malformed.";
+      return false;
+    }
+
+    if (!q_matcher_->MatchAndExplain(reg_write, listener)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void RegisterMatcher::DescribeTo(::std::ostream* os) const {
+  *os << "register(";
+  if (q_matcher_.has_value()) {
+    q_matcher_->DescribeTo(os);
+  }
+  *os << ")";
+}
+
+void RegisterMatcher::DescribeNegationTo(::std::ostream* os) const {
+  *os << "did not match register(";
+  if (q_matcher_.has_value()) {
+    q_matcher_->DescribeTo(os);
+  }
+  *os << ")";
+}
+
+bool FunctionBaseMatcher::MatchAndExplain(
+    const ::xls::FunctionBase* fb,
+    ::testing::MatchResultListener* listener) const {
+  if (fb == nullptr) {
+    return false;
+  }
+  *listener << fb->name();
+  if (name_.has_value() && !name_->MatchAndExplain(fb->name(), listener)) {
+    return false;
+  }
+  return true;
+}
+
+void FunctionBaseMatcher::DescribeTo(::std::ostream* os) const {
+  std::string name_str;
+  if (name_.has_value()) {
+    std::stringstream ss;
+    ss << "name=";
+    name_->DescribeTo(&ss);
+    name_str = ss.str();
+  }
+  *os << absl::StreamFormat("FunctionBase(%s)", name_str);
+}
+
+void ProcMatcher::DescribeTo(::std::ostream* os) const {
+  std::optional<std::string> name_str;
+  if (name_.has_value()) {
+    std::stringstream ss;
+    name_->DescribeTo(&ss);
+    name_str = ss.str();
+  }
+  *os << absl::StreamFormat("proc %s { ... }",
+                            name_str.value_or("<unspecified>"));
+}
+
+void ProcMatcher::DescribeNegationTo(std::ostream* os) const {
+  std::string name_str;
+  if (name_.has_value()) {
+    std::stringstream ss;
+    ss << " named ";
+    name_->DescribeTo(&ss);
+    name_str = ss.str();
+  }
+  *os << absl::StreamFormat("FunctionBase was not a proc%s.", name_str);
+}
+
+void FunctionMatcher::DescribeTo(::std::ostream* os) const {
+  std::stringstream ss;
+  std::optional<std::string> name_str;
+  if (name_.has_value()) {
+    name_->DescribeTo(&ss);
+    name_str = ss.str();
+  }
+  *os << absl::StreamFormat("fn %s { ... }",
+                            name_str.value_or("<unspecified>"));
+}
+
+void FunctionMatcher::DescribeNegationTo(std::ostream* os) const {
+  std::string name_str;
+  if (name_.has_value()) {
+    std::stringstream ss;
+    ss << " named ";
+    name_->DescribeTo(&ss);
+    name_str = ss.str();
+  }
+  *os << absl::StreamFormat("FunctionBase was not a function%s.", name_str);
+}
+
+void BlockMatcher::DescribeTo(::std::ostream* os) const {
+  std::stringstream ss;
+  std::optional<std::string> name_str;
+  if (name_.has_value()) {
+    name_->DescribeTo(&ss);
+    name_str = ss.str();
+  }
+  *os << absl::StreamFormat("block %s { ... }",
+                            name_str.value_or("<unspecified>"));
+}
+
+void BlockMatcher::DescribeNegationTo(std::ostream* os) const {
+  std::string name_str;
+  if (name_.has_value()) {
+    std::stringstream ss;
+    ss << " named ";
+    name_->DescribeTo(&ss);
+    name_str = ss.str();
+  }
+  *os << absl::StreamFormat("FunctionBase was not a block%s.", name_str);
+}
+
+bool MinDelayMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  int64_t delay = node->As<::xls::MinDelay>()->delay();
+  if (delay_.Matches(delay)) {
+    return true;
+  }
+  if (listener->IsInterested()) {
+    *listener << "delay " << delay << " ";
+    delay_.DescribeNegationTo(listener->stream());
+  }
+  return false;
+}
+
+void MinDelayMatcher::DescribeTo(::std::ostream* os) const {
+  std::stringstream delay_description;
+  delay_.DescribeTo(&delay_description);
+  DescribeToHelper(os, {absl::StrCat("delay=", delay_description.str())});
+}
+
+bool InstantiationMatcher::MatchAndExplain(
+    const ::xls::Instantiation* instantiation,
+    ::testing::MatchResultListener* listener) const {
+  if (name_.has_value() &&
+      !name_->MatchAndExplain(std::string{instantiation->name()}, listener)) {
+    return false;
+  }
+
+  if (kind_.has_value() && *kind_ != instantiation->kind()) {
+    *listener << absl::StreamFormat("%s has incorrect kind, expected: %v",
+                                    instantiation->name(), *kind_);
+    return false;
+  }
+  return true;
+}
+
+void InstantiationMatcher::DescribeTo(::std::ostream* os) const {
+  std::string kind_str;
+  if (kind_.has_value()) {
+    kind_str = absl::StrFormat("(kind=%s)", InstantiationKindToString(*kind_));
+  }
+  std::string name_str = "<unspecified>";
+  if (name_.has_value()) {
+    std::stringstream ss;
+    name_->DescribeTo(&ss);
+    name_str = ss.str();
+  }
+  *os << absl::StreamFormat("instantiation %s%s", name_str, kind_str);
+}
+void InstantiationMatcher::DescribeNegationTo(std::ostream* os) const {
+  std::string kind_str;
+  if (kind_.has_value()) {
+    kind_str = absl::StrFormat("kind=%s", InstantiationKindToString(*kind_));
+  }
+  std::string name_str = "<unspecified>";
+  if (name_.has_value()) {
+    std::stringstream ss;
+    name_->DescribeTo(&ss);
+    name_str = ss.str();
+  }
+  *os << absl::StreamFormat("Instantiation did not have (name=%s, kind=%s)",
+                            name_str, kind_str);
+}
+
+bool InstantiationOutputMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (port_name_.has_value() &&
+      !port_name_->MatchAndExplain(
+          node->As<::xls::InstantiationOutput>()->port_name(), listener)) {
+    return false;
+  }
+  if (instantiation_.has_value() &&
+      !instantiation_->MatchAndExplain(
+          node->As<::xls::InstantiationOutput>()->instantiation(), listener)) {
+    return false;
+  }
+  return true;
+}
+
+void InstantiationOutputMatcher::DescribeTo(::std::ostream* os) const {
+  std::vector<std::string> additional_fields;
+  if (port_name_.has_value()) {
+    std::stringstream ss;
+    ss << "name=\"";
+    port_name_->DescribeTo(&ss);
+    ss << '"';
+    additional_fields.push_back(std::move(ss).str());
+  }
+  if (instantiation_.has_value()) {
+    std::stringstream ss;
+    ss << "instantiation=\"";
+    instantiation_->DescribeTo(&ss);
+    ss << '"';
+    additional_fields.push_back(std::move(ss).str());
+  }
+  DescribeToHelper(os, additional_fields);
+}
+
+bool InstantiationInputMatcher::MatchAndExplain(
+    const Node* node, ::testing::MatchResultListener* listener) const {
+  if (!NodeMatcher::MatchAndExplain(node, listener)) {
+    return false;
+  }
+  if (name_.has_value() &&
+      !name_->MatchAndExplain(node->As<xls::InstantiationInput>()->port_name(),
+                              listener)) {
+    return false;
+  }
+  if (instantiation_.has_value() &&
+      !instantiation_->MatchAndExplain(
+          node->As<::xls::InstantiationInput>()->instantiation(), listener)) {
+    return false;
+  }
+  return true;
+}
+
+void InstantiationInputMatcher::DescribeTo(::std::ostream* os) const {
+  std::vector<std::string> additional_fields;
+  if (name_.has_value()) {
+    std::stringstream ss;
+    ss << "name=\"";
+    name_->DescribeTo(&ss);
+    ss << '"';
+    additional_fields.push_back(std::move(ss).str());
+  }
+  if (instantiation_.has_value()) {
+    std::stringstream ss;
+    ss << "instantiation=\"";
+    instantiation_->DescribeTo(&ss);
+    ss << '"';
+    additional_fields.push_back(std::move(ss).str());
+  }
+  DescribeToHelper(os, additional_fields);
 }
 
 }  // namespace op_matchers

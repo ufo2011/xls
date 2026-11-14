@@ -14,83 +14,183 @@
 
 #include "xls/ir/function.h"
 
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
-#include "xls/common/logging/logging.h"
+#include "absl/strings/strip.h"
+#include "absl/types/optional_ref.h"
+#include "absl/types/span.h"
+#include "absl/types/variant.h"
+#include "xls/common/attribute_data.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
-#include "xls/ir/node_iterator.h"
+#include "xls/common/visitor.h"
+#include "xls/ir/change_listener.h"
+#include "xls/ir/function_base.h"
+#include "xls/ir/ir_annotator.h"
+#include "xls/ir/node.h"
+#include "xls/ir/nodes.h"
+#include "xls/ir/op.h"
 #include "xls/ir/package.h"
-
-using absl::StrAppend;
+#include "xls/ir/topo_sort.h"
+#include "xls/ir/type.h"
 
 namespace xls {
+
+absl::Status Function::set_return_value(Node* n, bool validate) {
+  if (validate) {
+    XLS_RET_CHECK_EQ(n->function_base(), this) << absl::StreamFormat(
+        "Return value node %s is not in this function %s (is in function %s)",
+        n->GetName(), name(), n->function_base()->name());
+  }
+  Node* old_return_value = return_value_;
+  return_value_ = n;
+  return_type_ = n->GetType();
+  for (ChangeListener* listener : change_listeners_) {
+    listener->ReturnValueChanged(this, old_return_value);
+  }
+  return absl::OkStatus();
+}
 
 FunctionType* Function::GetType() {
   std::vector<Type*> arg_types;
   for (Param* param : params()) {
     arg_types.push_back(param->GetType());
   }
-  XLS_CHECK(return_value() != nullptr);
-  return package_->GetFunctionType(arg_types, return_value()->GetType());
+  CHECK(return_type_ != nullptr);
+  return package_->GetFunctionType(arg_types, return_type_);
 }
 
-std::string Function::DumpIr(bool recursive) const {
-  std::string nested_funcs = "";
-  std::string res = "fn " + name() + "(";
-  std::vector<std::string> param_strings;
-  for (Param* param : params_) {
-    param_strings.push_back(
-        absl::StrFormat("%s: %s", param->name(), param->GetType()->ToString()));
-  }
-  StrAppend(&res, absl::StrJoin(param_strings, ", "));
-  StrAppend(&res, ") -> ");
+std::string Function::DumpIrWithAnnotations(
+    const std::function<std::optional<std::string>(Node*)>& annotate) const {
+  class Annotator : public IrAnnotator {
+   public:
+    explicit Annotator(
+        const std::function<std::optional<std::string>(Node*)>& annotate)
+        : annotate_(annotate) {}
+    Annotation NodeAnnotation(Node* node) const override {
+      if (auto v = annotate_(node); v.has_value()) {
+        return {.suffix = absl::StrCat("(", *v, ")")};
+      }
+      return {};
+    }
 
-  if (return_value() != nullptr) {
-    StrAppend(&res, return_value()->GetType()->ToString());
-  }
-  StrAppend(&res, " {\n");
+   private:
+    const std::function<std::optional<std::string>(Node*)>& annotate_;
+  };
+  return DumpIr(Annotator{annotate});
+}
 
-  for (Node* node : TopoSort(const_cast<Function*>(this))) {
-    if (node->op() == Op::kParam && node == return_value()) {
-      absl::StrAppendFormat(&res, "  ret %s: %s = param(name=%s)\n",
-                            node->GetName(), node->GetType()->ToString(),
-                            node->As<Param>()->name());
-      continue;
+std::string Function::DumpIr(const IrAnnotator& annotate) const {
+  std::string res = DumpAttributes();
+  Annotation fn_annotation = annotate.FunctionAnnotation(this);
+  if (fn_annotation.prefix.has_value()) {
+    absl::StrAppend(&res, absl::StripSuffix(*fn_annotation.prefix, "\n"), "\n");
+  }
+  absl::StrAppendFormat(&res, "%s%sfn %s(", IsTop() ? "top " : "",
+                        IsScheduled() ? "scheduled_" : "", name());
+  absl::StrAppend(
+      &res,
+      absl::StrJoin(params_, ", ", [&](std::string* s, Param* const param) {
+        Annotation param_annotation = annotate.NodeAnnotation(param);
+        std::string base =
+            absl::StrFormat("%s: %s id=%d", param->name(),
+                            param->GetType()->ToString(), param->id());
+        absl::StrAppend(s, param_annotation.Decorate(base));
+      }));
+  absl::StrAppend(&res, ") -> ");
+
+  if (return_type() != nullptr) {
+    absl::StrAppend(&res, return_type()->ToString());
+  }
+  absl::StrAppend(&res, " {\n");
+
+  struct SkipParamsAnnotator : public IrAnnotator {
+    Annotation NodeAnnotation(Node* node) const override {
+      if (node->op() == Op::kParam) {
+        return {.filter = true};
+      }
+      return {};
     }
-    if (node->op() == Op::kParam) {
-      continue;  // Already accounted for in the signature.
+  };
+  class AddRetAnnotator : public IrAnnotator {
+   public:
+    explicit AddRetAnnotator(Node* return_value)
+        : return_value_(return_value) {}
+    Annotation NodeAnnotation(Node* node) const override {
+      if (node == return_value_) {
+        return {.prefix = "ret"};
+      }
+      return {};
     }
-    if (recursive && (node->op() == Op::kCountedFor)) {
-      nested_funcs += node->As<CountedFor>()->body()->DumpIr() + "\n";
+
+   private:
+    Node* return_value_;
+  };
+  absl::StrAppend(
+      &res,
+      DumpFunctionBaseNodes(IrAnnotatorJoiner(
+          SkipParamsAnnotator{}, AddRetAnnotator{return_value()},
+          IrAnnotatorRef(annotate), TopoSortAnnotator(!is_block_source_))));
+  if (!IsScheduled()) {
+    // Need to add the 'ret' specially if the ret is also a parameter.
+    if (return_value() != nullptr && return_value()->op() == Op::kParam) {
+      absl::StrAppendFormat(&res, "  ret %s\n",
+                            annotate.NodeAnnotation(return_value())
+                                .Decorate(return_value()->ToString()));
     }
-    if (recursive && (node->op() == Op::kMap)) {
-      nested_funcs += node->As<Map>()->to_apply()->DumpIr() + "\n";
-    }
-    if (recursive && (node->op() == Op::kInvoke)) {
-      nested_funcs += node->As<Invoke>()->to_apply()->DumpIr() + "\n";
-    }
-    StrAppend(&res, "  ", node == return_value() ? "ret " : "",
-              node->ToString(), "\n");
   }
 
-  StrAppend(&res, "}\n");
-  return nested_funcs + res;
+  absl::StrAppend(&res, "}\n");
+  if (fn_annotation.suffix.has_value()) {
+    absl::StrAppend(&res, absl::StripSuffix(*fn_annotation.suffix, "\n"), "\n");
+  }
+  return res;
 }
 
 absl::StatusOr<Function*> Function::Clone(
-    absl::string_view new_name, Package* target_package,
-    const absl::flat_hash_map<const Function*, Function*>& call_remapping)
-    const {
+    std::string_view new_name, Package* target_package,
+    const absl::flat_hash_map<const Function*, Function*>& call_remapping,
+    absl::optional_ref<absl::flat_hash_map<Node*, Node*>>
+        original_node_to_clone) const {
   absl::flat_hash_map<Node*, Node*> original_to_clone;
   if (target_package == nullptr) {
     target_package = package();
   }
   Function* cloned_function = target_package->AddFunction(
-      absl::make_unique<Function>(new_name, target_package));
-  for (Node* node : TopoSort(const_cast<Function*>(this))) {
+      IsScheduled()
+          ? std::make_unique<ScheduledFunction>(new_name, target_package)
+          : std::make_unique<Function>(new_name, target_package));
+  cloned_function->SetForeignFunctionData(foreign_function_);
+  for (const AttributeData& attr : attributes_) {
+    cloned_function->AddAttribute(attr);
+  }
+
+  // Clone parameters over first to maintain order.
+  for (Param* param : (const_cast<Function*>(this))->params()) {
+    XLS_ASSIGN_OR_RETURN(original_to_clone[param],
+                         param->CloneInNewFunction({}, cloned_function));
+  }
+  XLS_ASSIGN_OR_RETURN(std::vector<Node*> topo_sort_nodes,
+                       TopoSort(const_cast<Function*>(this)));
+  for (Node* node : topo_sort_nodes) {
+    if (node->Is<Param>()) {  // Params were already copied.
+      continue;
+    }
     std::vector<Node*> cloned_operands;
     for (Node* operand : node->operands()) {
       cloned_operands.push_back(original_to_clone.at(operand));
@@ -144,8 +244,23 @@ absl::StatusOr<Function*> Function::Clone(
       }
     }
   }
+  if (IsScheduled()) {
+    cloned_function->ClearStages();
+    for (const Stage& stage : stages()) {
+      XLS_ASSIGN_OR_RETURN(Stage cloned_stage, stage.Clone(original_to_clone));
+      cloned_function->AddStage(std::move(cloned_stage));
+    }
+  }
   XLS_RETURN_IF_ERROR(
       cloned_function->set_return_value(original_to_clone.at(return_value())));
+
+  // Update the original-to-clone mapping if requested.
+  if (original_node_to_clone.has_value()) {
+    for (auto& [original_node, cloned_node] : original_to_clone) {
+      (*original_node_to_clone)[original_node] = cloned_node;
+    }
+  }
+
   return cloned_function;
 }
 
@@ -161,10 +276,10 @@ static bool IsEqualRecurse(
   }
 
   if (!node->IsDefinitelyEqualTo(other_node)) {
-    XLS_VLOG(2) << absl::StrFormat("Function %s != %s: node %s != %s",
-                                   node->function_base()->name(),
-                                   other_node->function_base()->name(),
-                                   node->GetName(), other_node->GetName());
+    VLOG(2) << absl::StrFormat("Function %s != %s: node %s != %s",
+                               node->function_base()->name(),
+                               other_node->function_base()->name(),
+                               node->GetName(), other_node->GetName());
     return false;
   }
 
@@ -180,14 +295,14 @@ static bool IsEqualRecurse(
 
 bool Function::IsDefinitelyEqualTo(const Function* other) const {
   if (this == other) {
-    XLS_VLOG(2) << absl::StrFormat("Function %s == %s: same pointer", name(),
-                                   other->name());
+    VLOG(2) << absl::StrFormat("Function %s == %s: same pointer", name(),
+                               other->name());
     return true;
   }
 
   // Must have the types of parameters in the same order.
   if (params().size() != other->params().size()) {
-    XLS_VLOG(2) << absl::StrFormat(
+    VLOG(2) << absl::StrFormat(
         "Function %s != %s: different number of parameters (%d vs %d)", name(),
         other->name(), params().size(), other->params().size());
     return false;
@@ -198,7 +313,7 @@ bool Function::IsDefinitelyEqualTo(const Function* other) const {
     // All we care about is the type (not the name) of the parameter so don't
     // use Param::IsDefinitelyEqualTo.
     if (!param(i)->GetType()->IsEqualTo(other->param(i)->GetType())) {
-      XLS_VLOG(2) << absl::StrFormat(
+      VLOG(2) << absl::StrFormat(
           "Function %s != %s: type of parameter %d not the same (%s vs %s)",
           name(), other->name(), i, param(i)->GetType()->ToString(),
           other->param(i)->GetType()->ToString());
@@ -209,9 +324,61 @@ bool Function::IsDefinitelyEqualTo(const Function* other) const {
 
   bool result =
       IsEqualRecurse(return_value(), other->return_value(), &matched_pairs);
-  XLS_VLOG_IF(2, result) << absl::StrFormat("Function %s is equal to %s",
-                                            name(), other->name());
+  if (result) {
+    VLOG(2) << absl::StrFormat("Function %s is equal to %s", name(),
+                               other->name());
+  }
   return result;
+}
+absl::Status Function::InternalRebuildSideTables() {
+  // We can't actually rebuild much of anything since the order of the params is
+  // only held in the side table. We can still check for correctness at least.
+  // TODO(allight): We should ideally be able to do this.
+  XLS_RET_CHECK(next_values_.empty());
+  XLS_RET_CHECK(next_values_by_state_element_.empty());
+
+  for (Param* p : params_) {
+    XLS_RET_CHECK(p->function_base() == this)
+        << "param from different function: " << p;
+  }
+  return absl::OkStatus();
+}
+
+std::vector<std::string> Function::AttributeIrStrings() const {
+  std::vector<std::string> attribute_strings =
+      FunctionBase::AttributeIrStrings();
+  if (non_synth()) {
+    attribute_strings.push_back("non_synth");
+  }
+  for (const auto& attr : attributes_) {
+    std::string attr_str = AttributeKindToString(attr.kind());
+    if (!attr.args().empty()) {
+      std::vector<std::string> arg_strings;
+      for (const auto& arg : attr.args()) {
+        std::string arg_str = absl::visit(
+            Visitor{
+                [](const std::string& s) { return s; },
+                [](const AttributeData::StringLiteralArgument& s) {
+                  return absl::StrCat("\"", s.text, "\"");
+                },
+                [](const AttributeData::StringKeyValueArgument& s) {
+                  if (s.is_backticked) {
+                    return absl::StrCat(s.first, "=`", s.second, "`");
+                  }
+                  return absl::StrCat(s.first, "=\"", s.second, "\"");
+                },
+                [](const AttributeData::IntKeyValueArgument& s) {
+                  return absl::StrCat(s.first, "=", s.second);
+                },
+            },
+            arg);
+        arg_strings.push_back(arg_str);
+      }
+      absl::StrAppend(&attr_str, "(", absl::StrJoin(arg_strings, ", "), ")");
+    }
+    attribute_strings.push_back(attr_str);
+  }
+  return attribute_strings;
 }
 
 }  // namespace xls

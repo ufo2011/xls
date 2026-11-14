@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import xls.dslx.tests.parametric_import
+import xls.dslx.tests.parametric_import;
 
-type LocalType = parametric_import::Type<u32:1, u32:2>;
+type LocalType = parametric_import::Type<1, 2>;
 
-#![test]
+#[test]
 fn parametric_importer() {
-  let foo: LocalType = parametric_import::zero<u32:1, u32:2>();
-  let bar = parametric_import::zero<u32:1, u32:2>();
-  assert_eq(foo, bar)
+    let foo: LocalType = parametric_import::zero<u32:1, u32:2>();
+    let bar = parametric_import::zero<u32:1, u32:2>();
+    assert_eq(foo, bar)
 }

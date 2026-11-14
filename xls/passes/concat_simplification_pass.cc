@@ -15,85 +15,93 @@
 #include "xls/passes/concat_simplification_pass.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <deque>
 #include <iterator>
 #include <map>
+#include <optional>
+#include <utility>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_format.h"
 #include "absl/types/span.h"
-#include "xls/common/logging/log_lines.h"
-#include "xls/common/logging/logging.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/ir/bits.h"
 #include "xls/ir/bits_ops.h"
-#include "xls/ir/node_iterator.h"
+#include "xls/ir/function_base.h"
+#include "xls/ir/node.h"
 #include "xls/ir/node_util.h"
 #include "xls/ir/nodes.h"
 #include "xls/ir/op.h"
+#include "xls/ir/source_location.h"
+#include "xls/ir/value.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/pass_base.h"
+#include "xls/passes/query_engine.h"
+#include "xls/passes/stateless_query_engine.h"
 
 namespace xls {
 namespace {
 
-// Returns true if the given concat as consecutive literal operands.
-bool HasConsecutiveLiteralOperands(Concat* concat) {
+// Returns true if the given concat has consecutive constant operands.
+bool HasConsecutiveConstantOperands(Concat* concat,
+                                    const QueryEngine& query_engine) {
   for (int64_t i = 1; i < concat->operand_count(); ++i) {
-    if (concat->operand(i - 1)->Is<Literal>() &&
-        concat->operand(i)->Is<Literal>()) {
+    if (query_engine.IsFullyKnown(concat->operand(i - 1)) &&
+        query_engine.IsFullyKnown(concat->operand(i))) {
       return true;
     }
   }
   return false;
 }
 
-// Replaces any consecutive literal operands with a single merged literal
+// Replaces any consecutive constant operands with a single merged literal
 // operand. Returns the newly created concat which never aliases the given
 // concat.
-absl::StatusOr<Concat*> ReplaceConsecutiveLiteralOperands(Concat* concat) {
+absl::StatusOr<Concat*> ReplaceConsecutiveConstantOperands(
+    Concat* concat, const QueryEngine& query_engine) {
   std::vector<Node*> new_operands;
-  std::vector<Literal*> consecutive_literals;
+  std::vector<Bits> consecutive_constants;
 
-  auto add_consecutive_literals_to_operands = [&]() -> absl::Status {
-    if (consecutive_literals.size() > 1) {
-      std::vector<Bits> literal_bits(consecutive_literals.size());
-      std::transform(consecutive_literals.begin(), consecutive_literals.end(),
-                     literal_bits.begin(),
-                     [](Literal* l) { return l->value().bits(); });
+  Node* last_constant = nullptr;
+  auto add_consecutive_constants_to_operands = [&]() -> absl::Status {
+    if (consecutive_constants.size() > 1) {
       XLS_ASSIGN_OR_RETURN(
           Node * new_literal,
           concat->function_base()->MakeNode<Literal>(
-              concat->loc(), Value(bits_ops::Concat(literal_bits))));
+              concat->loc(), Value(bits_ops::Concat(consecutive_constants))));
       new_operands.push_back(new_literal);
-    } else if (consecutive_literals.size() == 1) {
-      new_operands.push_back(consecutive_literals.front());
+    } else if (consecutive_constants.size() == 1) {
+      new_operands.push_back(last_constant);
     }
-    consecutive_literals.clear();
+    last_constant = nullptr;
+    consecutive_constants.clear();
     return absl::OkStatus();
   };
 
   for (Node* operand : concat->operands()) {
-    if (operand->Is<Literal>()) {
-      consecutive_literals.push_back(operand->As<Literal>());
+    if (std::optional<Bits> known_value =
+            query_engine.KnownValueAsBits(operand);
+        known_value.has_value()) {
+      last_constant = operand;
+      consecutive_constants.push_back(*std::move(known_value));
     } else {
-      XLS_RETURN_IF_ERROR(add_consecutive_literals_to_operands());
+      XLS_RETURN_IF_ERROR(add_consecutive_constants_to_operands());
       new_operands.push_back(operand);
     }
   }
-  XLS_RETURN_IF_ERROR(add_consecutive_literals_to_operands());
+  XLS_RETURN_IF_ERROR(add_consecutive_constants_to_operands());
   return concat->ReplaceUsesWithNew<Concat>(new_operands);
 }
 
-// Replaces the given concat and any of its operand which are concats (and any
-// of *their* operands which are concats, etc) with a single concat
-// operation. For example:
-//
-//   Concat(a, b, Concat(c, Concat(d, e))) => Concat(a, b, c, d, e)
-//
-// Returns the newly created concat which never aliases the given concat.
-absl::StatusOr<Concat*> FlattenConcatTree(Concat* concat) {
+// Flattens any Concat operands (and any of their operands which are concats,
+// etc) into a single flat operand list.
+std::vector<Node*> FlattenConcatOperands(absl::Span<Node* const> operands) {
   std::vector<Node*> new_operands;
-  std::deque<Node*> worklist(concat->operands().begin(),
-                             concat->operands().end());
+  std::deque<Node*> worklist(operands.begin(), operands.end());
   while (!worklist.empty()) {
     Node* node = worklist.front();
     worklist.pop_front();
@@ -104,7 +112,190 @@ absl::StatusOr<Concat*> FlattenConcatTree(Concat* concat) {
       new_operands.push_back(node);
     }
   }
-  return concat->ReplaceUsesWithNew<Concat>(new_operands);
+  return new_operands;
+}
+
+// Replaces the given concat and any of its operand which are concats (and any
+// of *their* operands which are concats, etc) with a single concat
+// operation. For example:
+//
+//   Concat(a, b, Concat(c, Concat(d, e))) => Concat(a, b, c, d, e)
+//
+// Returns the newly created concat which never aliases the given concat.
+absl::StatusOr<Concat*> FlattenConcatTree(Concat* concat) {
+  return concat->ReplaceUsesWithNew<Concat>(
+      FlattenConcatOperands(concat->operands()));
+}
+
+struct ReversedSliceInfo {
+  Node* source;
+  int64_t start;
+  int64_t width;
+};
+
+// Checks if `node` represents a slice of a source node whose internal bits are
+// reversed (either an explicit reverse of a slice, or a 1-bit slice which is
+// trivially its own reverse), and returns the represented reversed slice.
+std::optional<ReversedSliceInfo> GetReversedSliceInfo(const Node* node) {
+  if (node->op() == Op::kReverse && node->operand(0)->Is<BitSlice>()) {
+    const BitSlice* slice = node->operand(0)->As<BitSlice>();
+    return ReversedSliceInfo{
+        .source = slice->operand(0),
+        .start = slice->start(),
+        .width = slice->width(),
+    };
+  }
+  if (node->Is<BitSlice>() && node->BitCountOrDie() == 1) {
+    const BitSlice* slice = node->As<BitSlice>();
+    return ReversedSliceInfo{
+        .source = slice->operand(0),
+        .start = slice->start(),
+        .width = 1,
+    };
+  }
+  return std::nullopt;
+}
+
+// Merges any consecutive forward bit slices from the same source into a single
+// bit slice. For example:
+//   concat(..., slice(x, 4, 4), slice(x, 0, 4), ...) =>
+//   concat(..., slice(x, 0, 8), ...)
+absl::StatusOr<bool> ReplaceConsecutiveBitSlices(
+    Concat* concat, std::deque<Concat*>* worklist) {
+  std::vector<Node*> new_operands;
+  std::vector<const BitSlice*> current_run;
+
+  auto flush_run = [&]() -> absl::Status {
+    if (current_run.size() > 1) {
+      const BitSlice* lowest_slice = current_run.back();
+      Node* source = lowest_slice->operand(0);
+      const int64_t start = lowest_slice->start();
+      int64_t total_width = 0;
+      for (const BitSlice* s : current_run) {
+        total_width += s->width();
+      }
+      Node* merged_slice;
+      if (start == 0 && total_width == source->BitCountOrDie()) {
+        merged_slice = source;
+      } else {
+        XLS_ASSIGN_OR_RETURN(merged_slice,
+                             concat->function_base()->MakeNode<BitSlice>(
+                                 concat->loc(), source, start, total_width));
+      }
+      new_operands.push_back(merged_slice);
+    } else if (current_run.size() == 1) {
+      new_operands.push_back(const_cast<BitSlice*>(current_run.front()));
+    }
+    current_run.clear();
+    return absl::OkStatus();
+  };
+
+  for (Node* op : concat->operands()) {
+    if (op->Is<BitSlice>()) {
+      const BitSlice* slice = op->As<BitSlice>();
+      if (!current_run.empty()) {
+        const BitSlice* prev = current_run.back();
+        if (slice->operand(0) == prev->operand(0) &&
+            slice->start() + slice->width() == prev->start()) {
+          current_run.push_back(slice);
+          continue;
+        }
+      }
+      XLS_RETURN_IF_ERROR(flush_run());
+      current_run.push_back(slice);
+    } else {
+      XLS_RETURN_IF_ERROR(flush_run());
+      new_operands.push_back(op);
+    }
+  }
+  XLS_RETURN_IF_ERROR(flush_run());
+
+  if (new_operands.size() < concat->operand_count()) {
+    if (new_operands.size() == 1) {
+      XLS_RETURN_IF_ERROR(concat->ReplaceUsesWith(new_operands[0]));
+      return true;
+    }
+    XLS_ASSIGN_OR_RETURN(Concat * new_concat,
+                         concat->ReplaceUsesWithNew<Concat>(new_operands));
+    worklist->push_back(new_concat);
+    return true;
+  }
+  return false;
+}
+
+// Merges any consecutive reversed bit slices from the same source into a single
+// reversed slice. For example:
+//   concat(..., rev(slice(x, 0, 4)), rev(slice(x, 4, 4)), ...) =>
+//   concat(..., rev(slice(x, 0, 8)), ...)
+absl::StatusOr<bool> ReplaceConsecutiveReversedSlices(
+    Concat* concat, std::deque<Concat*>* worklist) {
+  std::vector<Node*> new_operands;
+  struct RunElement {
+    Node* node;
+    ReversedSliceInfo info;
+  };
+  std::vector<RunElement> current_run;
+
+  auto flush_run = [&]() -> absl::Status {
+    if (current_run.size() > 1) {
+      const ReversedSliceInfo& first_info = current_run.front().info;
+      Node* source = first_info.source;
+      const int64_t start = first_info.start;
+      int64_t total_width = 0;
+      for (const RunElement& elem : current_run) {
+        total_width += elem.info.width;
+      }
+      Node* merged_slice_or_source;
+      if (start == 0 && total_width == source->BitCountOrDie()) {
+        merged_slice_or_source = source;
+      } else {
+        XLS_ASSIGN_OR_RETURN(merged_slice_or_source,
+                             concat->function_base()->MakeNode<BitSlice>(
+                                 concat->loc(), source, start, total_width));
+      }
+      XLS_ASSIGN_OR_RETURN(
+          Node * merged_rev,
+          concat->function_base()->MakeNode<UnOp>(
+              concat->loc(), merged_slice_or_source, Op::kReverse));
+      new_operands.push_back(merged_rev);
+    } else if (current_run.size() == 1) {
+      new_operands.push_back(current_run.front().node);
+    }
+    current_run.clear();
+    return absl::OkStatus();
+  };
+
+  for (Node* op : concat->operands()) {
+    std::optional<ReversedSliceInfo> info = GetReversedSliceInfo(op);
+    if (info.has_value()) {
+      if (!current_run.empty()) {
+        const ReversedSliceInfo& prev = current_run.back().info;
+        if (info->source == prev.source &&
+            prev.start + prev.width == info->start) {
+          current_run.push_back(RunElement{op, *info});
+          continue;
+        }
+      }
+      XLS_RETURN_IF_ERROR(flush_run());
+      current_run.push_back(RunElement{op, *info});
+    } else {
+      XLS_RETURN_IF_ERROR(flush_run());
+      new_operands.push_back(op);
+    }
+  }
+  XLS_RETURN_IF_ERROR(flush_run());
+
+  if (new_operands.size() < concat->operand_count()) {
+    if (new_operands.size() == 1) {
+      XLS_RETURN_IF_ERROR(concat->ReplaceUsesWith(new_operands[0]));
+      return true;
+    }
+    XLS_ASSIGN_OR_RETURN(Concat * new_concat,
+                         concat->ReplaceUsesWithNew<Concat>(new_operands));
+    worklist->push_back(new_concat);
+    return true;
+  }
+  return false;
 }
 
 // Attempts to replace the given concat with a simpler or more canonical
@@ -129,9 +320,11 @@ absl::StatusOr<bool> SimplifyConcat(Concat* concat, int64_t opt_level,
 
   // Consecutive literal operands of a concat can be merged into a single
   // literal.
-  if (HasConsecutiveLiteralOperands(concat)) {
-    XLS_ASSIGN_OR_RETURN(Concat * new_concat,
-                         ReplaceConsecutiveLiteralOperands(concat));
+  StatelessQueryEngine query_engine;
+  if (HasConsecutiveConstantOperands(concat, query_engine)) {
+    XLS_ASSIGN_OR_RETURN(
+        Concat * new_concat,
+        ReplaceConsecutiveConstantOperands(concat, query_engine));
     worklist->push_back(new_concat);
     return true;
   }
@@ -187,8 +380,8 @@ absl::StatusOr<bool> SimplifyConcat(Concat* concat, int64_t opt_level,
          riter != concat->operands().rend(); ++riter) {
       XLS_ASSIGN_OR_RETURN(
           Node * hoisted_rev,
-          concat->function_base()->MakeNode<UnOp>(concat->users().at(0)->loc(),
-                                                  *riter, Op::kReverse));
+          concat->function_base()->MakeNode<UnOp>(
+              (*concat->users().begin())->loc(), *riter, Op::kReverse));
       new_operands.push_back(hoisted_rev);
     }
 
@@ -200,63 +393,19 @@ absl::StatusOr<bool> SimplifyConcat(Concat* concat, int64_t opt_level,
     return true;
   }
 
-  // If consecutive concat inputs are consecutive bit slices, create a new,
-  // merged bit slice and a new concat that consumes the merged bit slice.
-  for (int64_t idx = 0; idx < concat->operand_count() - 1; ++idx) {
-    // Check if consecutive operands are bit slices.
-    const Node* higher_op = concat->operands().at(idx);
-    const Node* lower_op = concat->operands().at(idx + 1);
-    if (!higher_op->Is<BitSlice>() || !lower_op->Is<BitSlice>()) {
-      continue;
-    }
-    const BitSlice* higher_slice = higher_op->As<BitSlice>();
-    const BitSlice* lower_slice = lower_op->As<BitSlice>();
+  // If consecutive concat inputs are consecutive bit slices, merge each run
+  // into a single bit slice.
+  XLS_ASSIGN_OR_RETURN(bool merged_slices,
+                       ReplaceConsecutiveBitSlices(concat, worklist));
+  if (merged_slices) {
+    return true;
+  }
 
-    // Note: May want to do some checks for use cases of the slices.
-    // If the original slices will not be removed by dead-code elimination,
-    // making another merged slice may not be useful. This is complicated
-    // by the fact that the number of uses of slice may change during
-    // optimization.
-
-    // Check if bit slices have the same input operand.
-    if (higher_slice->operand(0) != lower_op->operand(0)) {
-      continue;
-    }
-
-    // Check if bit slices slice consecutive bits.
-    if (lower_slice->start() + lower_slice->width() != higher_slice->start()) {
-      continue;
-    }
-
-    // Create merged slice node.
-    XLS_ASSIGN_OR_RETURN(
-        Node * merged_slice,
-        concat->function_base()->MakeNode<BitSlice>(
-            concat->loc(), higher_slice->operand(0), lower_slice->start(),
-            lower_slice->width() + higher_slice->width()));
-
-    // Collect operands for new concat.
-    std::vector<Node*> new_operands;
-    new_operands.reserve(concat->operands().size() - 1);
-    for (int64_t copy_idx = 0; copy_idx < concat->operands().size();
-         ++copy_idx) {
-      if (copy_idx == idx) {
-        new_operands.push_back(merged_slice);
-        continue;
-      }
-      if (copy_idx == idx + 1) {
-        continue;
-      }
-      new_operands.push_back(concat->operand(copy_idx));
-    }
-
-    // Add new concat to function, replace uses of original concat.
-    // Note: We only merge one pair of slices at a time for simplicity /
-    // clarity. If there are mulitple consecutive slices, they will be merged
-    // over multiple calls to SimplifyConcat.
-    XLS_ASSIGN_OR_RETURN(Concat * new_concat,
-                         concat->ReplaceUsesWithNew<Concat>(new_operands));
-    worklist->push_back(new_concat);
+  // If consecutive concat inputs are consecutive reversed bit slices, merge
+  // each run into a single reversed bit slice.
+  XLS_ASSIGN_OR_RETURN(bool merged_reversed_slices,
+                       ReplaceConsecutiveReversedSlices(concat, worklist));
+  if (merged_reversed_slices) {
     return true;
   }
 
@@ -307,6 +456,60 @@ absl::StatusOr<std::map<int64_t, int64_t>> GetBitRangeUnionOfInputConcats(
   return begin_end_bits_inclusive;
 }
 
+// If `node` is an n-ary logical operation with a constant and a concat, then
+// hoist the operation above the concat. For example, if `x` and `y` are 8-bit:
+//
+//   0xab & {x, y} => {x & 0xa, x & 0xb}
+//
+// Returns true if the transformation succeeded.
+absl::StatusOr<bool> TryHoistBitWiseWithConstant(
+    Node* node, const QueryEngine& query_engine) {
+  // TODO(meheff): Handle cases where there are multiple non-literal concat
+  // operands. No need to consider multiple literal operands as canonicalization
+  // merges multiple literal operands of bitwise operations.
+  if (!OpIsBitWise(node->op()) || node->operand_count() != 2) {
+    return false;
+  }
+  // Currently only nary ops are bitwise.
+  XLS_RET_CHECK(node->Is<NaryOp>());
+  Bits constant_bits;
+  if (query_engine.IsFullyKnown(node->operand(0))) {
+    constant_bits = *query_engine.KnownValueAsBits(node->operand(0));
+  } else if (query_engine.IsFullyKnown(node->operand(1))) {
+    constant_bits = *query_engine.KnownValueAsBits(node->operand(1));
+  } else {
+    return false;
+  }
+  Concat* concat;
+  if (node->operand(0)->Is<Concat>()) {
+    concat = node->operand(0)->As<Concat>();
+  } else if (node->operand(1)->Is<Concat>()) {
+    concat = node->operand(1)->As<Concat>();
+  } else {
+    return false;
+  }
+  std::vector<Node*> new_operands;
+  int64_t offset = 0;
+  for (int64_t i = concat->operand_count() - 1; i >= 0; --i) {
+    Node* concat_operand = concat->operand(i);
+    int64_t concat_operand_width = concat_operand->BitCountOrDie();
+    XLS_ASSIGN_OR_RETURN(Literal * sliced_literal,
+                         node->function_base()->MakeNode<Literal>(
+                             node->loc(), Value(constant_bits.Slice(
+                                              offset, concat_operand_width))));
+    XLS_ASSIGN_OR_RETURN(
+        Node * new_operand,
+        node->function_base()->MakeNode<NaryOp>(
+            node->loc(), std::vector<Node*>({concat_operand, sliced_literal}),
+            node->op()));
+    new_operands.push_back(new_operand);
+    offset += concat_operand_width;
+  }
+  std::reverse(new_operands.begin(), new_operands.end());
+  XLS_RETURN_IF_ERROR(node->ReplaceUsesWithNew<Concat>(new_operands).status());
+  return true;
+}
+
 // Tries to hoist the given bitwise operation above it's concat
 // operations. Example:
 //
@@ -321,8 +524,18 @@ absl::StatusOr<std::map<int64_t, int64_t>> GetBitRangeUnionOfInputConcats(
 //
 // Preconditions:
 //   * All operands of the bitwise operation are concats.
-absl::StatusOr<bool> TryHoistBitWiseOperation(Node* node) {
+absl::StatusOr<bool> TryHoistBitWiseOperation(Node* node,
+                                              const QueryEngine& query_engine) {
   XLS_RET_CHECK(OpIsBitWise(node->op()));
+
+  {
+    XLS_ASSIGN_OR_RETURN(bool changed,
+                         TryHoistBitWiseWithConstant(node, query_engine));
+    if (changed) {
+      return true;
+    }
+  }
+
   if (node->operand_count() == 0 ||
       !std::all_of(node->operands().begin(), node->operands().end(),
                    [](Node* op) { return op->Is<Concat>(); })) {
@@ -330,7 +543,7 @@ absl::StatusOr<bool> TryHoistBitWiseOperation(Node* node) {
   }
 
   // Collect bit ranges.
-  // Note: XLS_ASSIGN_OR_RETURN doesn't seem to handle std::map correclty
+  // Note: XLS_ASSIGN_OR_RETURN doesn't seem to handle std::map correctly
   // (probably due to comma).
   auto union_result = GetBitRangeUnionOfInputConcats(node);
   if (!union_result.ok()) {
@@ -362,6 +575,196 @@ absl::StatusOr<bool> TryHoistBitWiseOperation(Node* node) {
   return true;
 }
 
+// This attempts to narrow and hoist a bitwise operation above a concat
+// For example:
+// avar is [0:31] and bvar is [0]
+// when avar needs to be bit ANDed with bvar, the compiler often first
+// concatenates the shorter bvar and then performs the bitwise operation:
+//   And(Concat(bvar, 0b000...000), avar)
+// This pass will try to hoist the AND operation above the concat:
+//   Concat(And(bvar, avar[0:0]), 0b000...000)
+// which effectively narrows the bitwise operation
+// This optimization applies to both AND and OR operations with a operand with 0
+// and 1 concats respectively.
+absl::StatusOr<bool> TryNarrowAndHoistBitWiseOperation(
+    Concat* concat, const QueryEngine& query_engine,
+    std::deque<Concat*>* worklist) {
+  // Check if the concat has exactly two operands.
+  if (concat->operand_count() != 2) {
+    return false;
+  }
+
+  // Find the constant operand of the concat.
+  Bits constant_bits;
+  int64_t constant_operand_index = -1;
+  for (int64_t i = 0; i < concat->operand_count(); ++i) {
+    Node* operand = concat->operand(i);
+    if (query_engine.IsFullyKnown(operand)) {
+      // If the operand is a constant '0' OR '~0', record it.
+      Bits known_value = *query_engine.KnownValueAsBits(operand);
+      if (known_value.IsZero() || known_value.IsAllOnes()) {
+        constant_bits = known_value;
+        constant_operand_index = i;
+        break;
+      }
+    }
+  }
+
+  // Target operand is the one that is not the constant operand in the concat.
+  Node* target_operand = concat->operand(!constant_operand_index);
+
+  if (target_operand == nullptr) {
+    // No constant operand found.
+    return false;
+  }
+
+  // Calculate the exact bit position of the target operand.
+  int64_t bit_position_start = 0;
+  int64_t bit_length = target_operand->BitCountOrDie();
+  bit_position_start =
+      (constant_operand_index == 1)
+          ? concat->operand(constant_operand_index)->BitCountOrDie()
+          : 0;
+
+  // Heuristic to make sure the narrowing is actually meaningful.
+  // Six bits is chosen since most modern FPGAs have 6-LUTs
+  constexpr int64_t kMinNarrowingBits = 6;
+  if (constant_bits.bit_count() < kMinNarrowingBits) {
+    return false;
+  }
+
+  // Now iterate through all the users of the concat and find
+  // bitwise And or Or operations that can be narrowed
+  // and hoisted above the concat.
+  bool changed = false;
+  for (Node* user : concat->users()) {
+    if (!OpIsBitWise(user->op()) || user->operand_count() != 2) {
+      continue;
+    }
+
+    // Find the operand that is not the target concat of this function.
+    // Please note that this operant may very much be a concat as well but its
+    // not the one we are currently interseted in so we treat it as a generic
+    // operand.
+    Node* non_concat = nullptr;
+    if (user->operand(0) == concat) {
+      non_concat = user->operand(1);
+    } else if (user->operand(1) == concat) {
+      non_concat = user->operand(0);
+    } else {
+      return absl::InternalError(
+          "Expected one of the operands of the bitwise operation to be the "
+          "concat");
+    }
+
+    // If the user is an And operation with zeros, the zeros act as a mask
+    // and the result for those bits is always zero. We can narrow the And
+    // to only the non-zero portion.
+    // Similarly for Or with all-ones, the ones act as a mask and the result
+    // for those bits is always one.
+    if ((user->op() == Op::kAnd && constant_bits.IsZero()) ||
+        (user->op() == Op::kOr && constant_bits.IsAllOnes())) {
+      // Produce a bit slice of the other operand that matches the length
+      // of the target operand.
+      XLS_ASSIGN_OR_RETURN(
+          Node * bit_slice,
+          user->function_base()->MakeNode<BitSlice>(
+              user->loc(), non_concat, bit_position_start, bit_length));
+
+      // Clone the user with the bit slice as the first operand.
+      XLS_ASSIGN_OR_RETURN(Node * narrowed_op,
+                           user->Clone({bit_slice, target_operand}));
+
+      // Create the concatenation of the narrowed operation.
+      Concat* new_concat = nullptr;
+      if (constant_operand_index == 0) {
+        // Case for the bitwise operation being concatenated to the low bits
+        XLS_ASSIGN_OR_RETURN(
+            new_concat, user->function_base()->MakeNode<Concat>(
+                            user->loc(), std::vector<Node*>{concat->operand(0),
+                                                            narrowed_op}));
+      } else {
+        // Case for the bitwise operation being concatenated to the high bits
+        XLS_ASSIGN_OR_RETURN(
+            new_concat, user->function_base()->MakeNode<Concat>(
+                            user->loc(), std::vector<Node*>{
+                                             narrowed_op, concat->operand(1)}));
+      }
+
+      // Replace the original user with the new concat.
+      XLS_RETURN_IF_ERROR(user->ReplaceUsesWith(new_concat));
+      // Add the new concat to the worklist for further processing.
+      worklist->push_back(new_concat);
+      changed = true;
+      break;
+    } else if ((user->op() == Op::kXor && constant_bits.IsZero()) ||
+               (user->op() == Op::kOr && constant_bits.IsZero()) ||
+               (user->op() == Op::kAnd && constant_bits.IsAllOnes())) {
+      // These are cases where the constant bits are identity elements:
+      //   x ^ 0 = x (XOR with zeros)
+      //   x | 0 = x (OR with zeros)
+      //   x & 1 = x (AND with ones)
+      // We can narrow the operation to only the non-identity portion and pass
+      // through the rest of non_concat unchanged.
+      // For example: x | Concat(0...0, b) => Concat(x[31:1], x[0:1] | b)
+
+      // Produce a bit slice of the non_concat operand that matches the length
+      // of the target operand.
+      XLS_ASSIGN_OR_RETURN(
+          Node * bit_slice_for_op,
+          user->function_base()->MakeNode<BitSlice>(
+              user->loc(), non_concat, bit_position_start, bit_length));
+
+      // Slice the rest of the non_concat operand for concatenation back later
+      // on.
+      Node* bit_slice_for_concat = nullptr;
+      if (bit_position_start == 0) {
+        XLS_ASSIGN_OR_RETURN(bit_slice_for_concat,
+                             user->function_base()->MakeNode<BitSlice>(
+                                 user->loc(), non_concat, bit_length,
+                                 non_concat->BitCountOrDie() - bit_length));
+      } else {
+        XLS_ASSIGN_OR_RETURN(bit_slice_for_concat,
+                             user->function_base()->MakeNode<BitSlice>(
+                                 user->loc(), non_concat, 0,
+                                 non_concat->BitCountOrDie() - bit_length));
+      }
+
+      // Clone the user with the bit slice as the first operand.
+      XLS_ASSIGN_OR_RETURN(Node * narrowed_op,
+                           user->Clone({bit_slice_for_op, target_operand}));
+
+      // Create a new concat with the narrowed operation and the rest of the
+      // non_concat operand.
+      Concat* new_concat = nullptr;
+      if (constant_operand_index == 0) {
+        // Case for the bitwise operation being concatenated to the low bits
+        XLS_ASSIGN_OR_RETURN(
+            new_concat,
+            user->function_base()->MakeNode<Concat>(
+                user->loc(),
+                std::vector<Node*>{bit_slice_for_concat, narrowed_op}));
+      } else {
+        // Case for the bitwise operation being concatenated to the high bits
+        XLS_ASSIGN_OR_RETURN(
+            new_concat,
+            user->function_base()->MakeNode<Concat>(
+                user->loc(),
+                std::vector<Node*>{narrowed_op, bit_slice_for_concat}));
+      }
+
+      // Replace the original user with the narrowed operation.
+      XLS_RETURN_IF_ERROR(user->ReplaceUsesWith(new_concat));
+      // Add the new concat to the worklist for further processing.
+      worklist->push_back(new_concat);
+      changed = true;
+      break;
+    }
+  }
+
+  return changed;
+}
+
 // Transform a reduction of a concat to a reduction of the concat's operands.
 // e.g. OrReduce(Concat(a,b)) ==> Or(OrReduce(a), OrReduce(b))
 absl::StatusOr<bool> TryBypassReductionOfConcatenation(Node* node) {
@@ -371,14 +774,24 @@ absl::StatusOr<bool> TryBypassReductionOfConcatenation(Node* node) {
 
   // Create reductions of concat operands.
   Concat* concat = node->operand(0)->As<Concat>();
-  std::vector<Node*> new_reductions;
-  for (Node* cat_operand : concat->operands()) {
-    XLS_ASSIGN_OR_RETURN(Node * reduce, node->Clone({cat_operand}));
-    new_reductions.push_back(reduce);
+
+  // Early exit if concat results in bitwith 0.
+  if (concat->GetType()->GetFlatBitCount() == 0) {
+    return false;
   }
 
-  XLS_ASSIGN_OR_RETURN(Op non_reductive_op,
-                       OpToNonReductionOp(node->op()));
+  std::vector<Node*> new_reductions;
+  for (Node* cat_operand : concat->operands()) {
+    int64_t bit_count = cat_operand->GetType()->GetFlatBitCount();
+    if (bit_count > 1) {
+      XLS_ASSIGN_OR_RETURN(Node * reduce, node->Clone({cat_operand}));
+      new_reductions.push_back(reduce);
+    } else if (bit_count == 1) {
+      new_reductions.push_back(cat_operand);
+    }
+  }
+
+  XLS_ASSIGN_OR_RETURN(Op non_reductive_op, OpToNonReductionOp(node->op()));
   XLS_RETURN_IF_ERROR(
       node->ReplaceUsesWithNew<NaryOp>(new_reductions, non_reductive_op)
           .status());
@@ -424,7 +837,7 @@ absl::StatusOr<bool> TryDistributeReducibleOperation(Node* node) {
 
   // For zero-bit concatenations, we simply report we didn't change anything
   // (there's nothing to change with respect to operands).
-  if (concat->operands().empty()) {
+  if (concat->GetType()->GetFlatBitCount() == 0) {
     return false;
   }
 
@@ -462,8 +875,23 @@ absl::StatusOr<bool> TryDistributeReducibleOperation(Node* node) {
 
 }  // namespace
 
+absl::StatusOr<Concat*> CreateFlattenedConcat(FunctionBase* f,
+                                              absl::Span<Node* const> operands,
+                                              const SourceInfo& loc) {
+  return f->MakeNode<Concat>(loc, FlattenConcatOperands(operands));
+}
+
+RedundancyGuard ConcatSimplificationPass::GetRedundancyGuard(
+    const OptimizationPassOptions& options,
+    OptimizationContext& context) const {
+  return RedundancyGuard::CanSkip(absl::StrFormat("O%d", options.opt_level));
+}
+
 absl::StatusOr<bool> ConcatSimplificationPass::RunOnFunctionBaseInternal(
-    FunctionBase* f, const PassOptions& options, PassResults* results) const {
+    FunctionBase* f, const OptimizationPassOptions& options,
+    PassResults* results, OptimizationContext& context) const {
+  StatelessQueryEngine query_engine;
+
   // For optimizations which replace concats with other concats use a worklist
   // of unprocessed concats in the graphs. As new concats are created they are
   // added to the worklist.
@@ -478,26 +906,39 @@ absl::StatusOr<bool> ConcatSimplificationPass::RunOnFunctionBaseInternal(
     Concat* concat = worklist.front();
     worklist.pop_front();
     XLS_ASSIGN_OR_RETURN(bool node_changed,
-                         SimplifyConcat(concat, opt_level_, &worklist));
+                         SimplifyConcat(concat, options.opt_level, &worklist));
     changed = changed || node_changed;
+
+    // Run the narrowing and hoisting optimization for bitwise users of the
+    // concat. This is done here since it operates on the granularity of single
+    // concats and thus would save some analysis effort if we do it here rather
+    // than below.
+    if (options.narrowing_enabled()) {
+      XLS_ASSIGN_OR_RETURN(
+          bool narrow_changed,
+          TryNarrowAndHoistBitWiseOperation(concat, query_engine, &worklist));
+      changed = changed || narrow_changed;
+    }
   }
 
   // For optimizations which optimize around concats, just iterate through once
   // and find all opportunities.
-  if (NarrowingEnabled(opt_level_)) {
-    for (Node* node : TopoSort(f)) {
+  if (options.narrowing_enabled()) {
+    XLS_ASSIGN_OR_RETURN(std::vector<Node*> topo_sort_nodes,
+                         context.TopoSort(f));
+    for (Node* node : topo_sort_nodes) {
       if (OpIsBitWise(node->op())) {
         XLS_ASSIGN_OR_RETURN(bool bitwise_changed,
-                             TryHoistBitWiseOperation(node));
-        changed |= bitwise_changed;
+                             TryHoistBitWiseOperation(node, query_engine));
+        changed = changed || bitwise_changed;
       } else {
         XLS_ASSIGN_OR_RETURN(bool distribute_changed,
                              TryDistributeReducibleOperation(node));
-        changed |= distribute_changed;
+        changed = changed || distribute_changed;
 
         XLS_ASSIGN_OR_RETURN(bool reduction_changed,
                              TryBypassReductionOfConcatenation(node));
-        changed |= reduction_changed;
+        changed = changed || reduction_changed;
       }
     }
   }

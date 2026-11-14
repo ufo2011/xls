@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import xls.build_rules.tests.generated
+import xls.build_rules.tests.generated;
 
 fn main() -> u32 {
   generated::VALUE
 }
 
-#![test]
+#[test]
 fn test_imported_value() {
   assert_eq(main(), u32:42)
 }

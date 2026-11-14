@@ -14,8 +14,12 @@
 
 #include "xls/noc/config_ng/network_component_utils.h"
 
-#include <queue>
+#include <string>
+#include <string_view>
+#include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
 #include "xls/noc/config_ng/network_component.h"
@@ -96,7 +100,7 @@ absl::Status AddNameToComponent(
   // Set names for routers
   for (auto& [name, component] : components) {
     XLS_RET_CHECK(component != nullptr)
-        << absl::string_view("Component is not valid.");
+        << std::string_view("Component is not valid.");
     component->SetName(name);
   }
   return absl::Status();

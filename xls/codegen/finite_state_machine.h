@@ -15,15 +15,23 @@
 #ifndef XLS_CODEGEN_FINITE_STATE_MACHINE_H_
 #define XLS_CODEGEN_FINITE_STATE_MACHINE_H_
 
+#include <algorithm>
+#include <cstdint>
+#include <functional>
+#include <list>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 
-#include "absl/container/flat_hash_map.h"
+#include "absl/base/casts.h"
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/types/optional.h"
-#include "xls/codegen/vast.h"
-#include "xls/common/casts.h"
-#include "xls/common/logging/logging.h"
+#include "xls/codegen/vast/vast.h"
+#include "xls/ir/bits.h"
+#include "xls/ir/source_location.h"
 
 namespace xls {
 namespace verilog {
@@ -72,7 +80,7 @@ class ConditionalFsmBlock;
 // (i.e., a basic block).
 class FsmBlockBase {
  public:
-  explicit FsmBlockBase(absl::string_view debug_name, VerilogFile* file)
+  explicit FsmBlockBase(std::string_view debug_name, VerilogFile* file)
       : debug_name_(debug_name), file_(file) {}
   virtual ~FsmBlockBase() = default;
 
@@ -105,7 +113,7 @@ class FsmBlockBase {
   // Adds the assignment of 'logic_ref' to 'value' to the block.
   void AddAssignment(LogicRef* logic_ref, Expression* value) {
     for (const auto& assignment : assignments_) {
-      XLS_CHECK_NE(logic_ref, assignment.lhs)
+      CHECK_NE(logic_ref, assignment.lhs)
           << logic_ref->GetName() << " already assigned.";
     }
     assignments_.push_back(Assignment{logic_ref, value});
@@ -166,51 +174,54 @@ class FsmBlockBase {
 template <typename T>
 class FsmBlock : public FsmBlockBase {
  public:
-  explicit FsmBlock(absl::string_view debug_name, VerilogFile* file)
+  explicit FsmBlock(std::string_view debug_name, VerilogFile* file)
       : FsmBlockBase(debug_name, file) {}
-  virtual ~FsmBlock() = default;
+  ~FsmBlock() override = default;
 
   // Sets the next state to transition to.
   T& NextState(FsmState* next_state) {
-    XLS_CHECK(next_state_ == nullptr);
+    CHECK(next_state_ == nullptr);
     next_state_ = next_state;
-    return down_cast<T&>(*this);
+    return absl::down_cast<T&>(*this);
   }
 
   // Sets the given output to the given value. This occurs immediately and
   // asynchronously.
   T& SetOutput(FsmOutput* output, int64_t value) {
-    return SetOutputAsExpression(output, file_->PlainLiteral(value));
+    return SetOutputAsExpression(output,
+                                 file_->PlainLiteral(value, SourceInfo()));
   }
   T& SetOutputAsExpression(FsmOutput* output, Expression* value) {
     AddAssignment(output->logic_ref, value);
-    return down_cast<T&>(*this);
+    return absl::down_cast<T&>(*this);
   }
 
   // Sets the given register to the given value in the next cycle.
   T& SetRegisterNext(FsmRegister* reg, int64_t value) {
-    return SetRegisterNextAsExpression(reg, file_->PlainLiteral(value));
+    return SetRegisterNextAsExpression(
+        reg, file_->PlainLiteral(value, SourceInfo()));
   }
   T& SetRegisterNextAsExpression(FsmRegister* reg, Expression* value) {
     AddAssignment(reg->next, value);
-    return down_cast<T&>(*this);
+    return absl::down_cast<T&>(*this);
   }
 
   // Sets the given counter to the given value in the next cycle.
   T& SetCounter(FsmCounter* counter, int64_t value) {
-    return SetCounterAsExpression(counter, file_->PlainLiteral(value));
+    return SetCounterAsExpression(counter,
+                                  file_->PlainLiteral(value, SourceInfo()));
   }
   T& SetCounterAsExpression(FsmCounter* counter, Expression* value) {
     AddAssignment(counter->next, value);
-    return down_cast<T&>(*this);
+    return absl::down_cast<T&>(*this);
   }
 
   // Adds a conditional statement using the given condition to the block.
   // Returns the resulting conditional block.
   ConditionalFsmBlock& OnCondition(Expression* condition) {
     conditional_blocks_.emplace_back(
-        absl::StrFormat("%s: if (%s)", debug_name(), condition->Emit()), file_,
-        condition);
+        absl::StrFormat("%s: if (%s)", debug_name(), condition->Emit(nullptr)),
+        file_, condition);
     return conditional_blocks_.back();
   }
 
@@ -220,7 +231,9 @@ class FsmBlock : public FsmBlockBase {
     conditional_blocks_.emplace_back(
         absl::StrFormat("%s: if counter %s == 0", debug_name(),
                         counter->logic_ref->GetName()),
-        file_, file_->Equals(counter->logic_ref, file_->PlainLiteral(0)));
+        file_,
+        file_->Equals(counter->logic_ref, file_->PlainLiteral(0, SourceInfo()),
+                      SourceInfo()));
     return conditional_blocks_.back();
   }
 };
@@ -228,15 +241,14 @@ class FsmBlock : public FsmBlockBase {
 // An unconditional block of logic within an FSM state.
 class UnconditionalFsmBlock : public FsmBlock<UnconditionalFsmBlock> {
  public:
-  explicit UnconditionalFsmBlock(absl::string_view debug_name,
-                                 VerilogFile* file)
+  explicit UnconditionalFsmBlock(std::string_view debug_name, VerilogFile* file)
       : FsmBlock<UnconditionalFsmBlock>(debug_name, file) {}
 };
 
 // A conditional block of logic within an FSM state.
 class ConditionalFsmBlock : public FsmBlock<ConditionalFsmBlock> {
  public:
-  explicit ConditionalFsmBlock(absl::string_view debug_name, VerilogFile* file,
+  explicit ConditionalFsmBlock(std::string_view debug_name, VerilogFile* file,
                                Expression* condition)
       : FsmBlock<ConditionalFsmBlock>(debug_name, file),
         condition_(condition) {}
@@ -289,7 +301,7 @@ class ConditionalFsmBlock : public FsmBlock<ConditionalFsmBlock> {
 
   // The next alternate (else if) of the conditional ladder. Only one of
   // next_alternate_ or final_alternate_ may be non-null. Might be representable
-  // as an absl::variant but an absl::variant of std::unique_ptrs is awkward to
+  // as a std::variant but a std::variant of std::unique_ptrs is awkward to
   // manipulate.
   std::unique_ptr<ConditionalFsmBlock> next_alternate_;
 
@@ -305,7 +317,7 @@ class ConditionalFsmBlock : public FsmBlock<ConditionalFsmBlock> {
 //  st->SetOutput(x, value).NextState(next_st);
 class FsmState : public UnconditionalFsmBlock {
  public:
-  explicit FsmState(absl::string_view name, VerilogFile* file,
+  explicit FsmState(std::string_view name, VerilogFile* file,
                     Expression* state_value)
       : UnconditionalFsmBlock(name, file),
         name_(name),
@@ -325,9 +337,8 @@ class FsmState : public UnconditionalFsmBlock {
 // Abstraction for building finite state machines in Verilog using VAST.
 class FsmBuilder {
  public:
-  FsmBuilder(absl::string_view name, Module* module, LogicRef* clk,
-             bool use_system_verilog,
-             absl::optional<Reset> reset = absl::nullopt)
+  FsmBuilder(std::string_view name, Module* module, LogicRef* clk,
+             bool use_system_verilog, std::optional<Reset> reset = std::nullopt)
       : name_(name),
         module_(module),
         file_(module->file()),
@@ -337,17 +348,19 @@ class FsmBuilder {
 
   // Adds an FSM-controled signal to the FSM with the given name. A RegDef named
   // 'name' is added to the module.
-  FsmOutput* AddOutput(absl::string_view name, int64_t width,
+  FsmOutput* AddOutput(std::string_view name, int64_t width,
                        int64_t default_value) {
-    return AddOutputAsExpression(name, file_->BitVectorType(width),
-                                 file_->PlainLiteral(default_value));
+    return AddOutputAsExpression(
+        name, file_->BitVectorType(width, SourceInfo()),
+        file_->PlainLiteral(default_value, SourceInfo()));
   }
-  FsmOutput* AddOutputAsExpression(absl::string_view name, DataType* data_type,
+  FsmOutput* AddOutputAsExpression(std::string_view name, DataType* data_type,
                                    Expression* default_value);
 
-  FsmOutput* AddOutput1(absl::string_view name, int64_t default_value) {
-    return AddOutputAsExpression(name, /*data_type=*/file_->ScalarType(),
-                                 file_->PlainLiteral(default_value));
+  FsmOutput* AddOutput1(std::string_view name, int64_t default_value) {
+    return AddOutputAsExpression(
+        name, /*data_type=*/file_->ScalarType(SourceInfo()),
+        file_->PlainLiteral(default_value, SourceInfo()));
   }
 
   // Overload which adds a previously defined reg as a FSM-controlled signal.
@@ -356,9 +369,9 @@ class FsmBuilder {
   // Adds a FSM-driven register with the given name. RegDefs named 'name' and
   // 'name_next' are added to the module.  The state of the register is affected
   // by calling SetRegisterNext.
-  FsmRegister* AddRegister(absl::string_view name, int64_t width,
-                           absl::optional<int64_t> reset_value = absl::nullopt);
-  FsmRegister* AddRegister(absl::string_view name, DataType* data_type,
+  FsmRegister* AddRegister(std::string_view name, int64_t width,
+                           std::optional<int64_t> reset_value = std::nullopt);
+  FsmRegister* AddRegister(std::string_view name, DataType* data_type,
                            Expression* reset_value = nullptr);
 
   // Overload which adds a previously defined reg as an FSM-controlled signal. A
@@ -367,10 +380,10 @@ class FsmBuilder {
   FsmRegister* AddExistingRegister(LogicRef* reg);
 
   // Add a cycle down-counter with the given name and width.
-  FsmCounter* AddDownCounter(absl::string_view name, int64_t width);
+  FsmCounter* AddDownCounter(std::string_view name, int64_t width);
 
   // Add a new state to the FSM.
-  FsmState* AddState(absl::string_view name);
+  FsmState* AddState(std::string_view name);
 
   // Builds the FSM in the module.
   absl::Status Build();
@@ -382,7 +395,7 @@ class FsmBuilder {
   // Creates a RegDef of the given type and optional initial
   // value. Returns a LogicRef referring to it. The RegDef is added to the
   // module inline with the FSM logic when Build is called.
-  LogicRef* AddRegDef(absl::string_view name, DataType* data_type,
+  LogicRef* AddRegDef(std::string_view name, DataType* data_type,
                       Expression* init = nullptr);
 
   // Build the always block containing the logic for state transitions.
@@ -401,7 +414,7 @@ class FsmBuilder {
   VerilogFile* file_;
   LogicRef* clk_;
   bool use_system_verilog_;
-  absl::optional<Reset> reset_;
+  std::optional<Reset> reset_;
 
   // Output and registers defined by the FSM prior to called Build (such as
   // AddOutput and AddRegister). These are added to the module when Build is

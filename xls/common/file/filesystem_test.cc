@@ -14,11 +14,18 @@
 
 #include "xls/common/file/filesystem.h"
 
+#include <unistd.h>
+
 #include <filesystem>
+#include <fstream>
+#include <ios>
+#include <string>
 #include <system_error>  // NOLINT(build/c++11)
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "xls/common/file/filesystem_test.pb.h"
 #include "xls/common/file/temp_directory.h"
@@ -28,8 +35,8 @@
 namespace xls {
 namespace {
 
-using status_testing::IsOkAndHolds;
-using status_testing::StatusIs;
+using ::absl_testing::IsOkAndHolds;
+using ::absl_testing::StatusIs;
 using ::testing::AnyOf;
 using ::testing::Contains;
 using ::testing::Eq;
@@ -77,7 +84,7 @@ TEST(FilesystemTest, FileIsExecutable) {
       std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
   ASSERT_THAT(FileIsExecutable(temp_file->path()), IsOkAndHolds(false));
 
-  EXPECT_THAT(FileIsExecutable("/nonexistent/garbage"),
+  EXPECT_THAT(FileIsExecutable("/this_is_not_a_real_directory/garbage"),
               StatusIs(absl::StatusCode::kNotFound));
 }
 
@@ -318,6 +325,19 @@ TEST(FilesystemTest, ParseTextProtoFileParsesTextProto) {
   EXPECT_EQ(contents->field(), "hi");
 }
 
+TEST(FilesystemTest, SetProtobinFileWritesAFile) {
+  absl::StatusOr<TempFile> temp_file = TempFile::Create();
+  XLS_ASSERT_OK(temp_file);
+  FilesystemTest test;
+  test.set_field("hi");
+
+  XLS_EXPECT_OK(SetProtobinFile(temp_file->path(), test));
+
+  FilesystemTest content;
+  XLS_ASSERT_OK(ParseProtobinFile(temp_file->path(), &content));
+  EXPECT_EQ(content.field(), "hi");
+}
+
 TEST(FilesystemTest, SetTextProtoFileWritesAFile) {
   absl::StatusOr<TempFile> temp_file = TempFile::Create();
   XLS_ASSERT_OK(temp_file);
@@ -327,7 +347,9 @@ TEST(FilesystemTest, SetTextProtoFileWritesAFile) {
   XLS_EXPECT_OK(SetTextProtoFile(temp_file->path(), test));
 
   absl::StatusOr<std::string> contents = GetFileContents(temp_file->path());
-  EXPECT_THAT(contents, IsOkAndHolds("field: \"hi\"\n"));
+  EXPECT_THAT(contents,
+              IsOkAndHolds(HasSubstr("# proto-message: FilesystemTest")));
+  EXPECT_THAT(contents, IsOkAndHolds(HasSubstr("field: \"hi\"\n")));
 }
 
 TEST(FilesystemTest, SetTextProtoFileFailsWhenRequiredFieldIsMissing) {
@@ -342,18 +364,17 @@ TEST(FilesystemTest, SetTextProtoFileFailsWhenRequiredFieldIsMissing) {
 }
 
 TEST(FilesystemTest, GetCurrentDirectoryReturnsCurrentDirectory) {
-  absl::StatusOr<TempDirectory> temp_dir = TempDirectory::Create();
-  XLS_ASSERT_OK(temp_dir);
-  absl::StatusOr<std::filesystem::path> initial_cwd = GetCurrentDirectory();
-  XLS_ASSERT_OK(initial_cwd);
-  ASSERT_EQ(0, chdir(temp_dir->path().c_str()));
+  XLS_ASSERT_OK_AND_ASSIGN(TempDirectory temp_dir, TempDirectory::Create());
+  XLS_ASSERT_OK_AND_ASSIGN(std::filesystem::path initial_cwd,
+                           GetCurrentDirectory());
+  ASSERT_EQ(0, chdir(temp_dir.path().c_str()));
 
-  absl::StatusOr<std::filesystem::path> new_cwd = GetCurrentDirectory();
-  XLS_ASSERT_OK(new_cwd);
-  EXPECT_EQ(temp_dir->path(), *new_cwd);
+  XLS_ASSERT_OK_AND_ASSIGN(std::filesystem::path new_cwd,
+                           GetCurrentDirectory());
+  EXPECT_TRUE(std::filesystem::equivalent(temp_dir.path(), new_cwd));
 
   ASSERT_EQ(0,
-            chdir(initial_cwd->c_str()));  // Change back to the original path.
+            chdir(initial_cwd.c_str()));  // Change back to the original path.
 }
 
 TEST(FilesystemTest, GetDirectoryEntriesFailsWhenPathDoesNotExist) {
@@ -407,11 +428,28 @@ TEST(FilesystemTest, GetDirectoryEntriesGivesRelativePathsWhenPathIsRelative) {
 }
 
 TEST(FilesystemTest, GetRealPath) {
+#ifndef __linux__
+  GTEST_SKIP() << "Skipping as procfs only available on linux";
+#endif /* __linux__ */
   XLS_ASSERT_OK_AND_ASSIGN(std::filesystem::path link_path,
                            GetRealPath("/proc/self/exe"));
   XLS_ASSERT_OK_AND_ASSIGN(std::filesystem::path real_path,
                            GetRealPath(link_path));
   ASSERT_EQ(link_path, real_path);
+}
+
+TEST(FilesystemTest, ParseProtobinFile) {
+  absl::StatusOr<TempDirectory> temp_dir = TempDirectory::Create();
+  const std::filesystem::path& temp_file = temp_dir->path() / "a.txt";
+  FilesystemTest content_golden;
+  content_golden.set_field("hi");
+  std::fstream output_file(temp_file.string(),
+                           std::ios::out | std::ios::trunc | std::ios::binary);
+  EXPECT_TRUE(content_golden.SerializeToOstream(&output_file));
+  output_file.close();
+  FilesystemTest content;
+  XLS_ASSERT_OK(ParseProtobinFile(temp_dir->path() / "a.txt", &content));
+  EXPECT_EQ(content.field(), "hi");
 }
 
 }  // namespace

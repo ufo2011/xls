@@ -14,21 +14,29 @@
 
 #include "xls/noc/config_ng/arbitrary_base_number.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <optional>
+
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "xls/ir/bits.h"
+
 namespace xls::noc {
 
 ArbitraryBaseNumber::ArbitraryBaseNumber(const int64_t digit_count,
                                          const int64_t numerical_base)
     : digits_(internal::CheckGe(digit_count, int64_t{0}), 0),
       numerical_base_(numerical_base) {
-  XLS_CHECK_GE(digit_count, 1);
-  XLS_CHECK_GE(numerical_base, 2);
-  XLS_CHECK_LE(numerical_base, 128);
+  CHECK_GE(digit_count, 1);
+  CHECK_GE(numerical_base, 2);
+  CHECK_LE(numerical_base, 128);
 }
 
-absl::optional<int64_t> ArbitraryBaseNumber::GetValue(
+std::optional<int64_t> ArbitraryBaseNumber::GetValue(
     const int64_t index) const {
   if (index < 0 || index >= digits_.size()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   int64_t value = 0;
   int64_t base = 1;

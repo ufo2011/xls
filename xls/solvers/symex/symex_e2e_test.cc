@@ -1,0 +1,209 @@
+// Copyright 2026 The XLS Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <cstddef>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "gmock/gmock.h"
+#include "gtest/gtest.h"
+#include "absl/status/statusor.h"
+#include "xls/common/file/filesystem.h"
+#include "xls/common/file/get_runfile_path.h"
+#include "xls/common/status/matchers.h"
+#include "xls/common/status/status_macros.h"
+#include "xls/interpreter/function_interpreter.h"
+#include "xls/ir/bits.h"
+#include "xls/ir/events.h"
+#include "xls/ir/function.h"
+#include "xls/ir/ir_test_base.h"
+#include "xls/ir/nodes.h"
+#include "xls/ir/package.h"
+#include "xls/ir/value.h"
+#include "xls/solvers/symex/symbolic_path.h"
+#include "xls/solvers/symex/symex_engine.h"
+#include "xls/solvers/symex/test_util.h"
+#include "z3/src/api/z3_api.h"
+
+namespace xls::solvers::symex {
+namespace {
+
+using ::testing::SizeIs;
+
+class SymexE2eTest : public IrTestBase {
+ protected:
+  void SetUp() override {
+    IrTestBase::SetUp();
+    config_ = Z3_mk_config();
+    ctx_ = Z3_mk_context(config_);
+  }
+
+  void TearDown() override {
+    if (ctx_ != nullptr) {
+      Z3_del_context(ctx_);
+    }
+    if (config_ != nullptr) {
+      Z3_del_config(config_);
+    }
+    IrTestBase::TearDown();
+  }
+
+  bool AreMutuallyExclusive(Z3_ast cond1, Z3_ast cond2) {
+    Z3_solver solver = Z3_mk_solver(ctx_);
+    Z3_solver_inc_ref(ctx_, solver);
+    Z3_solver_assert(ctx_, solver, cond1);
+    Z3_solver_assert(ctx_, solver, cond2);
+    Z3_lbool result = Z3_solver_check(ctx_, solver);
+    Z3_solver_dec_ref(ctx_, solver);
+    return result == Z3_L_FALSE;
+  }
+
+  absl::StatusOr<std::unique_ptr<Package>> LoadAluPackage() {
+    XLS_ASSIGN_OR_RETURN(
+        std::filesystem::path ir_path,
+        GetXlsRunfilePath("xls/solvers/symex/testdata/execute_alu.ir"));
+    XLS_ASSIGN_OR_RETURN(std::string ir_text, GetFileContents(ir_path));
+    return ParsePackage(ir_text);
+  }
+
+  Z3_config config_ = nullptr;
+  Z3_context ctx_ = nullptr;
+};
+
+TEST_F(SymexE2eTest, ExecuteAluExploresAllPathsWithoutPruning) {
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> p, LoadAluPackage());
+  XLS_ASSERT_OK_AND_ASSIGN(Function * fn,
+                           p->GetFunction("__execute_alu__execute_alu"));
+
+  SymExOptions options{.prune_unobservable = false};
+  XLS_ASSERT_OK_AND_ASSIGN(SymExEngine engine,
+                           SymExEngine::Create(ctx_, options));
+  XLS_ASSERT_OK_AND_ASSIGN(std::vector<SymbolicPath> paths,
+                           engine.ExplorePaths(fn));
+
+  // Without pruning, all multiplexer branches are explored: 3 opcodes * 2
+  // overflow outcomes = 6 paths.
+  ASSERT_THAT(paths, SizeIs(6));
+
+  // Verify pairwise mutual exclusivity.
+  for (size_t i = 0; i < paths.size(); ++i) {
+    for (size_t j = i + 1; j < paths.size(); ++j) {
+      EXPECT_TRUE(AreMutuallyExclusive(paths[i].path_condition,
+                                       paths[j].path_condition));
+    }
+  }
+
+  // Verify interpreter execution of generated test inputs.
+  for (const SymbolicPath& path : paths) {
+    std::vector<Value> args;
+    for (Param* param : fn->params()) {
+      std::optional<Value> v = path.GetParamValue(param->name());
+      ASSERT_TRUE(v.has_value());
+      args.push_back(*v);
+    }
+    XLS_ASSERT_OK_AND_ASSIGN(
+        Value result, DropInterpreterEvents(InterpretFunction(fn, args)));
+    EXPECT_TRUE(result.IsTuple());
+  }
+}
+
+TEST_F(SymexE2eTest, ExecuteAluExploresPathsWithPruning) {
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> p, LoadAluPackage());
+  XLS_ASSERT_OK_AND_ASSIGN(Function * fn,
+                           p->GetFunction("__execute_alu__execute_alu"));
+
+  XLS_ASSERT_OK_AND_ASSIGN(SymExEngine engine, SymExEngine::Create(ctx_));
+  XLS_ASSERT_OK_AND_ASSIGN(std::vector<SymbolicPath> paths,
+                           engine.ExplorePaths(fn));
+
+  // The `overflow` comparison only reaches the result on the ADD opcode, so it
+  // is an observability don't care on the other two: ADD contributes 2 paths
+  // (overflow / no overflow) and AND and INVALID contribute 1 each.
+  ASSERT_THAT(paths, SizeIs(4));
+
+  // Verify pairwise mutual exclusivity.
+  for (size_t i = 0; i < paths.size(); ++i) {
+    for (size_t j = i + 1; j < paths.size(); ++j) {
+      EXPECT_TRUE(AreMutuallyExclusive(paths[i].path_condition,
+                                       paths[j].path_condition));
+    }
+  }
+
+  // Verify interpreter execution of generated test inputs.
+  for (const SymbolicPath& path : paths) {
+    std::vector<Value> args;
+    for (Param* param : fn->params()) {
+      std::optional<Value> v = path.GetParamValue(param->name());
+      ASSERT_TRUE(v.has_value());
+      args.push_back(*v);
+    }
+    XLS_ASSERT_OK_AND_ASSIGN(
+        Value result, DropInterpreterEvents(InterpretFunction(fn, args)));
+    EXPECT_TRUE(result.IsTuple());
+  }
+}
+
+TEST_F(SymexE2eTest, ConcolicAluOpPrunesToSingleOperationPaths) {
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> package, LoadAluPackage());
+  XLS_ASSERT_OK_AND_ASSIGN(Function * fn,
+                           package->GetFunction("__execute_alu__execute_alu"));
+
+  // Opcode 0 is ADD (u2)
+  SymExOptions options;
+  options.concrete_inputs.BindParam("op", Value(UBits(0, 2)));
+
+  XLS_ASSERT_OK_AND_ASSIGN(SymExEngine engine,
+                           SymExEngine::Create(ctx_, options));
+  XLS_ASSERT_OK_AND_ASSIGN(std::vector<SymbolicPath> paths,
+                           engine.ExplorePaths(fn));
+
+  // Fixing op=0 explores only ADD paths: ADD with overflow, ADD without
+  // overflow (2 paths instead of 6).
+  EXPECT_EQ(paths.size(), 2);
+}
+
+TEST_F(SymexE2eTest, ThreeWayCompareFormalProperties) {
+  XLS_ASSERT_OK_AND_ASSIGN(
+      std::filesystem::path ir_path,
+      GetXlsRunfilePath("xls/solvers/symex/testdata/three_way_compare.ir"));
+  XLS_ASSERT_OK_AND_ASSIGN(std::string ir_text, GetFileContents(ir_path));
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> p, ParsePackage(ir_text));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Function * fn, p->GetFunction("__three_way_compare__three_way_compare"));
+
+  XLS_EXPECT_OK(ExploreAndVerifyFunction(
+      ctx_, fn, FormalCheckConfig{.expected_paths = 3}));
+}
+
+TEST_F(SymexE2eTest, PriorityEncoderFormalProperties) {
+  XLS_ASSERT_OK_AND_ASSIGN(
+      std::filesystem::path ir_path,
+      GetXlsRunfilePath("xls/solvers/symex/testdata/priority_encoder.ir"));
+  XLS_ASSERT_OK_AND_ASSIGN(std::string ir_text, GetFileContents(ir_path));
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Package> p, ParsePackage(ir_text));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Function * fn, p->GetFunction("__priority_encoder__priority_encoder"));
+
+  // Each stage of the if/else chain hides the stages below it once it fires,
+  // so exploration yields one path per taken stage plus the two fallback
+  // outcomes of the final stage: 1 + 1 + 1 + 2 = 5 paths, rather than the 2^4
+  // combinations of the four selectors.
+  XLS_EXPECT_OK(ExploreAndVerifyFunction(
+      ctx_, fn, FormalCheckConfig{.expected_paths = 5}));
+}
+
+}  // namespace
+}  // namespace xls::solvers::symex

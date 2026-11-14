@@ -15,6 +15,8 @@
 #ifndef XLS_INT_H
 #define XLS_INT_H
 
+#include <algorithm>
+#include <cstddef>
 #include <type_traits>
 
 #include "/xls_builtin.h"
@@ -24,18 +26,18 @@
 
 #ifndef __SYNTHESIS__
 static_assert(false, "This header is only for synthesis");
-#endif  //__SYNTHESIS__
+#endif  // __SYNTHESIS__
 
 namespace {
 
 template <int rem>
 static const int Log2Floor = (rem <= 1) ? 0 : (1 + Log2Floor<rem / 2>);
 template <>
-static const int Log2Floor<0> = 0;
+const int Log2Floor<0> = 0;
 template <int n>
 static const int Log2Ceil = Log2Floor<n> + (((1 << Log2Floor<n>) == n) ? 0 : 1);
 template <>
-static const int Log2Ceil<1> = 1;
+const int Log2Ceil<1> = 1;
 
 static_assert(Log2Ceil<1> == 1);
 static_assert(Log2Ceil<2> == 1);
@@ -59,13 +61,26 @@ class BuiltinIntToBits {
   }
 };
 
+template <typename T, int Width>
+class [[hls_synthetic_int]] BitsToBuiltinInt {
+ public:
+  inline static T Convert(__xls_bits<Width> in) {
+    T in_type;
+    asm("fn (fid)(a: bits[i]) -> bits[i] { ret op_9_(aid): bits[i] = "
+        "identity(a, pos=(loc)) }"
+        : "=r"(in_type)
+        : "i"(Width), "a"(in));
+    return in_type;
+  }
+};
+
 template <int FromW, int ToW, bool Signed>
 class ExtendBits {};
 
 template <int FromW, int ToW>
 class ExtendBits<FromW, ToW, false> {
  public:
-  static_assert(FromW < ToW);
+  static_assert(FromW <= ToW);
 
   inline static __xls_bits<ToW> Convert(__xls_bits<FromW> storage) {
     __xls_bits<ToW> ret;
@@ -149,10 +164,24 @@ class MultiplyWithSign<Width, true> {
   }
 };
 
-template <int Width, bool Signed, int IndexW>
+template <int Width, unsigned int IndexW>
+class [[hls_synthetic_int]] ShiftLeft {
+ public:
+  inline static __xls_bits<Width> Operate(__xls_bits<Width> a,
+                                          __xls_bits<IndexW> b) {
+    __xls_bits<Width> ret;
+    asm("fn (fid)(a: bits[i], o: bits[c]) -> bits[i] { ret op_(aid): bits[i] = "
+        "shll(a, o, pos=(loc)) }"
+        : "=r"(ret)
+        : "i"(Width), "c"(IndexW), "a"(a), "o"(b));
+    return ret;
+  }
+};
+
+template <int Width, bool Signed, unsigned int IndexW>
 class ShiftRightWithSign {};
 
-template <int Width, int IndexW>
+template <int Width, unsigned int IndexW>
 class ShiftRightWithSign<Width, false, IndexW> {
  public:
   inline static __xls_bits<Width> Operate(__xls_bits<Width> a,
@@ -166,7 +195,7 @@ class ShiftRightWithSign<Width, false, IndexW> {
   }
 };
 
-template <int Width, int IndexW>
+template <int Width, unsigned int IndexW>
 class ShiftRightWithSign<Width, true, IndexW> {
  public:
   inline static __xls_bits<Width> Operate(__xls_bits<Width> a,
@@ -362,40 +391,58 @@ class LessOrEqWithSign<Width, true> {
 
 // The point of XlsIntBase is to provide different conversions
 //  for signed and unsigned ints. It is the base class to XlsInt.
-#pragma hls_no_tuple
-template <int Width, bool Signed>
-class XlsIntBase {};
+struct XlsIntNoBuiltinConv {};
+template <bool Fits, typename T>
+struct XlsIntConvType {
+  typedef T t;
+};
+template <typename T>
+struct XlsIntConvType<false, T> {
+  typedef XlsIntNoBuiltinConv t;
+};
 
-#pragma hls_no_tuple
+template <int Width, bool Signed>
+class [[hls_synthetic_int]] XlsIntBase {};
+
 template <int Width>
-class XlsIntBase<Width, false> {
+class [[hls_synthetic_int]] XlsIntBase<Width, false> {
   static_assert(Width > 0, "Must be at least 1 bit wide");
 
  public:
   // XLS[cc] will init with 0
   inline XlsIntBase() {}
 
-  inline XlsIntBase(const __xls_bits<Width> &o) : storage(o) {}
+  inline XlsIntBase(const __xls_bits<Width> o) : storage(o) {}
 
-  inline operator unsigned long long() const {
+  inline operator typename XlsIntConvType<Width <= 64, unsigned long long>::t()
+      const {
+    static_assert(Width <= 64);
     __xls_bits<64> ret(ConvertBits<Width, 64, false>::Convert(storage));
-
     unsigned long long reti;
-
     asm("fn (fid)(a: bits[i]) -> bits[i] { ret op_0_(aid): bits[i] = "
         "identity(a, pos=(loc)) }"
         : "=r"(reti)
         : "i"(64), "a"(ret));
+    return reti;
+  }
 
+  explicit inline operator bool() const {
+    __xls_bits<Width> zero(ConvertBits<32, Width, false>::Convert(
+        BuiltinIntToBits<unsigned int, 32>::Convert(0)));
+    bool reti;
+    asm("fn (fid)(a: bits[i], b: bits[i]) -> bits[1] { ret op_0_(aid): bits[1] "
+        "= "
+        "ne(a, b, pos=(loc)) }"
+        : "=r"(reti)
+        : "i"(Width), "a"(storage), "b"(zero));
     return reti;
   }
 
   __xls_bits<Width> storage;
 };
 
-#pragma hls_no_tuple
 template <int Width>
-class XlsIntBase<Width, true> {
+class [[hls_synthetic_int]] XlsIntBase<Width, true> {
   static_assert(Width > 0, "Must be at least 1 bit wide");
 
  public:
@@ -404,9 +451,9 @@ class XlsIntBase<Width, true> {
 
   inline XlsIntBase(__xls_bits<Width> o) : storage(o) {}
 
-  inline operator long long() const {
+  inline operator typename XlsIntConvType<Width <= 64, long long>::t() const {
+    static_assert(Width <= 64);
     __xls_bits<64> ret(ConvertBits<Width, 64, true>::Convert(storage));
-
     long long reti;
 
     asm("fn (fid)(a: bits[i]) -> bits[i] { ret op_1_(aid): bits[i] = "
@@ -417,8 +464,68 @@ class XlsIntBase<Width, true> {
     return reti;
   }
 
+  explicit inline operator bool() const {
+    __xls_bits<Width> zero(ConvertBits<32, Width, false>::Convert(
+        BuiltinIntToBits<unsigned int, 32>::Convert(0)));
+    bool reti;
+    asm("fn (fid)(a: bits[i], b: bits[i]) -> bits[1] { ret op_0_(aid): bits[1] "
+        "= "
+        "ne(a, b, pos=(loc)) }"
+        : "=r"(reti)
+        : "i"(Width), "a"(storage), "b"(zero));
+    return reti;
+  }
+
   __xls_bits<Width> storage;
 };
+template <int W, bool S>
+class XlsInt;
+
+namespace synth_only_internal {
+
+// Value provides the minimum possible value for a number with the given width
+// and signedness.
+template <int Width, bool Signed>
+class MinValue {};
+
+template <int Width>
+class MinValue<Width, /*Signed=*/true> {
+ public:
+  inline static __xls_bits<Width> Value() {
+    return (XlsInt<Width, false>(1) << (Width - 1)).storage;
+  }
+};
+
+template <int Width>
+class MinValue<Width, /*Signed=*/false> {
+ public:
+  inline static __xls_bits<Width> Value() {
+    return XlsInt<Width, false>(0).storage;
+  }
+};
+
+// Value provides the maximum possible value for a number with the given width
+// and signedness.
+template <int Width, bool Signed>
+class MaxValue {};
+
+template <int Width>
+class MaxValue<Width, /*Signed=*/true> {
+ public:
+  inline static __xls_bits<Width> Value() {
+    return (XlsInt<Width, false>(0).bit_complement() >> 1).storage;
+  }
+};
+
+template <int Width>
+class MaxValue<Width, /*Signed=*/false> {
+ public:
+  inline static __xls_bits<Width> Value() {
+    return (XlsInt<Width, false>(0).bit_complement()).storage;
+  }
+};
+
+}  // namespace synth_only_internal
 
 // BitElemRef is returned from XlsInt's non-const operator [].
 // It represents a reference to a certain bit inside an XlsInt.
@@ -426,21 +533,49 @@ class XlsIntBase<Width, true> {
 // TODO(seanhaskell): This class does not contain a reference to an XlsInt
 //   because XLS[cc] doesn't support returning references yet. Instead,
 //   XLS[cc] contains a hack to explicitly handle this case.
-#pragma hls_no_tuple
-struct BitElemRef {
-  template <typename T>
-  inline BitElemRef(T in) : v(in & 1) {}
+struct [[hls_no_tuple]] BitElemRef {
+  // template <typename T>
+  inline BitElemRef(bool in) : v(in) {}
 
   inline operator bool() const { return v; }
+  template <int W2, bool S2>
+  operator XlsInt<W2, S2>() const {
+    return operator bool();
+  }
 
-  inline bool operator=(BitElemRef o) { return v; }
+  inline BitElemRef operator=(int val) {
+    v = static_cast<bool>(val);
+    return *this;
+  }
+
+  inline BitElemRef operator=(const BitElemRef &val) {
+    v = static_cast<bool>(val.v);
+    return *this;
+  }
 
   bool v;
 };
 
-#pragma hls_no_tuple
+// Defines the result types for each operation using ac_int.
+// T is the second operand while rt_T<XlsInt<W, S>> is the first operand.
+// Since the operand order is reversed, the result types for non-commutative
+// operations are also reversed.
+template <typename T>
+struct rt_ac_int_T {
+  template <int W, bool S>
+  struct op1 {
+    typedef typename T::template rt_T<XlsInt<W, S> >::mult mult;
+    typedef typename T::template rt_T<XlsInt<W, S> >::plus plus;
+    typedef typename T::template rt_T<XlsInt<W, S> >::minus2 minus;
+    typedef typename T::template rt_T<XlsInt<W, S> >::minus minus2;
+    typedef typename T::template rt_T<XlsInt<W, S> >::logic logic;
+    typedef typename T::template rt_T<XlsInt<W, S> >::div2 div;
+    typedef typename T::template rt_T<XlsInt<W, S> >::div div2;
+  };
+};
+
 template <int Width, bool Signed = true>
-class XlsInt : public XlsIntBase<Width, Signed> {
+class [[hls_synthetic_int]] XlsInt : public XlsIntBase<Width, Signed> {
  public:
   // XLS[cc] will initialize to 0
   inline XlsInt() {}
@@ -449,10 +584,6 @@ class XlsInt : public XlsIntBase<Width, Signed> {
   inline XlsInt(const XlsInt<ToW, ToSign> &o)
       : XlsIntBase<Width, Signed>(
             ConvertBits<ToW, Width, ToSign>::Convert(o.storage)) {}
-
-  inline XlsInt(const BitElemRef &value)
-      : XlsIntBase<Width, Signed>(ConvertBits<1, Width, false>::Convert(
-            BuiltinIntToBits<bool, 1>::Convert(value))) {}
 
   inline XlsInt(bool value)
       : XlsIntBase<Width, Signed>(ConvertBits<1, Width, false>::Convert(
@@ -490,6 +621,16 @@ class XlsInt : public XlsIntBase<Width, Signed> {
       : XlsIntBase<Width, Signed>(ConvertBits<64, Width, false>::Convert(
             BuiltinIntToBits<unsigned long long, 64>::Convert(value))) {}
 
+  inline XlsInt(const double value)
+      : XlsIntBase<Width, Signed>(ConvertBits<64, Width, true>::Convert(
+            BuiltinIntToBits<long long, 64>::Convert((long long)value))) {}
+
+  inline XlsInt(const float value)
+      : XlsIntBase<Width, Signed>(ConvertBits<64, Width, true>::Convert(
+            BuiltinIntToBits<long long, 64>::Convert((long long)value))) {}
+
+  inline XlsInt(__xls_bits<Width> value) : XlsIntBase<Width, Signed>(value) {}
+
   inline int to_int() const {
     XlsInt<32, true> ret(*this);
 
@@ -503,8 +644,32 @@ class XlsInt : public XlsIntBase<Width, Signed> {
     return reti;
   }
 
+  inline unsigned int to_uint() const { return (unsigned int)to_int(); }
+  inline long long to_int64() const {
+    XlsInt<64, true> ret(*this);
+    long long reti;
+
+    asm("fn (fid)(a: bits[i]) -> bits[i] { ret op_1_(aid): bits[i] = "
+        "identity(a, pos=(loc)) }"
+        : "=r"(reti)
+        : "i"(64), "a"(ret));
+
+    return reti;
+  }
+  inline unsigned long long to_uint64() const {
+    return (unsigned long long)to_int64();
+  }
+  inline long to_long() const { return (long)to_int64(); }
+  inline unsigned long to_ulong() const { return (unsigned long)to_int64(); }
+
   static const int width = Width;
+  static const int i_width = Width;
   static const bool sign = Signed;
+
+  template <typename T>
+  struct map {
+    typedef T t;
+  };
 
   // Defines the result types for each operation based on ac_int
   template <int ToW, bool ToSign>
@@ -520,16 +685,50 @@ class XlsInt : public XlsIntBase<Width, Signed> {
     typedef XlsInt ident;
   };
 
+  template <typename T>
+  struct rt_T {
+    typedef typename map<T>::t map_T;
+    typedef typename rt_ac_int_T<map_T>::template op1<Width, Signed>::mult mult;
+    typedef typename rt_ac_int_T<map_T>::template op1<Width, Signed>::plus plus;
+    typedef
+        typename rt_ac_int_T<map_T>::template op1<Width, Signed>::minus minus;
+    typedef
+        typename rt_ac_int_T<map_T>::template op1<Width, Signed>::minus2 minus2;
+    typedef
+        typename rt_ac_int_T<map_T>::template op1<Width, Signed>::logic logic;
+    typedef typename rt_ac_int_T<map_T>::template op1<Width, Signed>::div div;
+    typedef typename rt_ac_int_T<map_T>::template op1<Width, Signed>::div2 div2;
+    typedef XlsInt arg1;
+  };
+
   struct rt_unary : public ac_datatypes::ac_int<Width, Signed>::rt_unary {
     typedef XlsInt<rt_unary::neg_w, rt_unary::neg_s> neg;
     typedef XlsInt<Width + !Signed, true> bnot;
+    typedef XlsInt<rt_unary::mag_w, rt_unary::mag_s> mag;
+    template <unsigned N>
+    struct set {
+      typedef XlsInt<
+          ac_datatypes::ac_int<Width, Signed>::rt_unary::template set<N>::sum_w,
+          ac_datatypes::ac_int<Width, Signed>::rt_unary::template set<N>::sum_s>
+          sum;
+    };
   };
-
-  // Width+1 because we need to be able to represent shifting all digits
-  typedef XlsInt<Log2Ceil<Width + 1>, false> index_t;
 
   bool operator!() const { return (*this) == XlsInt(0); }
 
+  XlsInt operator+() const { return (*this); }
+
+  inline typename rt_unary::neg operator-() const {
+    typename rt_unary::neg as = *this;
+    typename rt_unary::neg ret;
+    asm("fn (fid)(a: bits[i]) -> bits[i] { ret (aid): bits[i] "
+        "= neg(a, pos=(loc)) }"
+        : "=r"(ret)
+        : "i"(rt_unary::neg::width), "parama"(as));
+    return ret;
+  }
+
+  // Sign extends
   inline typename rt_unary::bnot operator~() const {
     typename rt_unary::bnot as = *this;
     typename rt_unary::bnot ret;
@@ -540,13 +739,23 @@ class XlsInt : public XlsIntBase<Width, Signed> {
     return ret;
   }
 
-  inline typename rt_unary::neg operator-() const {
-    typename rt_unary::neg as = *this;
-    typename rt_unary::neg ret;
+  // Doesn't sign extend
+  inline XlsInt<Width, false> bit_complement() const {
+    XlsInt<Width, false> as = *this;
+    XlsInt<Width, false> ret;
     asm("fn (fid)(a: bits[i]) -> bits[i] { ret (aid): bits[i] "
-        "= neg(a, pos=(loc)) }"
+        "= not(a, pos=(loc)) }"
         : "=r"(ret)
-        : "i"(rt_unary::neg::width), "parama"(as));
+        : "i"(Width), "parama"(as));
+    return ret;
+  }
+
+  inline bool and_reduce() const {
+    bool ret;
+    asm("fn (gensym and_reduce)(a: bits[i]) -> bits[1] { "
+        "  ret (aid): bits[1] = and_reduce(a, pos=(loc)) }"
+        : "=r"(ret)
+        : "i"(Width), "a"(this->storage));
     return ret;
   }
 
@@ -587,7 +796,7 @@ class XlsInt : public XlsIntBase<Width, Signed> {
     return ret;                                                             \
   }                                                                         \
   template <int ToW, bool ToSign>                                           \
-  inline XlsInt &operator __OP##=(const XlsInt<ToW, ToSign> &o) {           \
+  inline XlsInt operator __OP##=(const XlsInt<ToW, ToSign> &o) {            \
     (*this) = (*this)__OP o;                                                \
     return (*this);                                                         \
   }
@@ -603,12 +812,13 @@ class XlsInt : public XlsIntBase<Width, Signed> {
     asm("fn (fid)(a: bits[i]) -> bits[i] { ret op_4_(aid): bits[i] = "         \
         "identity(a, pos=(loc)) }"                                             \
         : "=r"(ret.storage)                                                    \
-        : "i"(Result::width), "parama"(__IMPL<Result::width, ToSign>::Operate( \
-                                  as.storage, bs.storage)));                   \
+        : "i"(Result::width),                                                  \
+          "parama"(__IMPL<Result::width, Result::sign>::Operate(as.storage,    \
+                                                                bs.storage))); \
     return ret;                                                                \
   }                                                                            \
   template <int ToW, bool ToSign>                                              \
-  inline XlsInt &operator __OP##=(const XlsInt<ToW, ToSign> &o) {              \
+  inline XlsInt operator __OP##=(const XlsInt<ToW, ToSign> &o) {               \
     (*this) = (*this)__OP o;                                                   \
     return (*this);                                                            \
   }
@@ -617,54 +827,122 @@ class XlsInt : public XlsIntBase<Width, Signed> {
   BINARY_OP(-, "sub", minus);
 
   BINARY_OP_WITH_SIGN(*, MultiplyWithSign, mult);
-  BINARY_OP_WITH_SIGN(/, DivideWithSign, mult);
-  BINARY_OP_WITH_SIGN(%, ModuloWithSign, mult);
+
+  template <int ToW, bool ToSign>
+  inline typename rt<ToW, ToSign>::div operator/(
+      const XlsInt<ToW, ToSign> &o) const {
+    typedef typename rt<ToW, ToSign>::div Result;
+    typedef XlsInt<std::max(std::max(Width + ((!Signed && ToSign) ? 1 : 0),
+                                     ToW + ((Signed && !ToSign) ? 1 : 0)),
+                            static_cast<int>(Result::width)),
+                   Signed || ToSign>
+        Operands;
+    Operands as = *this;
+    Operands bs = o;
+    Operands ret;
+    asm("fn (fid)(a: bits[i]) -> bits[i] { ret op_4_(aid): bits[i] = "
+        "identity(a, pos=(loc)) }"
+        : "=r"(ret.storage)
+        : "i"(Operands::width),
+          "parama"(DivideWithSign<Operands::width, Operands::sign>::Operate(
+              as.storage, bs.storage)));
+    return (Result)ret;
+  }
+  template <int ToW, bool ToSign>
+  inline XlsInt operator/=(const XlsInt<ToW, ToSign> &o) {
+    (*this) = (*this) / o;
+    return (*this);
+  }
+
+  template <int ToW, bool ToSign>
+  inline typename rt<ToW, ToSign>::mod operator%(
+      const XlsInt<ToW, ToSign>& o) const {
+    typedef typename rt<ToW, ToSign>::mod Result;
+    typedef XlsInt<std::max(Width + ((!Signed && ToSign) ? 1 : 0),
+                            ToW + ((Signed && !ToSign) ? 1 : 0)),
+                   Signed || ToSign>
+        Operands;
+    Operands as = *this;
+    Operands bs = o;
+    Operands ret;
+    asm("fn (fid)(a: bits[i]) -> bits[i] { ret op_4_(aid): bits[i] = "
+        "identity(a, pos=(loc)) }"
+        : "=r"(ret.storage)
+        : "i"(Operands::width),
+          "parama"(ModuloWithSign<Operands::width, Operands::sign>::Operate(
+              as.storage, bs.storage)));
+    return (Result)ret;
+  }
+  template <int ToW, bool ToSign>
+  inline XlsInt operator%=(const XlsInt<ToW, ToSign>& o) {
+    (*this) = (*this) % o;
+    return (*this);
+  }
 
   BINARY_OP(|, "or", logic);
   BINARY_OP(&, "and", logic);
   BINARY_OP(^, "xor", logic);
 
-  inline XlsInt operator<<(index_t offset) const {
-    XlsInt ret;
+  template <int W2, bool S2>
+  inline XlsInt operator>>(XlsInt<W2, S2> offset) const {
+    XlsInt<32, true> neg_offset = -offset;
+    XlsInt ret_right;
+    asm("fn (fid)(a: bits[i]) -> bits[i] { ret op_5_(aid): bits[i] = "
+        "identity(a, pos=(loc)) }"
+        : "=r"(ret_right.storage)
+        : "i"(Width), "a"(ShiftRightWithSign<Width, Signed, W2>::Operate(
+                          this->storage, offset.storage)));
+    XlsInt ret_left;
     asm("fn (fid)(a: bits[i], o: bits[c]) -> bits[i] { ret op_(aid): bits[i] = "
         "shll(a, o, pos=(loc)) }"
-        : "=r"(ret.storage)
-        : "i"(Width), "c"(index_t::width), "a"(this->storage),
-          "o"(offset.storage));
-    return ret;
+        : "=r"(ret_left.storage)
+        : "i"(Width), "c"(32), "a"(this->storage), "o"(neg_offset.storage));
+    XlsInt<32, S2> offset_trunc = offset;  // special case to match ac_int
+    return (offset_trunc < 0) ? ret_left : ret_right;
   }
-  inline XlsInt operator<<=(index_t offset) {
-    static_assert(index_t::width > 0, "Bug in Log2Ceil");
-    (*this) = (*this) << offset;
+  template <int W2, bool S2>
+  inline XlsInt operator>>=(XlsInt<W2, S2> offset) {
+    (*this) = (*this) >> offset;
     return (*this);
   }
 
-  inline XlsInt operator>>(index_t offset) const {
-    static_assert(index_t::width > 0, "Bug in Log2Ceil");
-    XlsInt ret;
+  template <int W2, bool S2>
+  inline XlsInt operator<<(XlsInt<W2, S2> offset) const {
+    XlsInt<32, true> neg_offset = -offset;
+    XlsInt ret_right;
     asm("fn (fid)(a: bits[i]) -> bits[i] { ret op_5_(aid): bits[i] = "
         "identity(a, pos=(loc)) }"
-        : "=r"(ret.storage)
-        : "i"(Width),
-          "a"(ShiftRightWithSign<Width, Signed, index_t::width>::Operate(
-              this->storage, offset.storage)));
-    return ret;
+        : "=r"(ret_right.storage)
+        : "i"(Width), "a"(ShiftRightWithSign<Width, Signed, 32>::Operate(
+                          this->storage, neg_offset.storage)));
+    XlsInt ret_left;
+    asm("fn (fid)(a: bits[i], o: bits[c]) -> bits[i] { ret op_(aid): bits[i] = "
+        "shll(a, o, pos=(loc)) }"
+        : "=r"(ret_left.storage)
+        : "i"(Width), "c"(W2), "a"(this->storage), "o"(offset.storage));
+    XlsInt<32, S2> offset_trunc = offset;  // special case to match ac_int
+    return (offset_trunc < 0) ? ret_right : ret_left;
   }
-  inline XlsInt operator>>=(index_t offset) {
-    static_assert(index_t::width > 0, "Bug in Log2Ceil");
-    (*this) = (*this) >> offset;
+  template <int W2, bool S2>
+  inline XlsInt operator<<=(XlsInt<W2, S2> offset) {
+    (*this) = (*this) << offset;
     return (*this);
   }
 
 #define COMPARISON_OP(__OP, __IR)                                           \
   template <int ToW, bool ToSign>                                           \
   inline bool operator __OP(const XlsInt<ToW, ToSign> &o) const {           \
-    XlsInt val(o);                                                          \
+    constexpr int compare_size = std::max(ToW, Width) + (Signed ^ ToSign);  \
     bool ret;                                                               \
-    asm("fn (fid)(a: bits[i], b: bits[i]) -> bits[1] { ret (aid): bits[1] " \
+    asm("fn (gensym operator_" __IR                                         \
+        ")(a: bits[i], b: bits[i]) -> bits[1] { ret (aid): bits[1] "        \
         "= " __IR "(a, b, pos=(loc)) }"                                     \
         : "=r"(ret)                                                         \
-        : "i"(Width), "parama"(this->storage), "paramb"(val.storage));      \
+        : "i"(compare_size),                                                \
+          "parama"(ConvertBits<Width, compare_size, Signed>::Convert(       \
+              this->storage)),                                              \
+          "paramb"(                                                         \
+              ConvertBits<ToW, compare_size, ToSign>::Convert(o.storage))); \
     return ret;                                                             \
   }
 
@@ -675,17 +953,19 @@ class XlsInt : public XlsIntBase<Width, Signed> {
     return !((*this) == o);
   }
 
-#define COMPARISON_OP_WITH_SIGN(__OP, __IMPL)                             \
-  template <int ToW, bool ToSign>                                         \
-  inline bool operator __OP(const XlsInt<ToW, ToSign> &o) const {         \
-    XlsInt val(o);                                                        \
-    bool ret;                                                             \
-    asm("fn (fid)(a: bits[i]) -> bits[1] { ret op_6_(aid): bits[1] = "    \
-        "identity(a, pos=(loc)) }"                                        \
-        : "=r"(ret)                                                       \
-        : "i"(1), "parama"(__IMPL<Width, Signed>::Operate(this->storage,  \
-                                                          val.storage))); \
-    return ret;                                                           \
+#define COMPARISON_OP_WITH_SIGN(__OP, __IMPL)                              \
+  template <int ToW, bool ToSign>                                          \
+  inline bool operator __OP(const XlsInt<ToW, ToSign> &o) const {          \
+    constexpr int compare_size = std::max(ToW, Width) + (Signed ^ ToSign); \
+    XlsInt<compare_size, Signed | ToSign> valA(o);                         \
+    XlsInt<compare_size, Signed | ToSign> valB(*this);                     \
+    bool ret;                                                              \
+    asm("fn (fid)(a: bits[i]) -> bits[1] { ret op_6_(aid): bits[1] = "     \
+        "identity(a, pos=(loc)) }"                                         \
+        : "=r"(ret)                                                        \
+        : "i"(1), "parama"(__IMPL<compare_size, Signed | ToSign>::Operate( \
+                      valB.storage, valA.storage)));                       \
+    return ret;                                                            \
   }
 
   COMPARISON_OP_WITH_SIGN(>, GreaterWithSign);
@@ -701,6 +981,9 @@ class XlsInt : public XlsIntBase<Width, Signed> {
     return *this;
   }
 
+  // Width+1 because we need to be able to represent shifting all digits
+  typedef XlsInt<Log2Ceil<Width + 1>, false> index_t;
+
   template <int ToW>
   inline XlsInt<ToW, Signed> slc(index_t offset) const {
     static_assert(index_t::width > 0, "Bug in Log2Ceil");
@@ -709,10 +992,12 @@ class XlsInt : public XlsIntBase<Width, Signed> {
     static_assert(ToW > 0, "Can't slice 0 bits");
     typedef XlsInt<ToW, Signed> Result;
     Result ret;
-    asm("fn (fid)(a: bits[i], o: bits[c]) -> bits[r] { ret op_(aid): bits[r] = "
-        "dynamic_bit_slice(a, o, width=r, pos=(loc)) }"
+    asm("fn (gensym slc)(a: bits[%1], o: bits[%3]) -> bits[%2] { \n"
+        "  ret (gensym slc_result): bits[%2] = "
+        "    dynamic_bit_slice(a, o, width=%2, pos=(loc))\n"
+        "}"
         : "=r"(ret.storage)
-        : "i"(Width), "r"(ToW), "c"(index_t::width), "a"(this->storage),
+        : "i"(Width), "i"(ToW), "i"(index_t::width), "a"(this->storage),
           "o"(offset.storage));
     return ret;
   }
@@ -728,16 +1013,75 @@ class XlsInt : public XlsIntBase<Width, Signed> {
 
   // --- Hack: see comments for BitElemRef
   inline BitElemRef operator[](index_t i) {
-    return BitElemRef(slc<1>(i));
+    return BitElemRef(static_cast<bool>(slc<1>(i)));
 
-    // NOP to ensure that clang parses the set_element function
-    set_element(0, 1);
+    // NOP to ensure that clang parses the set_element functions
+    set_element_bitref(0, 1);
+    set_element_xlsint(0, 1);
+    set_element_int(0, 1);
   }
-  inline XlsInt set_element(index_t i, BitElemRef rvalue) {
+
+  inline XlsInt set_element_bitref(index_t i, BitElemRef rvalue) {
     set_slc(i, XlsInt<1, false>(rvalue));
     return *this;
   }
+
+  inline XlsInt set_element_int(index_t i, int rvalue) {
+    set_slc(i, XlsInt<1, false>(rvalue));
+    return *this;
+  }
+
+  inline XlsInt set_element_xlsint(index_t i, XlsInt<1, false> rvalue) {
+    set_slc(i, rvalue);
+    return *this;
+  }
+
   // --- / Hack
+
+  inline XlsInt reverse() const {
+    XlsInt<Width, false> reverse_out;
+    asm("fn (gensym reverse)(a: bits[i]) -> bits[i] { "
+        "  ret (aid): bits[i] = reverse(a, pos=(loc)) }"
+        : "=r"(reverse_out.storage)
+        : "i"(Width), "a"(this->storage));
+    return reverse_out;
+  }
+
+  inline index_t clz() const {
+    index_t clz_out;
+    asm("fn (gensym clz_func)(a: bits[%1]) -> bits[%3] {\n"
+        "  (gensym reversed_val): bits[%1] = reverse(a, pos=(loc))\n"
+        "  (gensym one_hot_val): bits[%2] = "
+        "       one_hot((gensym reversed_val), lsb_prio=true, pos=(loc))\n"
+        "  ret (gensym encode_val): bits[%3] = "
+        "       encode((gensym one_hot_val), pos=(loc))\n"
+        "}"
+        : "=r"(clz_out)
+        : "i"(Width), "i"(Width + 1), "i"(index_t::width), "a"(this->storage));
+    return clz_out;
+  }
+
+  // Counts leading bits. For unsigned values, it's clz,
+  // for signed, the sign bit is ignored, and leading 1s are counted
+  // for negative values.
+  inline index_t leading_sign() const {
+    if (Signed) {
+      int ret = 0;
+      if ((*this) < 0) {
+        ret = (~(*this)).clz();
+      } else {
+        ret = clz();
+      }
+      return ret - 1;
+    }
+    return clz();
+  }
+
+  inline index_t leading_sign(bool &all_sign) const {
+    index_t ls = leading_sign();
+    all_sign = (ls == Width - Signed);
+    return ls;
+  }
 
   template <int ToW, bool ToSign>
   XlsInt set_slc(index_t offset, XlsInt<ToW, ToSign> slice_raw) {
@@ -756,8 +1100,46 @@ class XlsInt : public XlsIntBase<Width, Signed> {
     return *this;
   }
 
+  template <ac_datatypes::ac_special_val V>
+  inline XlsInt &set_val() {
+    static_assert(
+        !(V == ac_datatypes::AC_VAL_QUANTUM && Width == 1 && Signed),
+        "set_val<AC_VAL_QUANTUM> on a 1-bit signed type: the ac library "
+        "stores a non-canonical +1 here, unrepresentable in 1 signed bit");
+    if constexpr (V == ac_datatypes::AC_VAL_0) {
+      *this = 0;
+    } else if constexpr (V == ac_datatypes::AC_VAL_MIN) {
+      *this = synth_only_internal::MinValue<Width, Signed>::Value();
+    } else if constexpr (V == ac_datatypes::AC_VAL_MAX) {
+      *this = synth_only_internal::MaxValue<Width, Signed>::Value();
+    } else if constexpr (V == ac_datatypes::AC_VAL_QUANTUM) {
+      *this = 1;
+    } else {
+      static_assert(false, "Unsupported special value");
+    }
+    return (*this);
+  }
+
   template <int ToW, bool ToSign>
   friend class XlsInt;
+};
+
+template <int W2, bool S2>
+struct rt_ac_int_T<XlsInt<W2, S2> > {
+  typedef XlsInt<W2, S2> i2_t;
+  template <int W, bool S>
+  struct op1 {
+    typedef XlsInt<W, S> i_t;
+    typedef typename i_t::template rt<W2, S2>::mult mult;
+    typedef typename i_t::template rt<W2, S2>::plus plus;
+    typedef typename i_t::template rt<W2, S2>::minus minus;
+    typedef typename i2_t::template rt<W, S>::minus minus2;
+    typedef typename i_t::template rt<W2, S2>::logic logic;
+    typedef typename i_t::template rt<W2, S2>::div div;
+    typedef typename i2_t::template rt<W, S>::div div2;
+    typedef typename i_t::template rt<W2, S2>::mod mod;
+    typedef typename i2_t::template rt<W, S>::mod mod2;
+  };
 };
 
 template <int Width, bool Signed>
@@ -787,6 +1169,99 @@ OPS_WITH_INT(long, 64, true)
 OPS_WITH_INT(unsigned long, 64, false)
 OPS_WITH_INT(long long, 64, true)
 OPS_WITH_INT(unsigned long long, 64, false)
+
+#define __XLS_SPECIAL_VAL_FOR_INTS(C_TYPE, WI, SI, DC_VALUE)            \
+  template <ac_datatypes::ac_special_val val>                           \
+  inline C_TYPE value(C_TYPE);                                          \
+  template <> /* Value of zero for this C type */                       \
+  inline C_TYPE value<ac_datatypes::AC_VAL_0>(C_TYPE) {                 \
+    return (C_TYPE)0;                                                   \
+  }                                                                     \
+  template <> /* "Don't care" value (uninitialized)for this C type */   \
+  inline C_TYPE value<ac_datatypes::AC_VAL_DC>(C_TYPE) {                \
+    return (C_TYPE)DC_VALUE;                                            \
+  }                                                                     \
+  template <> /* Smallest representable value change for this C type */ \
+  inline C_TYPE value<ac_datatypes::AC_VAL_QUANTUM>(C_TYPE) {           \
+    return (C_TYPE)1;                                                   \
+  }                                                                     \
+  template <> /* Maximum representable value for this C type */         \
+  inline C_TYPE value<ac_datatypes::AC_VAL_MAX>(C_TYPE) {               \
+    return (C_TYPE)(SI ? ~(((C_TYPE)1) << (WI - 1)) : (C_TYPE) - 1);    \
+  }                                                                     \
+  template <> /* Minium representable value for this C type */          \
+  inline C_TYPE value<ac_datatypes::AC_VAL_MIN>(C_TYPE) {               \
+    return (C_TYPE)(SI ? ((C_TYPE)1) << (WI - 1) : (C_TYPE)0);          \
+  }
+
+// Using 0xDC value repeated for size of C type for "don't care" values in order
+// to distinguish from the normal 0 initialized value.
+__XLS_SPECIAL_VAL_FOR_INTS(bool, 1, false, 1)
+__XLS_SPECIAL_VAL_FOR_INTS(char, 8, true, 0xDC)
+__XLS_SPECIAL_VAL_FOR_INTS(signed char, 8, true, 0xDC)
+__XLS_SPECIAL_VAL_FOR_INTS(unsigned char, 8, false, 0xDC)
+__XLS_SPECIAL_VAL_FOR_INTS(short, 16, true, 0xDCDC)
+__XLS_SPECIAL_VAL_FOR_INTS(unsigned short, 16, false, 0xDCDC)
+__XLS_SPECIAL_VAL_FOR_INTS(int, 32, true, 0xDCDCDCDC)
+__XLS_SPECIAL_VAL_FOR_INTS(unsigned int, 32, false, 0xDCDCDCDC)
+__XLS_SPECIAL_VAL_FOR_INTS(long, 64, true, 0xDCDCDCDCDCDCDCDC)
+__XLS_SPECIAL_VAL_FOR_INTS(unsigned long, 64, false, 0xDCDCDCDCDCDCDCDC)
+__XLS_SPECIAL_VAL_FOR_INTS(long long, 64, true, 0xDCDCDCDCDCDCDCDC)
+__XLS_SPECIAL_VAL_FOR_INTS(unsigned long long, 64, false, 0xDCDCDCDCDCDCDCDC)
+
+#undef __XLS_SPECIAL_VAL_FOR_INTS
+
+#define __XLS_INIT_ARRAY_SPECIAL_VAL_FOR_INTS(C_TYPE)                   \
+  template <ac_datatypes::ac_special_val V, int Size>                   \
+  inline bool init_array(C_TYPE(&a)[Size], int m) {                     \
+    C_TYPE t = value<V>((C_TYPE)0);                                     \
+    _Pragma("hls_unroll yes") for (int i = 0; i < m && i < Size; i++) { \
+      a[i] = t;                                                         \
+    }                                                                   \
+    return true;                                                        \
+  }
+
+namespace ac {
+template <ac_datatypes::ac_special_val V, int W, bool S, size_t Size>
+inline bool init_array(XlsInt<W, S> (&a)[Size], int n) {
+  XlsInt<W, S> t;
+  t.template set_val<V>();
+#pragma hls_unroll yes
+  for (int i = 0; i < n && i < Size; i++) {
+    a[i] = t;
+  }
+  return true;
+}
+
+template <ac_datatypes::ac_special_val V, int W, bool S, size_t Size1,
+          size_t Size2>
+inline bool init_array(XlsInt<W, S> (&a)[Size1][Size2], int n) {
+  XlsInt<W, S> t;
+  t.template set_val<V>();
+#pragma hls_unroll yes
+  for (int i = 0; i < n && i < Size1; i++) {
+#pragma hls_unroll yes
+    for (int j = 0; j < n && j < Size2; j++) {
+      a[i][j] = t;
+    }
+  }
+  return true;
+}
+
+__XLS_INIT_ARRAY_SPECIAL_VAL_FOR_INTS(bool)
+__XLS_INIT_ARRAY_SPECIAL_VAL_FOR_INTS(char)
+__XLS_INIT_ARRAY_SPECIAL_VAL_FOR_INTS(signed char)
+__XLS_INIT_ARRAY_SPECIAL_VAL_FOR_INTS(unsigned char)
+__XLS_INIT_ARRAY_SPECIAL_VAL_FOR_INTS(signed short)
+__XLS_INIT_ARRAY_SPECIAL_VAL_FOR_INTS(unsigned short)
+__XLS_INIT_ARRAY_SPECIAL_VAL_FOR_INTS(signed int)
+__XLS_INIT_ARRAY_SPECIAL_VAL_FOR_INTS(unsigned int)
+__XLS_INIT_ARRAY_SPECIAL_VAL_FOR_INTS(signed long)
+__XLS_INIT_ARRAY_SPECIAL_VAL_FOR_INTS(unsigned long)
+__XLS_INIT_ARRAY_SPECIAL_VAL_FOR_INTS(signed long long)
+__XLS_INIT_ARRAY_SPECIAL_VAL_FOR_INTS(unsigned long long)
+#undef __XLS_INIT_ARRAY_SPECIAL_VAL_FOR_INTS
+}  // namespace ac
 
 #undef ac_int
 

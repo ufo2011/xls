@@ -14,6 +14,9 @@
 
 #include "xls/noc/config_ng/network_topology_component.h"
 
+#include "absl/status/status.h"
+#include "xls/noc/config_ng/coordinate.h"
+#include "xls/noc/config_ng/network_component.h"
 #include "xls/noc/config_ng/network_component_visitor_abstract.h"
 
 namespace xls::noc {
@@ -27,7 +30,7 @@ absl::Status ChannelTopologyComponent::Visit(NetworkComponentVisitor& v) {
   return v.Handle(*this);
 }
 
-ChannelTopologyComponent::~ChannelTopologyComponent() {}
+ChannelTopologyComponent::~ChannelTopologyComponent() = default;
 
 ReceivePortTopologyComponent::ReceivePortTopologyComponent(NetworkView* view)
     : NetworkComponent(view) {}
@@ -36,7 +39,7 @@ absl::Status ReceivePortTopologyComponent::Visit(NetworkComponentVisitor& v) {
   return v.Handle(*this);
 }
 
-ReceivePortTopologyComponent::~ReceivePortTopologyComponent() {}
+ReceivePortTopologyComponent::~ReceivePortTopologyComponent() = default;
 
 RouterTopologyComponent::RouterTopologyComponent(NetworkView* view)
     : NetworkComponent(view), coordinate_({}) {}
@@ -55,7 +58,7 @@ absl::Status RouterTopologyComponent::Visit(NetworkComponentVisitor& v) {
   return v.Handle(*this);
 }
 
-RouterTopologyComponent::~RouterTopologyComponent() {}
+RouterTopologyComponent::~RouterTopologyComponent() = default;
 
 SendPortTopologyComponent::SendPortTopologyComponent(NetworkView* view)
     : NetworkComponent(view) {}
@@ -64,6 +67,6 @@ absl::Status SendPortTopologyComponent::Visit(NetworkComponentVisitor& v) {
   return v.Handle(*this);
 }
 
-SendPortTopologyComponent::~SendPortTopologyComponent() {}
+SendPortTopologyComponent::~SendPortTopologyComponent() = default;
 
 }  // namespace xls::noc

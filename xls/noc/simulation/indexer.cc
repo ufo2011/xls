@@ -14,8 +14,21 @@
 
 #include "xls/noc/simulation/indexer.h"
 
+#include <cstdint>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
+#include "absl/types/span.h"
+#include "xls/common/status/ret_check.h"
+#include "xls/common/status/status_macros.h"
+#include "xls/noc/simulation/common.h"
+#include "xls/noc/simulation/parameters.h"
 
 namespace xls {
 namespace noc {
@@ -28,7 +41,7 @@ namespace {
 // that that points to a std::pair<T, int64_t>.
 template <typename T, typename IndexTPairCollection>
 absl::StatusOr<std::vector<T>> ConstructOrderedIndex(
-    absl::string_view id_name, const IndexTPairCollection& unordered_index) {
+    std::string_view id_name, const IndexTPairCollection& unordered_index) {
   int64_t count = unordered_index.size();
   if (count == 0) {
     return std::vector<T>();
@@ -64,7 +77,7 @@ absl::Status PortIndexMapBuilder::SetPortIndex(PortId port_id,
                                                int64_t index) {
   if (!nc_to_ports_.contains(port_id.GetNetworkComponentId())) {
     // Add a new nc to the indexer.
-    // Initialze VirtualChannelOrder with all present VCs and
+    // Initialize VirtualChannelOrder with all present VCs and
     // their corresponding index to -1.
     nc_to_ports_.insert({port_id.GetNetworkComponentId(), PortOrder()});
   }
@@ -224,7 +237,7 @@ absl::Status VirtualChannelIndexMapBuilder::SetVirtualChannelIndex(
     PortId port_id, PortParam port_param, int64_t orig_index, int64_t index) {
   if (!port_to_vcs_.contains(port_id)) {
     // Add a new port to the indexer.
-    // Initialze VirtualChannelOrder with all present VCs and
+    // Initialize VirtualChannelOrder with all present VCs and
     // their corresponding index to -1.
     port_to_vcs_.insert({port_id, VirtualChannelOrder()});
     VirtualChannelOrder& vc_order = port_to_vcs_[port_id];
@@ -277,6 +290,11 @@ absl::StatusOr<int64_t> VirtualChannelIndexMapBuilder::GetVirtualChannelIndex(
 
 absl::StatusOr<int64_t> VirtualChannelIndexMap::GetVirtualChannelIndex(
     PortId port_id, VirtualChannelParam vc) const {
+  return GetVirtualChannelIndexByName(port_id, vc.GetName());
+}
+
+absl::StatusOr<int64_t> VirtualChannelIndexMap::GetVirtualChannelIndexByName(
+    PortId port_id, std::string_view vc_name) const {
   if (!port_to_vcs_.contains(port_id)) {
     return absl::OutOfRangeError(
         absl::StrFormat("Port %d has not been indexed", port_id.AsUInt64()));
@@ -285,13 +303,13 @@ absl::StatusOr<int64_t> VirtualChannelIndexMap::GetVirtualChannelIndex(
   const std::vector<VirtualChannelParam>& virtual_channel_index =
       port_to_vcs_.at(port_id);
   for (int64_t i = 0; i < virtual_channel_index.size(); ++i) {
-    if (virtual_channel_index[i].GetName() == vc.GetName()) {
+    if (virtual_channel_index[i].GetName() == vc_name) {
       return i;
     }
   }
 
   return absl::OutOfRangeError(absl::StrFormat(
-      "Unable to find virtual channel %s associated with port %d", vc.GetName(),
+      "Unable to find virtual channel %s associated with port %d", vc_name,
       port_id.AsUInt64()));
 }
 

@@ -8,45 +8,95 @@ theme:
   name: "material"
 nav:
   - Overview: 'README.md'
+  - Talks: 'talks.md'
+  - Tutorials:
+    - Overview: 'tutorials/index.md'
+    - DSLX:
+      - Hello, XLS!: 'tutorials/hello_xls.md'
+      - Basic logic: 'tutorials/float_to_int.md'
+      - Intro to parameterics: 'tutorials/intro_to_parametrics.md'
+      - For expressions: 'tutorials/crc32.md'
+      - Enumerate and match: 'tutorials/prefix_scan.md'
+      - What is a Proc?: 'tutorials/what_is_a_proc.md'
+      - How to use Procs: 'tutorials/how_to_use_procs.md'
+      - Dataflow & Time: 'tutorials/dataflow_and_time.md'
+    - \[contrib\] XLS[cc]:
+      - Overview: 'tutorials/xlscc_overview.md'
+      - Integers: 'tutorials/xlscc_integers.md'
+      - Channels: 'tutorials/xlscc_channels.md'
+      - Memory: 'tutorials/xlscc_memory.md'
+      - State: 'tutorials/xlscc_state.md'
+      - Pipelined Loops: 'tutorials/xlscc_pipelined_loops.md'
+  - FAQ: 'faq.md'
   - IR:
+    - Overview: 'ir_overview.md'
     - Semantics: 'ir_semantics.md'
-    - Optimizations: 'optimizations.md'
+    - Optimizations:
+      - Overview: 'optimizations/optimizations.md'
+      - Passes: 'passes_list.md'
+      - Dev Passes: 'dev_passes_list.md'
+      - Profiling: 'ir_pass_profiling.md'
     - Scheduling:
       - Overview: 'scheduling.md'
       - Delay Estimation: 'delay_estimation.md'
-    - Visualizer: 'ir_visualization.md'
-    - Native JIT:
+    - Ir Visualization:
+      - Web Visualizer: 'ir_visualization.md'
+      - Cytoscape: 'ir_to_cytoscape.md'
+    - Native JIT/AOT:
       - Overview: 'ir_jit.md'
       - Data Layout: 'data_layout.md'
     - Formal: 'solvers.md'
+    - Symbolic Execution: 'symbolic_execution.md'
+    - Elaboration: 'elaboration.md'
+    - IR Fuzzer: 'ir_fuzzer.md'
   - DSLX:
     - Reference: 'dslx_reference.md'
-    - Examples:
-      - CRC32: 'dslx_intro_example1.md'
-      - FP adder: 'fpadd_example.md'
-      - Prefix Scan: 'dslx_intro_example3.md'
-    - Fuzzer: "fuzzer.md"
+    - Standard Library : 'dslx_std.md'
+    - Floating Point: 'floating_point.md'
+    - Fuzzer: 'fuzzer.md'
+    - Interpreter: 'dslx_bytecode_interpreter.md'
+    - FFI: 'dslx_ffi.md'
+    - Language Server: 'dslx_language_server.md'
+    - Type System: 'dslx_type_system.md'
   - Code Generation:
+    - Codegen Options: 'codegen_options.md'
+    - IR Lowering: 'ir_lowering.md'
     - VAST: 'vast.md'
   - Tools:
     - Build System: 'build_system.md'
+    - Bazel Rules And Macros: 'bazel_rules_macros.md'
     - Quick Start: 'tools_quick_start.md'
+    - Releases: 'releases.md'
     - Listing: 'tools.md'
     - Interpreters: 'interpreters.md'
   - Development:
     - Contributing: 'contributing.md'
     - Style Guide: 'xls_style.md'
     - Adding a new IR operation: 'adding_ir_operation.md'
+    - Ideas and Projects: 'ideas_and_projects.md'
+    - FPGA characterization (experimental): 'fpga_characterization.md'
+    - Design Docs:
+      - Legalize Multiple Channel Ops Per Channel (v1): 'design_docs/legalize_multiple_channel_ops_per_channel_v1.md'
+      - Legalize Multiple Channel Ops Per Channel (v2): 'design_docs/legalize_multiple_channel_ops_per_channel_v2.md'
+      - Proc-scoped channels: 'design_docs/proc_scoped_channels.md'
+      - Synchronous Procs: 'design_docs/synchronous_procs.md'
+      - DSLX Pattern Exhaustiveness: 'design_docs/dslx_pattern_exhaustiveness.md'
+      - DSLX Configured Values: 'design_docs/dslx_configured_values.md'
+      - Optimizations:
+        - Value Set Simplification:
+          - Division: 'design_docs/optimizations/value_set_simp/division_simplification_design.md'
+      - XLS[cc] Activation Barriers: 'design_docs/xlscc_activation_barriers.md'
+    - Releasing: 'releasing.md'
   - NoC:
-    - Overview: 'xls_noc_readme.md'
+    - Overview: 'noc/xls_noc_readme.md'
     - Topologies:
-      - Overview: 'xls_noc_topologies.md'
-      - Dimension Order: 'xls_noc_dimension_order_topology.md'
-      - Tree: 'xls_noc_tree_topology.md'
-      - k-ary n-fly Butterfly: 'xls_noc_butterfly_topology.md'
-      - Fully Connected: 'xls_noc_fully_connected_topology.md'
-      - Star: 'xls_noc_star_topology.md'
-    - Glossary: 'xls_noc_glossary.md'
+      - Overview: 'noc/xls_noc_topologies.md'
+      - Dimension Order: 'noc/xls_noc_dimension_order_topology.md'
+      - Tree: 'noc/xls_noc_tree_topology.md'
+      - k-ary n-fly Butterfly: 'noc/xls_noc_butterfly_topology.md'
+      - Fully Connected: 'noc/xls_noc_fully_connected_topology.md'
+      - Star: 'noc/xls_noc_star_topology.md'
+    - Glossary: 'noc/xls_noc_glossary.md'
 markdown_extensions:
   - mdx_truly_sane_lists
   - pymdownx.superfences
@@ -61,3 +111,16 @@ markdown_extensions:
         # dslx-bad indicates the code block is showing something wrong.
         - name: dslx-bad
           lang: rust
+  - pymdownx.arithmatex:
+        generic: true
+  - footnotes
+  - attr_list
+  - admonition
+extra_javascript:
+  - https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+plugins:
+  - exclude:
+      glob: BUILD
+  - search
+  - print-site

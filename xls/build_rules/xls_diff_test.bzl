@@ -1,0 +1,99 @@
+# Copyright 2025 The XLS Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""XLS Diff-test with a target for updating the golden file."""
+
+load("@bazel_skylib//rules:diff_test.bzl", _base_diff_test = "diff_test")
+
+def _update_golden_impl(ctx):
+    update_bin = ctx.actions.declare_file(ctx.label.name + "-binary.sh")
+    ctx.actions.write(
+        output = update_bin,
+        content = r"""#!/usr/bin/env bash
+
+set -xeuo pipefail
+
+SRC="{file}"
+DST="$BUILD_WORKING_DIRECTORY/{gold}"
+cp $SRC $DST
+""".format(
+            file = ctx.file.new_golden.path[len(ctx.file.new_golden.root.path) + 1:],
+            gold = ctx.file.golden.path,
+        ),
+        is_executable = True,
+    )
+    return DefaultInfo(
+        executable = update_bin,
+        files = depset(direct = [update_bin]),
+        runfiles = ctx.runfiles(files = [update_bin, ctx.file.new_golden]),
+    )
+
+_xls_update_golden = rule(
+    implementation = _update_golden_impl,
+    attrs = {
+        "new_golden": attr.label(
+            doc = "Label of the file being compared to the golden file.",
+            allow_single_file = True,
+            mandatory = True,
+        ),
+        "golden": attr.label(
+            allow_single_file = True,
+            doc = "File where the golden file is.",
+            mandatory = True,
+        ),
+    },
+    executable = True,
+)
+
+def diff_test(name, file, golden, sed_transform = None, failure_message = None, tags = [], **kwargs):
+    """A test that compares two files and provides a target to update the golden.
+
+    This macro instantiates a diff_test rule that compares `file` with `golden`.
+    It also creates an executable target `<name>_update_golden` which, when run,
+    overwrites the golden file with the contents of `file` to easily update
+    expectations.
+
+    Args:
+      name: The name of the test target.
+      file: Label of the file being compared to the golden file.
+      golden: Label of the golden file to compare against.
+      sed_transform: A sed script to apply to the files before comparing.
+      failure_message: Additional message to log if the files' contents do not
+        match.
+      tags: List of tags to apply to the targets.
+      **kwargs: Additional keyword arguments to pass to the underlying
+        diff_test rule.
+    """
+    if sed_transform != None:
+        native.genrule(
+            name = name + "_sed_transform",
+            srcs = [file],
+            outs = [name + "_sed_transform.txt"],
+            cmd = "sed -E '" + sed_transform + "' < $< > $@",
+        )
+        file = name + "_sed_transform.txt"
+    _base_diff_test(
+        name = name,
+        file1 = file,
+        file2 = golden,
+        failure_message = failure_message,
+        tags = tags,
+        **kwargs
+    )
+    _xls_update_golden(
+        name = name + "_update_golden",
+        new_golden = file,
+        golden = golden,
+        tags = tags + ["local", "manual"],
+    )

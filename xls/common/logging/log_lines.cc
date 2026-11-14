@@ -14,14 +14,18 @@
 
 #include "xls/common/logging/log_lines.h"
 
-#include "absl/strings/string_view.h"
-#include "xls/common/logging/logging.h"
+#include <cstddef>
+#include <string_view>
+
+#include "absl/base/log_severity.h"
+#include "absl/log/log.h"
+#include "absl/strings/string_view.h"  // NOLINT for ClippedSubstr()
 
 namespace xls {
 namespace logging {
 
-void LogLines(absl::LogSeverity severity, absl::string_view text,
-              const char* file_name, int line_number) {
+void LogLines(absl::LogSeverity severity, std::string_view text,
+              std::string_view file_name, int line_number) {
   // Since there are multiple lines, using FATAL will cause only
   // the first line to be printed, so downgrade to ERROR, but
   // remember that it is FATAL so that we abort after logging everything.
@@ -34,9 +38,9 @@ void LogLines(absl::LogSeverity severity, absl::string_view text,
   size_t current_position = 0;
   size_t next_newline = text.find_first_of('\n');
   while ((current_position < text.size()) &&
-         (next_newline != absl::string_view::npos)) {
+         (next_newline != std::string_view::npos)) {
     size_t length = next_newline - current_position;
-    XLS_LOG(LEVEL(severity)).AtLocation(file_name, line_number)
+    LOG(LEVEL(severity)).AtLocation(file_name, line_number)
         << absl::ClippedSubstr(text, current_position, length);
     current_position = next_newline + 1;
     next_newline = text.find_first_of('\n', current_position);
@@ -45,13 +49,13 @@ void LogLines(absl::LogSeverity severity, absl::string_view text,
   // In case the message does not end in a newline, print
   // whatever text is left over.
   if (current_position < text.size()) {
-    XLS_LOG(LEVEL(severity)).AtLocation(file_name, line_number)
+    LOG(LEVEL(severity)).AtLocation(file_name, line_number)
         << absl::ClippedSubstr(text, current_position);
   }
 
   // Respect FATAL
   if (original_severity == absl::LogSeverity::kFatal) {
-    XLS_LOG(FATAL) << "Aborting due to previous errors.";
+    LOG(FATAL) << "Aborting due to previous errors.";
   }
 }
 

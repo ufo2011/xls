@@ -12,18 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import xls.dslx.tests.mod_simple_const
+import xls.dslx.tests.mod_simple_const;
 
 const LOCAL_FOUR = u32:4;
 
-fn main(x: u32) -> u32 {
-  x + mod_simple_const::FOUR
-}
+fn main(x: u32) -> u32 { x + mod_simple_const::FOUR }
 
-#![test]
+#[test]
 fn main_test() {
-  let _ = assert_eq(main(u32:0), u32:4);
-  let _ = assert_eq(main(u32:1), u32:5);
-  let _ = assert_eq(LOCAL_FOUR, mod_simple_const::FOUR);
-  ()
+    assert_eq(main(u32:0), u32:4);
+    assert_eq(main(u32:1), u32:5);
+    assert_eq(LOCAL_FOUR, mod_simple_const::FOUR);
 }

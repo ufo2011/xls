@@ -14,27 +14,68 @@
 
 # Build rules for XLS examples.
 
-load("//xls/build_rules:build_defs.bzl", "dslx_test")
+load(
+    "//xls/build_rules:xls_build_defs.bzl",
+    "xls_dslx_opt_ir",
+    "xls_dslx_opt_ir_test",
+    "xls_dslx_test",
+)
 
 package(
+    default_applicable_licenses = ["//:license"],
     default_visibility = ["//xls:xls_internal"],
+    features = [
+        "layering_check",
+        "parse_headers",
+    ],
     licenses = ["notice"],
 )
 # Examples used in the DSLX introduction document.
 
-dslx_test(
+xls_dslx_opt_ir(
     name = "crc32_one_byte",
     srcs = ["crc32_one_byte.x"],
+    dslx_top = "crc32_one_byte",
+    ir_conv_args = {"lower_to_proc_scoped_channels": "true"},
 )
 
-dslx_test(
+xls_dslx_opt_ir_test(
+    name = "crc32_one_byte_test",
+    dep = ":crc32_one_byte",
+)
+
+xls_dslx_opt_ir(
     name = "crc32_one_byte_inferred",
     srcs = ["crc32_one_byte_inferred.x"],
+    dslx_top = "crc32_one_byte_inferred",
+    ir_conv_args = {"lower_to_proc_scoped_channels": "true"},
 )
 
-dslx_test(
+xls_dslx_opt_ir_test(
+    name = "crc32_one_byte_inferred_test",
+    dep = ":crc32_one_byte_inferred",
+)
+
+xls_dslx_opt_ir(
     name = "prefix_scan_equality",
     srcs = ["prefix_scan_equality.x"],
-    # TODO(leary): 2019-07-24 Missing conversion of 'for/enumerate'.
-    convert_ir = False,
+    dslx_top = "prefix_scan_eq",
+    ir_conv_args = {"lower_to_proc_scoped_channels": "true"},
+)
+
+xls_dslx_opt_ir_test(
+    name = "prefix_scan_equality_test",
+    dep = ":prefix_scan_equality",
+)
+
+xls_dslx_test(
+    name = "prefix_scan_equality_dslx_test",
+    srcs = ["prefix_scan_equality.x"],
+    dslx_test_args = {"compare": "jit"},
+)
+
+filegroup(
+    name = "x_files",
+    srcs = glob(["*.x"]),
+    visibility = ["//xls:xls_internal"],
 )

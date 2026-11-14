@@ -12,10 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# cc_proto_library is used in this file
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 
 package(
+    default_applicable_licenses = ["//:license"],
     default_visibility = ["//xls:xls_internal"],
+    features = [
+        "layering_check",
+        "parse_headers",
+    ],
     licenses = ["notice"],  # Apache 2.0
 )
 
@@ -42,8 +50,7 @@ cc_library(
     hdrs = ["link_config_proto_builder.h"],
     deps = [
         ":network_config_cc_proto",
-        "//xls/common:proto_adaptor_utils",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -52,8 +59,9 @@ cc_test(
     srcs = ["link_config_proto_builder_test.cc"],
     deps = [
         ":link_config_proto_builder",
+        ":network_config_cc_proto",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -63,8 +71,7 @@ cc_library(
     hdrs = ["virtual_channel_config_proto_builder.h"],
     deps = [
         ":network_config_cc_proto",
-        "//xls/common:proto_adaptor_utils",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -72,9 +79,10 @@ cc_test(
     name = "virtual_channel_config_proto_builder_test",
     srcs = ["virtual_channel_config_proto_builder_test.cc"],
     deps = [
+        ":network_config_cc_proto",
         ":virtual_channel_config_proto_builder",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -84,8 +92,7 @@ cc_library(
     hdrs = ["port_config_proto_builder.h"],
     deps = [
         ":network_config_cc_proto",
-        "//xls/common:proto_adaptor_utils",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -93,9 +100,10 @@ cc_test(
     name = "port_config_proto_builder_test",
     srcs = ["port_config_proto_builder_test.cc"],
     deps = [
+        ":network_config_cc_proto",
         ":port_config_proto_builder",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -106,7 +114,7 @@ cc_library(
     deps = [
         ":network_config_cc_proto",
         ":network_config_proto_builder_utils",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -114,9 +122,10 @@ cc_test(
     name = "routing_scheme_config_proto_builder_test",
     srcs = ["routing_scheme_config_proto_builder_test.cc"],
     deps = [
+        ":network_config_cc_proto",
         ":routing_scheme_config_proto_builder",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -127,8 +136,8 @@ cc_library(
     deps = [
         ":network_config_cc_proto",
         ":network_config_proto_builder_utils",
-        "//xls/common:proto_adaptor_utils",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -137,8 +146,10 @@ cc_test(
     srcs = ["arbiter_scheme_config_proto_builder_test.cc"],
     deps = [
         ":arbiter_scheme_config_proto_builder",
+        ":network_config_cc_proto",
+        ":network_config_proto_builder_utils",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -151,7 +162,7 @@ cc_library(
         ":network_config_cc_proto",
         ":port_config_proto_builder",
         ":routing_scheme_config_proto_builder",
-        "//xls/common:proto_adaptor_utils",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -159,9 +170,14 @@ cc_test(
     name = "router_config_proto_builder_test",
     srcs = ["router_config_proto_builder_test.cc"],
     deps = [
+        ":arbiter_scheme_config_proto_builder",
+        ":network_config_cc_proto",
+        ":network_config_proto_builder_utils",
+        ":port_config_proto_builder",
         ":router_config_proto_builder",
+        ":routing_scheme_config_proto_builder",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -175,8 +191,7 @@ cc_library(
         ":port_config_proto_builder",
         ":router_config_proto_builder",
         ":virtual_channel_config_proto_builder",
-        "@com_google_absl//absl/status:statusor",
-        "//xls/common:proto_adaptor_utils",
+        "@abseil-cpp//absl/status:statusor",
     ],
 )
 
@@ -184,10 +199,14 @@ cc_test(
     name = "network_config_proto_builder_test",
     srcs = ["network_config_proto_builder_test.cc"],
     deps = [
+        ":link_config_proto_builder",
+        ":network_config_cc_proto",
         ":network_config_proto_builder",
+        ":router_config_proto_builder",
+        ":virtual_channel_config_proto_builder",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -213,7 +232,7 @@ cc_library(
     deps = [
         ":network_config_builder_options_cc_proto",
         ":network_config_cc_proto",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -222,8 +241,10 @@ cc_test(
     srcs = ["common_network_config_builder_options_proto_builder_test.cc"],
     deps = [
         ":common_network_config_builder_options_proto_builder",
+        ":network_config_builder_options_cc_proto",
+        ":network_config_cc_proto",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -233,7 +254,7 @@ cc_library(
     hdrs = ["custom_network_config_builder_options_proto_builder.h"],
     deps = [
         ":network_config_builder_options_cc_proto",
-        "//xls/common/logging",
+        "@abseil-cpp//absl/log:die_if_null",
     ],
 )
 
@@ -242,7 +263,8 @@ cc_test(
     srcs = ["custom_network_config_builder_options_proto_builder_test.cc"],
     deps = [
         ":custom_network_config_builder_options_proto_builder",
+        ":network_config_builder_options_cc_proto",
         "//xls/common:xls_gunit_main",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )

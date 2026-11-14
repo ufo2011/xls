@@ -15,7 +15,10 @@
 #ifndef XLS_NOC_CONFIG_ARBITER_SCHEME_CONFIG_PROTO_BUILDER_H_
 #define XLS_NOC_CONFIG_ARBITER_SCHEME_CONFIG_PROTO_BUILDER_H_
 
-#include "xls/common/logging/logging.h"
+#include <string_view>
+
+#include "absl/log/die_if_null.h"
+#include "absl/types/span.h"
 #include "xls/noc/config/network_config.pb.h"
 #include "xls/noc/config/network_config_proto_builder_utils.h"
 
@@ -25,9 +28,9 @@ namespace xls::noc {
 class ArbiterSchemeConfigProtoBuilder {
  public:
   // proto cannot be nullptr.
-  ArbiterSchemeConfigProtoBuilder(
+  explicit ArbiterSchemeConfigProtoBuilder(
       RouterConfigProto::ArbiterSchemeConfigProto* proto)
-      : proto_(XLS_DIE_IF_NULL(proto)) {}
+      : proto_(ABSL_DIE_IF_NULL(proto)) {}
 
   // If the priority arbiter scheme is not enabled, it enables the priority
   // arbiter scheme within the proto, and disables any arbiter scheme enabled.
@@ -35,7 +38,7 @@ class ArbiterSchemeConfigProtoBuilder {
   // assigned to an output port. A higher priority is associated with the
   // element at the lower index within the list.
   ArbiterSchemeConfigProtoBuilder& WithPriorityEntry(
-      absl::string_view output_port_name,
+      std::string_view output_port_name,
       absl::Span<const PortVirtualChannelTuple> priority_list);
 
  private:

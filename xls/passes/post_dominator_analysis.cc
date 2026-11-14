@@ -14,21 +14,24 @@
 
 #include "xls/passes/post_dominator_analysis.h"
 
-#include <algorithm>
-#include <cstdio>
-#include <queue>
+#include <cstdint>
+#include <iterator>
+#include <memory>
+#include <utility>
+#include <vector>
 
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
-#include "absl/memory/memory.h"
-#include "absl/meta/type_traits.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "xls/common/status/ret_check.h"
-#include "xls/ir/function.h"
-#include "xls/ir/node_iterator.h"
-#include "xls/ir/proc.h"
+#include "xls/common/status/status_macros.h"
+#include "xls/ir/node.h"
+#include "xls/ir/node_util.h"
+#include "xls/ir/nodes.h"
+#include "xls/ir/topo_sort.h"
 
 namespace xls {
 namespace {
@@ -86,19 +89,37 @@ std::vector<NodeIndex> IntersectSortedLists(
 
 }  // namespace
 
+std::vector<Node*> LazyPostDominatorAnalysis::ComputeInfo(
+    Node* node, absl::Span<const std::vector<Node*>* const> user_infos) const {
+  if (user_infos.empty() || bound_function()->HasImplicitUse(node)) {
+    return {node};
+  }
+  std::vector<Node*> post_dominators(user_infos[0]->begin(),
+                                     user_infos[0]->end());
+  for (const std::vector<Node*>* user_info : user_infos) {
+    std::vector<Node*> next_post_doms;
+    absl::c_set_intersection(post_dominators, *user_info,
+                             std::back_inserter(next_post_doms),
+                             NodeIdGreaterThan);
+    post_dominators = std::move(next_post_doms);
+  }
+  auto it = absl::c_lower_bound(post_dominators, node, NodeIdGreaterThan);
+  post_dominators.insert(it, node);
+  return post_dominators;
+}
+
+absl::Status LazyPostDominatorAnalysis::MergeWithGiven(
+    std::vector<Node*>& info, const std::vector<Node*>& given) const {
+  info = given;
+  return absl::OkStatus();
+}
+
 /* static */ absl::StatusOr<std::unique_ptr<PostDominatorAnalysis>>
 PostDominatorAnalysis::Run(FunctionBase* f) {
-  auto analysis = absl::make_unique<PostDominatorAnalysis>();
+  auto analysis = std::make_unique<PostDominatorAnalysis>();
 
   // A reverse topological sort of the function nodes.
-  NodeIterator r = ReverseTopoSort(f);
-  std::vector<Node*> reverse_toposort(r.begin(), r.end());
-
-  // Map from node to index in a reverse topo sort.
-  absl::flat_hash_map<Node*, NodeIndex> node_index;
-  for (NodeIndex i = 0; i < reverse_toposort.size(); ++i) {
-    node_index[reverse_toposort[i]] = i;
-  }
+  XLS_ASSIGN_OR_RETURN(std::vector<Node*> reverse_toposort, ReverseTopoSort(f));
 
   // Construct the postdominators for each node. Postdominators are gathered as
   // a sorted vector containing the node indices (in a reverse toposort) of the
@@ -108,7 +129,20 @@ PostDominatorAnalysis::Run(FunctionBase* f) {
     Node* node = reverse_toposort[i];
     std::vector<absl::Span<const NodeIndex>> user_postdominators;
     for (Node* user : node->users()) {
+      // If the use is only through the `state_read` parameter, then it's only
+      // being used to refer to the state element; the value is irrelevant.
+      if (user->Is<Next>() && user->As<Next>()->value() != node &&
+          user->As<Next>()->predicate() != node) {
+        continue;
+      }
       user_postdominators.push_back(postdominators.at(user));
+    }
+    // If a node has an implicit use, then there exists an alternate path to a
+    // root node other than its users, so it can't be dominated by anything
+    // other than itself.
+    if (f->HasImplicitUse(node)) {
+      postdominators[node] = std::vector<NodeIndex>({i});
+      continue;
     }
     // The postdominators of a node is the intersection of the lists of
     // postdominators for its users plus the node itself.
@@ -132,8 +166,7 @@ PostDominatorAnalysis::Run(FunctionBase* f) {
         for (auto& [base_node, node_set] : node_to_node_set) {
           auto& node_vect = (*node_to_node_vect)[base_node];
           node_vect.insert(node_vect.begin(), node_set.begin(), node_set.end());
-          std::sort(node_vect.begin(), node_vect.end(),
-                    [](Node* a, Node* b) { return a->id() < b->id(); });
+          SortByNodeId(&node_vect);
         }
       };
   XLS_RET_CHECK(

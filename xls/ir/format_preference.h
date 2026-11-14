@@ -16,9 +16,9 @@
 #define XLS_IR_FORMAT_PREFERENCE_H_
 
 #include <ostream>
+#include <string_view>
 
 #include "absl/status/statusor.h"
-#include "absl/strings/string_view.h"
 
 namespace xls {
 
@@ -29,14 +29,28 @@ enum class FormatPreference {
   // hexadecimal is used.
   kDefault,
   kBinary,
-  kDecimal,
+  kSignedDecimal,
+  kUnsignedDecimal,
   kHex,
+  kPlainBinary,  // No 0b prefix and no separators as in Rust {:b} and Verilog
+                 // %b
+  kZeroPaddedBinary,  // No 0b prefix, with separators and Verilog %b
+  kPlainHex,  // No 0x prefix and no separators as in Rust {:x} and Verilog %h
+  kZeroPaddedHex  // similar to kPlainHex, but with zero padding
 };
 
-absl::string_view FormatPreferenceToString(FormatPreference preference);
+std::string_view FormatPreferenceToString(FormatPreference preference);
 
-absl::StatusOr<FormatPreference> FormatPreferenceFromString(
-    absl::string_view s);
+// Converts a format preference into a Rust/DSLX-style format specifier that can
+// be used in DSLX source or printed XLS IR.
+std::string_view FormatPreferenceToXlsSpecifier(FormatPreference preference);
+
+// Converts a format preference into a Verilog-style format specifier that can
+// be used in generated Verilog output.
+std::string_view FormatPreferenceToVerilogSpecifier(
+    FormatPreference preference);
+
+absl::StatusOr<FormatPreference> FormatPreferenceFromString(std::string_view s);
 
 inline std::ostream& operator<<(std::ostream& os, FormatPreference preference) {
   os << FormatPreferenceToString(preference);

@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![test]
+#[test]
 fn comparisons() {
-  let _: () = assert_eq(true, u32:2 < u32:3);
-  let _: () = assert_eq(true, u32:2 <= u32:3);
-  let _: () = assert_eq(false, u32:2 > u32:3);
-  let _: () = assert_eq(false, u32:2 >= u32:3);
-  let _: () = assert_eq(false, u32:2 == u32:3);
-  let _: () = assert_eq(true, u32:2 != u32:3);
-  ()
+    assert_eq(true, u32:2 < u32:3);
+    assert_eq(true, u32:2 <= u32:3);
+    assert_eq(false, u32:2 > u32:3);
+    assert_eq(false, u32:2 >= u32:3);
+    assert_eq(false, u32:2 == u32:3);
+    assert_eq(true, u32:2 != u32:3);
 }

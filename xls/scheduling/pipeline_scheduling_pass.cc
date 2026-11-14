@@ -14,23 +14,134 @@
 
 #include "xls/scheduling/pipeline_scheduling_pass.h"
 
+#include <cstdint>
+#include <optional>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_format.h"
+#include "absl/types/optional_ref.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/ir/node.h"
+#include "xls/ir/proc.h"
+#include "xls/ir/proc_elaboration.h"
+#include "xls/passes/pass_base.h"
+#include "xls/scheduling/pipeline_schedule.h"
+#include "xls/scheduling/run_pipeline_schedule.h"
+#include "xls/scheduling/schedule_graph.h"
+#include "xls/scheduling/scheduling_options.h"
+#include "xls/scheduling/scheduling_pass.h"
 
 namespace xls {
 
+namespace {
+
+// Adds cycle constraints from a PipelineSchedule into SchedulingOptions.
+absl::Status AddCycleConstraints(const PipelineSchedule& schedule,
+                                 SchedulingOptions& scheduling_options) {
+  if (schedule.empty()) {
+    return absl::OkStatus();
+  }
+
+  absl::flat_hash_map<Node*, int64_t> existing_constraints;
+  for (const SchedulingConstraint& constraint :
+       scheduling_options.constraints()) {
+    if (std::holds_alternative<NodeInCycleConstraint>(constraint)) {
+      const NodeInCycleConstraint& nic =
+          std::get<NodeInCycleConstraint>(constraint);
+      auto [it, inserted] =
+          existing_constraints.try_emplace(nic.GetNode(), nic.GetCycle());
+      if (!inserted && it->second != nic.GetCycle()) {
+        return absl::InvalidArgumentError(absl::StrFormat(
+            "Node %s has conflicting cycle constraints: constrained to both %d "
+            "and %d",
+            nic.GetNode()->GetName(), it->second, nic.GetCycle()));
+      }
+    }
+  }
+
+  for (int64_t c = 0; c < schedule.length(); ++c) {
+    for (Node* node : schedule.nodes_in_cycle(c)) {
+      if (IsUntimed(node)) {
+        continue;
+      }
+
+      auto it = existing_constraints.find(node);
+      if (it == existing_constraints.end()) {
+        // No existing constraint; add this one.
+        scheduling_options.add_constraint(NodeInCycleConstraint(node, c));
+        continue;
+      }
+
+      // Otherwise, there's an existing constraint; we either match it, or fail
+      // with a contradiction.
+      if (it->second == c) {
+        // Already constrained to this cycle.
+        continue;
+      }
+      return absl::InvalidArgumentError(
+          absl::StrFormat("Schedule contradicts cycle constraints for node %s: "
+                          "scheduled for cycle %d, but constrained to cycle %d",
+                          node->GetName(), c, it->second));
+    }
+  }
+  return absl::OkStatus();
+}
+
+}  // namespace
+
 absl::StatusOr<bool> PipelineSchedulingPass::RunInternal(
-    SchedulingUnit* unit, const SchedulingPassOptions& options,
-    SchedulingPassResults* results) const {
-  XLS_RET_CHECK(!unit->schedule.has_value())
-      << "Package " << unit->name() << " already has a schedule.";
+    Package* package, const SchedulingPassOptions& options,
+    PassResults* results, SchedulingContext& context) const {
   XLS_RET_CHECK_NE(options.delay_estimator, nullptr);
-  XLS_ASSIGN_OR_RETURN(Function * entry, unit->package->EntryFunction());
-  XLS_ASSIGN_OR_RETURN(unit->schedule,
-                       PipelineSchedule::Run(entry, *options.delay_estimator,
-                                             options.scheduling_options));
-  return true;
+  bool changed = false;
+
+  XLS_ASSIGN_OR_RETURN(std::vector<FunctionBase*> schedulable_functions,
+                       context.GetSchedulableFunctions());
+
+  // Scheduling of procs with proc-scoped channels requires an elaboration.
+  std::optional<ProcElaboration> elab;
+  if (package->ChannelsAreProcScoped() && !schedulable_functions.empty() &&
+      schedulable_functions.front()->IsProc()) {
+    XLS_ASSIGN_OR_RETURN(Proc * top, package->GetTopAsProc());
+    XLS_ASSIGN_OR_RETURN(elab, ProcElaboration::Elaborate(top));
+  }
+
+  for (FunctionBase* f : schedulable_functions) {
+    if (f->ForeignFunctionData().has_value()) {
+      continue;
+    }
+    absl::flat_hash_map<Node*, int64_t> schedule_cycle_map_before;
+    SchedulingOptions scheduling_options = options.scheduling_options;
+    if (context.package_schedule().HasSchedule(f)) {
+      const PipelineSchedule& schedule =
+          context.package_schedule().GetSchedule(f);
+      schedule_cycle_map_before = schedule.GetCycleMap();
+      if (!scheduling_options.use_fdo()) {
+        XLS_RETURN_IF_ERROR(AddCycleConstraints(schedule, scheduling_options));
+      }
+    }
+    XLS_ASSIGN_OR_RETURN(
+        PipelineSchedule schedule,
+        options.synthesizer == nullptr
+            ? RunPipelineSchedule(f, *options.delay_estimator,
+                                  scheduling_options, elab)
+            : RunPipelineScheduleWithFdo(f, *options.delay_estimator,
+                                         scheduling_options,
+                                         *options.synthesizer, elab));
+
+    // Compute `changed` before moving schedule into context.schedules.
+    changed = changed || (schedule_cycle_map_before != schedule.GetCycleMap());
+
+    XLS_RETURN_IF_ERROR(
+        context.package_schedule().UpdateSchedule(f, std::move(schedule)));
+  }
+  return changed;
 }
 
 }  // namespace xls

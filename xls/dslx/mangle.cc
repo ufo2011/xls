@@ -14,45 +14,135 @@
 
 #include "xls/dslx/mangle.h"
 
+#include <iterator>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "absl/algorithm/container.h"
+#include "absl/container/btree_set.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
 #include "absl/strings/str_replace.h"
-#include "xls/common/status/ret_check.h"
+#include "xls/dslx/interp_value.h"
+#include "xls/dslx/type_system/parametric_env.h"
+#include "xls/ir/format_preference.h"
 
 namespace xls::dslx {
+namespace {
 
+// Converts the given InterpValue into a string form appropriate for name
+// mangling: we need a means of disambiguating value- or struct-parameterized
+// function names, and so we need to be able to represent instantiation values.
+std::string MangleInterpValue(const InterpValue& value) {
+  if (value.IsBits() || value.IsEnum()) {
+    auto bits_value = InterpValue::MakeBits(/*is_signed=*/value.IsSigned(),
+                                            value.GetBitsOrDie());
+    std::string s = bits_value.ToString(/*humanize=*/true,
+                                        FormatPreference::kUnsignedDecimal);
+    // Negatives are not valid characters in IR symbols so replace leading '-'
+    // with 'm'.
+    return absl::StrReplaceAll(s, {{"-", "m"}});
+  }
+
+  if (value.IsTypeReference()) {
+    std::string result =
+        absl::StrReplaceAll(value.ToString(), {{"[", "__dim_"},
+                                               {"]", ""},
+                                               {"(", "__tuple_"},
+                                               {")", ""},
+                                               {",", "__"},
+                                               {" ", ""},
+                                               {"<", "__type_"},
+                                               {">", ""},
+                                               {":", "_"}});
+    return absl::StartsWith(result, "__") ? result.substr(2) : result;
+  }
+
+  CHECK(value.IsArray() || value.IsTuple())
+      << "Only bits, enums, arrays, or tuples can be name-mangled.";
+  std::vector<std::string> members;
+  for (const auto& member : value.GetValuesOrDie()) {
+    members.push_back(MangleInterpValue(member));
+  }
+
+  // Since functions can't be overloaded, there's no risk of name collision:
+  // each parametric in a Function specification has a dedicated location in the
+  // mangled name. Functions with identical parametric values are identical.
+  return absl::StrFormat("__%d%s__", members.size(),
+                         absl::StrJoin(members, "_"));
+}
+
+}  // namespace
+
+// LINT.IfChange
 absl::StatusOr<std::string> MangleDslxName(
-    absl::string_view function_name,
-    const absl::btree_set<std::string>& free_keys, Module* module,
-    const SymbolicBindings* symbolic_bindings) {
-  absl::btree_set<std::string> symbolic_bindings_keys;
-  // TODO(rspringer): 2021-03-25 This can't yet be InterpValue'd, since we'd
-  // have to be able to mangle array/tuple types, which is NYI.
-  std::vector<int64_t> symbolic_bindings_values;
-  if (symbolic_bindings != nullptr) {
-    for (const SymbolicBinding& item : symbolic_bindings->bindings()) {
-      symbolic_bindings_keys.insert(item.identifier);
-      int64_t value = item.value.IsSigned()
-                          ? item.value.GetBitValueInt64().value()
-                          : item.value.GetBitValueUint64().value();
-      symbolic_bindings_values.push_back(value);
-    }
+    std::string_view module_name, std::string_view function_name,
+    CallingConvention convention, const absl::btree_set<std::string>& free_keys,
+    const ParametricEnv& parametric_env, std::string_view scope) {
+  absl::btree_set<std::string> parametric_env_keys;
+  std::vector<std::string> parametric_env_values;
+  for (const ParametricEnvItem& item : parametric_env.bindings()) {
+    parametric_env_keys.insert(item.identifier);
+    const InterpValue& value = item.value;
+    parametric_env_values.push_back(MangleInterpValue(value));
   }
   absl::btree_set<std::string> difference;
-  absl::c_set_difference(free_keys, symbolic_bindings_keys,
+  absl::c_set_difference(free_keys, parametric_env_keys,
                          std::inserter(difference, difference.begin()));
   if (!difference.empty()) {
     return absl::InvalidArgumentError(
-        absl::StrFormat("Not enough symbolic bindings to convert function "
+        absl::StrFormat("Not enough parametric bindings to convert function "
                         "'%s'; need {%s} got {%s}",
                         function_name, absl::StrJoin(free_keys, ", "),
-                        absl::StrJoin(symbolic_bindings_keys, ", ")));
+                        absl::StrJoin(parametric_env_keys, ", ")));
   }
 
-  std::string module_name = absl::StrReplaceAll(module->name(), {{".", "_"}});
-  if (symbolic_bindings_values.empty()) {
-    return absl::StrFormat("__%s__%s", module_name, function_name);
+  std::string convention_str;
+  if (convention == CallingConvention::kImplicitToken) {
+    // Note that this is an implicit token threaded call target.
+    convention_str = "itok__";
   }
-  std::string suffix = absl::StrJoin(symbolic_bindings_values, "_");
-  return absl::StrFormat("__%s__%s__%s", module_name, function_name, suffix);
+  std::string module_name_str = absl::StrReplaceAll(module_name, {{".", "_"}});
+
+  std::string scope_str = "";
+  if (!scope.empty()) {
+    scope_str = absl::StrCat(absl::StrReplaceAll(scope,
+                                                 {
+                                                     {">", "_"},
+                                                     {"<", "_"},
+                                                     {"/", "_"},
+                                                     {":", "_"},
+                                                     {"-", "_"},
+                                                     {".", "_"},
+                                                     {",", "__"},
+                                                     {" ", ""},
+                                                 }),
+                             "__");
+  }
+
+  std::string suffix;
+  if (!parametric_env_values.empty()) {
+    suffix = absl::StrCat("__", absl::StrJoin(parametric_env_values, "_"));
+  }
+  std::string mangled_name =
+      absl::StrFormat("__%s%s__%s%s%s", convention_str, module_name_str,
+                      scope_str, function_name, suffix);
+  if (convention == CallingConvention::kProcNext) {
+    // Note that the identifier for the next function of a proc is used to
+    // identify the proc in the conversion. The config function of a proc is
+    // absorbed in the conversion, as a result it is never referenced.
+    // Thus, it does not need to be mangled.
+    mangled_name = absl::StrCat(
+        absl::StrReplaceAll(mangled_name, {{":", "_"}, {"->", "__"}}), "_next");
+  }
+  return mangled_name;
 }
+// LINT.ThenChange(//xls/build_rules/xls_ir_rules.bzl)
 
 }  // namespace xls::dslx

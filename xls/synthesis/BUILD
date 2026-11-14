@@ -12,16 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@xls_pip_deps//:requirements.bzl", "requirement")
-load("@com_github_grpc_grpc//bazel:python_rules.bzl", "py_grpc_library")
-load("@com_github_grpc_grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
-
-# cc_proto_library is used in this file
-# pytype binary, test, library
-load("//xls/build_rules:py_proto_library.bzl", "xls_py_proto_library")
+load("@grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
+load("@grpc//bazel:python_rules.bzl", "py_grpc_library")
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@protobuf//bazel:py_proto_library.bzl", "py_proto_library")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//xls/build_rules:py_oss_defs.bzl", "pytype_strict_binary", "pytype_strict_contrib_test", "pytype_strict_library")
 
 package(
+    default_applicable_licenses = ["//:license"],
     default_visibility = ["//xls:xls_internal"],
+    features = [
+        "layering_check",
+        "parse_headers",
+    ],
     licenses = ["notice"],  # Apache 2.0
 )
 
@@ -44,18 +50,14 @@ proto_library(
     ],
 )
 
-xls_py_proto_library(
+py_proto_library(
     name = "synthesis_service_py_pb2",
-    srcs = ["synthesis_service.proto"],
-    internal_deps = [":synthesis_service_proto"],
-    deps = [":synthesis_py_pb2"],
+    deps = [":synthesis_service_proto"],
 )
 
-xls_py_proto_library(
+py_proto_library(
     name = "synthesis_py_pb2",
-    srcs = ["synthesis.proto"],
-    internal_deps = [":synthesis_proto"],
-    deps = ["//xls/codegen:module_signature_py_pb2"],
+    deps = [":synthesis_proto"],
 )
 
 cc_proto_library(
@@ -67,7 +69,10 @@ cc_grpc_library(
     name = "synthesis_service_cc_grpc",
     srcs = [":synthesis_service_proto"],
     grpc_only = 1,
-    deps = [":synthesis_service_cc_proto"],
+    deps = [
+        ":synthesis_service_cc_proto",
+        "@grpc//:grpc++",
+    ],
 )
 
 py_grpc_library(
@@ -76,114 +81,167 @@ py_grpc_library(
     deps = [":synthesis_service_py_pb2"],
 )
 
-py_binary(
-    name = "synthesis_client_main",
+pytype_strict_binary(
+    name = "synthesis_client_py",
     srcs = ["synthesis_client_main.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    main = "synthesis_client_main.py",
     deps = [
         ":client_credentials",
         ":synthesis_py_pb2",
         ":synthesis_service_py_pb2_grpc",
-        "@com_google_absl_py//absl:app",
-        "@com_google_absl_py//absl/flags",
-        "@com_google_absl_py//absl/logging",
+        "@abseil-py//absl:app",
+        "@abseil-py//absl/flags",
+        "@abseil-py//absl/logging",
     ],
 )
 
-py_binary(
-    name = "timing_characterization_client_main",
-    srcs = ["timing_characterization_client_main.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+pytype_strict_binary(
+    name = "op_characterization_client_main",
+    srcs = ["op_characterization_client_main.py"],
     deps = [
         ":client_credentials",
-        ":synthesis_py_pb2",
+        ":op_characterization_client",
         ":synthesis_service_py_pb2_grpc",
-        "//xls/delay_model:delay_model_py_pb2",
-        "//xls/delay_model:op_module_generator",
-        "//xls/ir:op_specification_typechecked",
-        "@com_google_absl_py//absl:app",
-        "@com_google_absl_py//absl/flags",
-        "@com_google_absl_py//absl/logging",
+        "@abseil-py//absl:app",
+        "@abseil-py//absl/flags",
+    ],
+)
+
+pytype_strict_contrib_test(
+    name = "op_characterization_client_test",
+    srcs = ["op_characterization_client_test.py"],
+    deps = [
+        ":op_characterization_client",
+        "//xls/estimators:estimator_model_py_pb2",
+        "//xls/estimators:estimator_model_utils",
+        "@abseil-py//absl/testing:absltest",
     ],
 )
 
 cc_binary(
-    name = "dummy_synthesis_server_main",
-    srcs = ["dummy_synthesis_server_main.cc"],
+    name = "fake_synthesis_server_main",
+    srcs = ["fake_synthesis_server_main.cc"],
     deps = [
-        ":server_credentials",
+        ":credentials",
         ":synthesis_cc_proto",
         ":synthesis_service_cc_grpc",
         "//xls/common:init_xls",
-        "//xls/common/logging",
-        "//xls/common/status:status_macros",
-        "@com_github_grpc_grpc//:grpc++",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/time",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+        "@grpc//:grpc++",
     ],
 )
 
-py_test(
+pytype_strict_contrib_test(
     name = "synthesis_server_test",
     srcs = ["synthesis_server_test.py"],
     data = [
-        ":dummy_synthesis_server_main",
+        ":fake_synthesis_server_main",
         ":synthesis_client_main",
     ],
-    python_version = "PY3",
     # 2020-01-08: Two test cases at the moment.
     shard_count = 2,
-    srcs_version = "PY3",
     deps = [
         ":synthesis_py_pb2",
-        requirement("portpicker"),
         "//xls/common:runfiles",
-        "@com_google_absl_py//absl/testing:absltest",
-        "@com_google_protobuf//:protobuf_python",
+        "@abseil-py//absl/testing:absltest",
+        "@protobuf//:protobuf_python",
+        "@xls_pip_deps//portpicker",
     ],
 )
 
 cc_library(
-    name = "server_credentials",
-    srcs = ["server_credentials.cc"],
-    hdrs = ["server_credentials.h"],
-    deps = ["@com_github_grpc_grpc//:grpc++"],
-)
-
-py_library(
-    name = "client_credentials",
-    srcs = ["client_credentials.py"],
-    srcs_version = "PY3",
-    deps = ["@com_github_grpc_grpc//src/python/grpcio/grpc:grpcio"],
-)
-
-py_library(
-    name = "synthesis_utils",
-    srcs = ["synthesis_utils.py"],
-    srcs_version = "PY3",
+    name = "credentials",
+    srcs = ["credentials.cc"],
+    hdrs = ["credentials.h"],
     deps = [
-        ":client_credentials",
-        ":synthesis_py_pb2",
-        ":synthesis_service_py_pb2_grpc",
-        "@com_google_absl_py//absl/logging",
+        "@grpc",
+        "@grpc//:grpc++",
     ],
 )
 
-py_test(
+pytype_strict_library(
+    name = "client_credentials",
+    srcs = ["client_credentials.py"],
+    deps = ["@grpc//src/python/grpcio/grpc:grpcio"],
+)
+
+pytype_strict_library(
+    name = "synthesis_utils",
+    srcs = ["synthesis_utils.py"],
+    deps = [
+        ":synthesis_py_pb2",
+        ":synthesis_service_py_pb2_grpc",
+        "@abseil-py//absl/logging",
+    ],
+)
+
+pytype_strict_library(
+    name = "op_characterization_client",
+    srcs = ["op_characterization_client.py"],
+    data = [
+        "//xls/ir:op_name_representations_proto",
+    ],
+    deps = [
+        ":synthesis_py_pb2",
+        ":synthesis_service_py_pb2_grpc",
+        "//xls/common:gfile",
+        "//xls/common:runfiles",
+        "//xls/estimators:estimator_model_py_pb2",
+        "//xls/estimators:estimator_model_utils",
+        "//xls/estimators:op_module_generator",
+        "//xls/ir:xls_op_name_py_pb2",
+        "@abseil-py//absl/flags",
+        "@abseil-py//absl/logging",
+        "@protobuf//:protobuf_python",
+    ],
+)
+
+pytype_strict_contrib_test(
     name = "synthesis_utils_test",
     srcs = ["synthesis_utils_test.py"],
-    data = [":dummy_synthesis_server_main"],
-    python_version = "PY3",
+    data = [":fake_synthesis_server_main"],
     shard_count = 7,
-    srcs_version = "PY3",
     deps = [
         ":client_credentials",
         ":synthesis_utils",
-        requirement("portpicker"),
         "//xls/common:runfiles",
-        "@com_google_absl_py//absl/testing:absltest",
+        "@abseil-py//absl/testing:absltest",
+        "@xls_pip_deps//portpicker",
+    ],
+)
+
+cc_library(
+    name = "synthesis_client",
+    srcs = ["synthesis_client.cc"],
+    hdrs = ["synthesis_client.h"],
+    deps = [
+        ":credentials",
+        ":synthesis_cc_proto",
+        ":synthesis_service_cc_grpc",
+        "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@grpc//:grpc++",
+    ],
+)
+
+cc_binary(
+    name = "synthesis_client_main",
+    srcs = ["synthesis_client_main.cc"],
+    deps = [
+        ":synthesis_cc_proto",
+        ":synthesis_client",
+        "//xls/common:exit_status",
+        "//xls/common:init_xls",
+        "//xls/common/file:filesystem",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@protobuf",
     ],
 )

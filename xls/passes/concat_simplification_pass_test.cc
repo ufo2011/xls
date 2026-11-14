@@ -14,33 +14,39 @@
 
 #include "xls/passes/concat_simplification_pass.h"
 
+#include <cstdint>
 #include <memory>
-#include <vector>
+#include <utility>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "xls/common/fuzzing/fuzztest.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/substitute.h"
 #include "xls/common/status/matchers.h"
 #include "xls/common/status/status_macros.h"
-#include "xls/interpreter/ir_interpreter.h"
+#include "xls/fuzzer/ir_fuzzer/ir_fuzz_domain.h"
+#include "xls/fuzzer/ir_fuzzer/ir_fuzz_test_library.h"
 #include "xls/ir/bits.h"
 #include "xls/ir/function.h"
 #include "xls/ir/function_builder.h"
 #include "xls/ir/ir_matcher.h"
 #include "xls/ir/ir_test_base.h"
+#include "xls/ir/nodes.h"
 #include "xls/ir/value.h"
 #include "xls/passes/bdd_cse_pass.h"
-#include "xls/passes/bdd_simplification_pass.h"
 #include "xls/passes/bit_slice_simplification_pass.h"
 #include "xls/passes/dce_pass.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/pass_base.h"
+#include "xls/solvers/ir_equivalence_testutils.h"
 
 namespace m = ::xls::op_matchers;
 
 namespace xls {
 namespace {
 
-using status_testing::IsOkAndHolds;
+using ::absl_testing::IsOkAndHolds;
+using ::xls::solvers::ScopedVerifyEquivalence;
 
 class ConcatSimplificationPassTest : public IrTestBase {
  protected:
@@ -48,33 +54,38 @@ class ConcatSimplificationPassTest : public IrTestBase {
 
   absl::StatusOr<bool> Run(Function* f) {
     bool changed = true;
-    bool any_concat_chagned = false;
+    bool any_concat_changed = false;
     while (changed) {
       changed = false;
       PassResults results;
-      XLS_ASSIGN_OR_RETURN(bool concat_changed,
-                           ConcatSimplificationPass().RunOnFunctionBase(
-                               f, PassOptions(), &results));
-      changed |= concat_changed;
-      any_concat_chagned |= concat_changed;
+      OptimizationContext context;
+      XLS_ASSIGN_OR_RETURN(
+          bool concat_changed,
+          ConcatSimplificationPass().RunOnFunctionBase(
+              f, OptimizationPassOptions(), &results, context));
+      changed = changed || concat_changed;
+      any_concat_changed = any_concat_changed || concat_changed;
 
       // Run other passes to clean things up.
-      XLS_ASSIGN_OR_RETURN(bool dce_changed,
-                           DeadCodeEliminationPass().RunOnFunctionBase(
-                               f, PassOptions(), &results));
-      changed |= dce_changed;
-      XLS_ASSIGN_OR_RETURN(bool slice_changed,
-                           BitSliceSimplificationPass().RunOnFunctionBase(
-                               f, PassOptions(), &results));
-      changed |= slice_changed;
+      XLS_ASSIGN_OR_RETURN(
+          bool dce_changed,
+          DeadCodeEliminationPass().RunOnFunctionBase(
+              f, OptimizationPassOptions(), &results, context));
+      changed = changed || dce_changed;
+      XLS_ASSIGN_OR_RETURN(
+          bool slice_changed,
+          BitSliceSimplificationPass().RunOnFunctionBase(
+              f, OptimizationPassOptions(), &results, context));
+      changed = changed || slice_changed;
 
       XLS_ASSIGN_OR_RETURN(bool cse_changed, BddCsePass().RunOnFunctionBase(
-                                                 f, PassOptions(), &results));
-      changed |= cse_changed;
+                                                 f, OptimizationPassOptions(),
+                                                 &results, context));
+      changed = changed || cse_changed;
     }
 
     // Return whether concat simplification changed anything.
-    return any_concat_chagned;
+    return any_concat_changed;
   }
 };
 
@@ -545,9 +556,9 @@ TEST_F(ConcatSimplificationPassTest, MergeConcatenationOfSlicesBeginning) {
   auto p = CreatePackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
   fn __merge_slice__main(x: bits[6], y: bits[2]) -> bits[6] {
-  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=0,1,15)
-  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=0,2,15)
-  ret result: bits[6] = concat(bit_slice.4, bit_slice.3, y, pos=0,3,26)
+  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=[(0,1,15)])
+  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=[(0,2,15)])
+  ret result: bits[6] = concat(bit_slice.4, bit_slice.3, y, pos=[(0,3,26)])
 }
   )",
                                                        p.get()));
@@ -560,9 +571,9 @@ TEST_F(ConcatSimplificationPassTest, MergeConcatenationOfSlicesMiddle) {
   auto p = CreatePackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
   fn __merge_slice__main(x: bits[6], y: bits[2]) -> bits[8] {
-  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=0,1,15)
-  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=0,2,15)
-  ret result: bits[8] = concat(y, bit_slice.4, bit_slice.3, y, pos=0,3,26)
+  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=[(0,1,15)])
+  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=[(0,2,15)])
+  ret result: bits[8] = concat(y, bit_slice.4, bit_slice.3, y, pos=[(0,3,26)])
 }
   )",
                                                        p.get()));
@@ -576,9 +587,9 @@ TEST_F(ConcatSimplificationPassTest, MergeConcatenationOfSlicesEnd) {
   auto p = CreatePackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
   fn __merge_slice__main(x: bits[6], y: bits[2]) -> bits[6] {
-  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=0,1,15)
-  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=0,2,15)
-  ret result: bits[6] = concat(y, bit_slice.4, bit_slice.3, pos=0,3,26)
+  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=[(0,1,15)])
+  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=[(0,2,15)])
+  ret result: bits[6] = concat(y, bit_slice.4, bit_slice.3, pos=[(0,3,26)])
 }
   )",
                                                        p.get()));
@@ -591,9 +602,9 @@ TEST_F(ConcatSimplificationPassTest, MergeConcatenationOfSlicesAll) {
   auto p = CreatePackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
   fn __merge_slice__main(x: bits[6], y: bits[2]) -> bits[4] {
-  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=0,1,15)
-  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=0,2,15)
-  ret result: bits[4] = concat(bit_slice.4, bit_slice.3, pos=0,3,26)
+  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=[(0,1,15)])
+  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=[(0,2,15)])
+  ret result: bits[4] = concat(bit_slice.4, bit_slice.3, pos=[(0,3,26)])
 }
   )",
                                                        p.get()));
@@ -605,10 +616,10 @@ TEST_F(ConcatSimplificationPassTest, MergeConcatenationOfSlicesMultipleSlices) {
   auto p = CreatePackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
   fn __merge_slice__main(x: bits[6], y: bits[2]) -> bits[8] {
-  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=0,1,15)
-  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=0,2,15)
-  bit_slice.5: bits[2] = bit_slice(x, start=4, width=2, pos=0,2,15)
-  ret result: bits[8] = concat(bit_slice.5, bit_slice.4, bit_slice.3, y, pos=0,3,26)
+  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=[(0,1,15)])
+  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=[(0,2,15)])
+  bit_slice.5: bits[2] = bit_slice(x, start=4, width=2, pos=[(0,2,15)])
+  ret result: bits[8] = concat(bit_slice.5, bit_slice.4, bit_slice.3, y, pos=[(0,3,26)])
 }
   )",
                                                        p.get()));
@@ -621,11 +632,11 @@ TEST_F(ConcatSimplificationPassTest,
   auto p = CreatePackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
   fn __merge_slice__main(x: bits[8], y: bits[2]) -> bits[10] {
-  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=0,1,15)
-  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=0,2,15)
-  bit_slice.5: bits[2] = bit_slice(x, start=4, width=2, pos=0,2,15)
-  bit_slice.6: bits[2] = bit_slice(x, start=6, width=2, pos=0,2,15)
-  ret result: bits[10] = concat(bit_slice.6, bit_slice.5, y, bit_slice.4, bit_slice.3, pos=0,3,26)
+  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=[(0,1,15)])
+  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=[(0,2,15)])
+  bit_slice.5: bits[2] = bit_slice(x, start=4, width=2, pos=[(0,2,15)])
+  bit_slice.6: bits[2] = bit_slice(x, start=6, width=2, pos=[(0,2,15)])
+  ret result: bits[10] = concat(bit_slice.6, bit_slice.5, y, bit_slice.4, bit_slice.3, pos=[(0,3,26)])
 }
   )",
                                                        p.get()));
@@ -639,9 +650,9 @@ TEST_F(ConcatSimplificationPassTest, MergeConcatenationOfSlicesNonConsecutive) {
   auto p = CreatePackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
   fn __merge_slice__main(x: bits[6], y: bits[2]) -> bits[6] {
-  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=0,1,15)
-  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=0,2,15)
-  ret result: bits[6] = concat(bit_slice.4, y, bit_slice.3, pos=0,3,26)
+  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=[(0,1,15)])
+  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=[(0,2,15)])
+  ret result: bits[6] = concat(bit_slice.4, y, bit_slice.3, pos=[(0,3,26)])
 }
   )",
                                                        p.get()));
@@ -653,9 +664,9 @@ TEST_F(ConcatSimplificationPassTest,
   auto p = CreatePackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
   fn __merge_slice__main(x: bits[6], y: bits[2]) -> bits[6] {
-  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=0,1,15)
-  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=0,2,15)
-  ret result: bits[6] = concat(bit_slice.3, bit_slice.4, y, pos=0,3,26)
+  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=[(0,1,15)])
+  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=[(0,2,15)])
+  ret result: bits[6] = concat(bit_slice.3, bit_slice.4, y, pos=[(0,3,26)])
 }
   )",
                                                        p.get()));
@@ -667,9 +678,9 @@ TEST_F(ConcatSimplificationPassTest,
   auto p = CreatePackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
   fn __merge_slice__main(x: bits[6], y: bits[2]) -> bits[6] {
-  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=0,1,15)
-  bit_slice.4: bits[2] = bit_slice(x, start=3, width=2, pos=0,2,15)
-  ret result: bits[6] = concat(bit_slice.4, bit_slice.3, y, pos=0,3,26)
+  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=[(0,1,15)])
+  bit_slice.4: bits[2] = bit_slice(x, start=3, width=2, pos=[(0,2,15)])
+  ret result: bits[6] = concat(bit_slice.4, bit_slice.3, y, pos=[(0,3,26)])
 }
   )",
                                                        p.get()));
@@ -681,9 +692,9 @@ TEST_F(ConcatSimplificationPassTest,
   auto p = CreatePackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
   fn __merge_slice__main(x: bits[6], y: bits[2]) -> bits[6] {
-  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=0,1,15)
-  bit_slice.4: bits[2] = bit_slice(x, start=1, width=2, pos=0,2,15)
-  ret result: bits[6] = concat(bit_slice.4, bit_slice.3, y, pos=0,3,26)
+  bit_slice.3: bits[2] = bit_slice(x, start=0, width=2, pos=[(0,1,15)])
+  bit_slice.4: bits[2] = bit_slice(x, start=1, width=2, pos=[(0,2,15)])
+  ret result: bits[6] = concat(bit_slice.4, bit_slice.3, y, pos=[(0,3,26)])
 }
   )",
                                                        p.get()));
@@ -695,9 +706,9 @@ TEST_F(ConcatSimplificationPassTest,
   auto p = CreatePackage();
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
   fn __merge_slice__main(x: bits[6], y: bits[2]) -> bits[4] {
-  bit_slice.3: bits[2] = bit_slice(y, start=0, width=2, pos=0,1,15)
-  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=0,2,15)
-  ret result: bits[4] = concat(bit_slice.4, bit_slice.3, pos=0,3,26)
+  bit_slice.3: bits[2] = bit_slice(y, start=0, width=2, pos=[(0,1,15)])
+  bit_slice.4: bits[2] = bit_slice(x, start=2, width=2, pos=[(0,2,15)])
+  ret result: bits[4] = concat(bit_slice.4, bit_slice.3, pos=[(0,3,26)])
 }
   )",
                                                        p.get()));
@@ -769,6 +780,392 @@ fn __sample__x5(x: bits[32]) -> bits[32] {
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Param("x"));
 }
+
+TEST_F(ConcatSimplificationPassTest, OrOfConcatWithLiteral) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue a = fb.Param("a", p->GetBitsType(8));
+  BValue b = fb.Param("b", p->GetBitsType(16));
+  BValue c = fb.Param("c", p->GetBitsType(4));
+  BValue concat = fb.Concat({a, b, c});
+  fb.Or(concat, fb.Literal(UBits(0x1234567, 28)));
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Concat(m::Or(m::Param("a"), m::Literal(0x12)),
+                        m::Or(m::Param("b"), m::Literal(0x3456)),
+                        m::Or(m::Param("c"), m::Literal(0x7))));
+}
+
+TEST_F(ConcatSimplificationPassTest, OrOfConcatWithLiteralAndSomethingElse) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue a = fb.Param("a", p->GetBitsType(8));
+  BValue b = fb.Param("b", p->GetBitsType(16));
+  BValue c = fb.Param("c", p->GetBitsType(4));
+  BValue d = fb.Param("d", p->GetBitsType(28));
+  BValue concat = fb.Concat({a, b, c});
+  fb.Or({concat, d, fb.Literal(UBits(0x1234567, 28))});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+
+  EXPECT_THAT(Run(f), IsOkAndHolds(false));
+}
+
+TEST_F(ConcatSimplificationPassTest,
+       NarrowBitwiseSurroundingConcatWithLiteral) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+    fn foo(x: bits[10], b: bits[4]) -> bits[10] {
+      literal_ones: bits[6] = literal(value=0b111111, id=1)
+      concat.2: bits[10] = concat(literal_ones, b, id=2)
+      ret or.3: bits[10] = or(x, concat.2, id=3, pos=[(0,1,2)])
+    }
+  )",
+                                                       p.get()));
+
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::Concat(m::Literal(UBits(0b111111, 6)),
+                m::Or(m::BitSlice(m::Param("x"), 0, 4), m::Param("b"))));
+}
+
+TEST_F(ConcatSimplificationPassTest,
+       NarrowBitwiseSurroundingConcatWithLiteralXor) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+    fn foo(x: bits[10], b: bits[4]) -> bits[10] {
+      literal_ones: bits[6] = literal(value=0b000000, id=1)
+      concat.2: bits[10] = concat(b, literal_ones, id=2)
+      ret xor.3: bits[10] = xor(x, concat.2, id=3, pos=[(0,1,2)])
+    }
+  )",
+                                                       p.get()));
+
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Concat(m::Xor(m::BitSlice(m::Param("x"), 6, 4), m::Param("b")),
+                        m::BitSlice(m::Param("x"), 0, 6)));
+}
+
+// Test for OR with zeros - the zeros are identity elements for OR, so we
+// can narrow the OR to only operate on the non-zero portion and pass
+// through the rest unchanged.
+TEST_F(ConcatSimplificationPassTest,
+       NarrowBitwiseSurroundingConcatWithLiteralOrZeros) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+    fn foo(x: bits[10], b: bits[4]) -> bits[10] {
+      literal_zeros: bits[6] = literal(value=0b000000, id=1)
+      concat.2: bits[10] = concat(b, literal_zeros, id=2)
+      ret or.3: bits[10] = or(x, concat.2, id=3, pos=[(0,1,2)])
+    }
+  )",
+                                                       p.get()));
+
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  // The result should be: Concat(Or(x[9:6], b), x[5:0])
+  // where the lower 6 bits of x pass through unchanged.
+  EXPECT_THAT(f->return_value(),
+              m::Concat(m::Or(m::BitSlice(m::Param("x"), 6, 4), m::Param("b")),
+                        m::BitSlice(m::Param("x"), 0, 6)));
+}
+
+// Test for OR with zeros where zeros are in the high bits.
+TEST_F(ConcatSimplificationPassTest,
+       NarrowBitwiseSurroundingConcatWithLiteralOrZerosHighBits) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+    fn foo(x: bits[10], b: bits[4]) -> bits[10] {
+      literal_zeros: bits[6] = literal(value=0b000000, id=1)
+      concat.2: bits[10] = concat(literal_zeros, b, id=2)
+      ret or.3: bits[10] = or(x, concat.2, id=3, pos=[(0,1,2)])
+    }
+  )",
+                                                       p.get()));
+
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  // The result should be: Concat(x[9:4], Or(x[3:0], b))
+  // where the upper 6 bits of x pass through unchanged.
+  EXPECT_THAT(
+      f->return_value(),
+      m::Concat(m::BitSlice(m::Param("x"), 4, 6),
+                m::Or(m::BitSlice(m::Param("x"), 0, 4), m::Param("b"))));
+}
+
+// Test for AND with all-ones - the ones are identity elements for AND, so we
+// can narrow the AND to only operate on the non-ones portion and pass
+// through the rest unchanged.
+TEST_F(ConcatSimplificationPassTest,
+       NarrowBitwiseSurroundingConcatWithLiteralAndOnes) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+    fn foo(x: bits[10], b: bits[4]) -> bits[10] {
+      literal_ones: bits[6] = literal(value=0b111111, id=1)
+      concat.2: bits[10] = concat(b, literal_ones, id=2)
+      ret and.3: bits[10] = and(x, concat.2, id=3, pos=[(0,1,2)])
+    }
+  )",
+                                                       p.get()));
+
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  // The result should be: Concat(And(x[9:6], b), x[5:0])
+  // where the lower 6 bits of x pass through unchanged.
+  EXPECT_THAT(f->return_value(),
+              m::Concat(m::And(m::BitSlice(m::Param("x"), 6, 4), m::Param("b")),
+                        m::BitSlice(m::Param("x"), 0, 6)));
+}
+
+// Test for AND with all-ones where ones are in the high bits.
+TEST_F(ConcatSimplificationPassTest,
+       NarrowBitwiseSurroundingConcatWithLiteralAndOnesHighBits) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+    fn foo(x: bits[10], b: bits[4]) -> bits[10] {
+      literal_ones: bits[6] = literal(value=0b111111, id=1)
+      concat.2: bits[10] = concat(literal_ones, b, id=2)
+      ret and.3: bits[10] = and(x, concat.2, id=3, pos=[(0,1,2)])
+    }
+  )",
+                                                       p.get()));
+
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  // The result should be: Concat(x[9:4], And(x[3:0], b))
+  // where the upper 6 bits of x pass through unchanged.
+  EXPECT_THAT(
+      f->return_value(),
+      m::Concat(m::BitSlice(m::Param("x"), 4, 6),
+                m::And(m::BitSlice(m::Param("x"), 0, 4), m::Param("b"))));
+}
+
+TEST_F(ConcatSimplificationPassTest, ConcatOfReversedSlicesToReverse) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(4));
+  BValue s0 = fb.BitSlice(x, 0, 1);
+  BValue s1 = fb.BitSlice(x, 1, 1);
+  BValue s2 = fb.BitSlice(x, 2, 1);
+  BValue s3 = fb.BitSlice(x, 3, 1);
+  BValue concat = fb.Concat({s0, s1, s2, s3});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(concat));
+
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(), m::Reverse(m::Param("x")));
+}
+
+TEST_F(ConcatSimplificationPassTest,
+       ConcatOfReversedSubrangeSlicesToReversedSlice) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  BValue s0 = fb.BitSlice(x, 2, 1);
+  BValue s1 = fb.BitSlice(x, 3, 1);
+  BValue s2 = fb.BitSlice(x, 4, 1);
+  BValue s3 = fb.BitSlice(x, 5, 1);
+  BValue concat = fb.Concat({s0, s1, s2, s3});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(concat));
+
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Reverse(m::BitSlice(m::Param("x"), /*start=*/2, /*width=*/4)));
+}
+
+TEST_F(ConcatSimplificationPassTest, ConcatOfTwoReversedMultiBitSlices) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  BValue s0 = fb.BitSlice(x, 0, 4);
+  BValue s1 = fb.BitSlice(x, 4, 4);
+  BValue r0 = fb.Reverse(s0);
+  BValue r1 = fb.Reverse(s1);
+  BValue concat = fb.Concat({r0, r1});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(concat));
+
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(), m::Reverse(m::Param("x")));
+}
+
+TEST_F(ConcatSimplificationPassTest,
+       ConcatOfTwoReversedMultiBitSubrangeSlices) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(12));
+  BValue s0 = fb.BitSlice(x, 2, 3);
+  BValue s1 = fb.BitSlice(x, 5, 3);
+  BValue r0 = fb.Reverse(s0);
+  BValue r1 = fb.Reverse(s1);
+  BValue concat = fb.Concat({r0, r1});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(concat));
+
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Reverse(m::BitSlice(m::Param("x"), /*start=*/2, /*width=*/6)));
+}
+
+TEST_F(ConcatSimplificationPassTest, ConcatOfReversedSliceAnd1BitSlice) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(4));
+  BValue s0 = fb.BitSlice(x, 0, 3);
+  BValue s1 = fb.BitSlice(x, 3, 1);
+  BValue r0 = fb.Reverse(s0);
+  BValue concat = fb.Concat({r0, s1});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(concat));
+
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(), m::Reverse(m::Param("x")));
+}
+
+TEST_F(ConcatSimplificationPassTest, ConcatOf1BitSliceAndReversedSlice) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(4));
+  BValue s0 = fb.BitSlice(x, 0, 1);
+  BValue s1 = fb.BitSlice(x, 1, 3);
+  BValue r1 = fb.Reverse(s1);
+  BValue concat = fb.Concat({s0, r1});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(concat));
+
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(), m::Reverse(m::Param("x")));
+}
+
+TEST_F(ConcatSimplificationPassTest, ConcatWithPartialReversedSlices) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue a = fb.Param("a", p->GetBitsType(2));
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  BValue b = fb.Param("b", p->GetBitsType(2));
+  BValue s0 = fb.BitSlice(x, 0, 4);
+  BValue s1 = fb.BitSlice(x, 4, 4);
+  BValue r0 = fb.Reverse(s0);
+  BValue r1 = fb.Reverse(s1);
+  BValue concat = fb.Concat({a, r0, r1, b});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(concat));
+
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::Concat(m::Param("a"), m::Reverse(m::Param("x")), m::Param("b")));
+}
+
+TEST_F(ConcatSimplificationPassTest, ConcatOfFourForwardSlicesSinglePass) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  BValue s3 = fb.BitSlice(x, 6, 2);
+  BValue s2 = fb.BitSlice(x, 4, 2);
+  BValue s1 = fb.BitSlice(x, 2, 2);
+  BValue s0 = fb.BitSlice(x, 0, 2);
+  BValue concat = fb.Concat({s3, s2, s1, s0});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(concat));
+
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(), m::Param("x"));
+}
+
+TEST_F(ConcatSimplificationPassTest, ConcatOfMultipleForwardRuns) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue a = fb.Param("a", p->GetBitsType(2));
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  BValue b = fb.Param("b", p->GetBitsType(2));
+  BValue y = fb.Param("y", p->GetBitsType(8));
+  BValue c = fb.Param("c", p->GetBitsType(2));
+  BValue sx0 = fb.BitSlice(x, 0, 4);
+  BValue sx1 = fb.BitSlice(x, 4, 4);
+  BValue sy0 = fb.BitSlice(y, 0, 2);
+  BValue sy1 = fb.BitSlice(y, 2, 2);
+  BValue concat = fb.Concat({a, sx1, sx0, b, sy1, sy0, c});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(concat));
+
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Concat(m::Param("a"), m::Param("x"), m::Param("b"),
+                        m::BitSlice(m::Param("y"), /*start=*/0, /*width=*/4),
+                        m::Param("c")));
+}
+
+TEST_F(ConcatSimplificationPassTest, ConcatOfFourReversedSlicesSinglePass) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  BValue s0 = fb.BitSlice(x, 0, 2);
+  BValue s1 = fb.BitSlice(x, 2, 2);
+  BValue s2 = fb.BitSlice(x, 4, 2);
+  BValue s3 = fb.BitSlice(x, 6, 2);
+  BValue r0 = fb.Reverse(s0);
+  BValue r1 = fb.Reverse(s1);
+  BValue r2 = fb.Reverse(s2);
+  BValue r3 = fb.Reverse(s3);
+  BValue concat = fb.Concat({r0, r1, r2, r3});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(concat));
+
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(), m::Reverse(m::Param("x")));
+}
+
+TEST_F(ConcatSimplificationPassTest, ConcatOfMultipleReversedRuns) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue a = fb.Param("a", p->GetBitsType(2));
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  BValue b = fb.Param("b", p->GetBitsType(2));
+  BValue y = fb.Param("y", p->GetBitsType(8));
+  BValue c = fb.Param("c", p->GetBitsType(2));
+  BValue sx0 = fb.BitSlice(x, 0, 4);
+  BValue sx1 = fb.BitSlice(x, 4, 4);
+  BValue rx0 = fb.Reverse(sx0);
+  BValue rx1 = fb.Reverse(sx1);
+  BValue sy0 = fb.BitSlice(y, 0, 2);
+  BValue sy1 = fb.BitSlice(y, 2, 2);
+  BValue ry0 = fb.Reverse(sy0);
+  BValue ry1 = fb.Reverse(sy1);
+  BValue concat = fb.Concat({a, rx0, rx1, b, ry0, ry1, c});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(concat));
+
+  ScopedVerifyEquivalence sve(f);
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Concat(m::Param("a"), m::Reverse(m::Param("x")), m::Param("b"),
+                        m::Reverse(m::BitSlice(m::Param("y"), /*start=*/0,
+                                               /*width=*/4)),
+                        m::Param("c")));
+}
+
+TEST_F(ConcatSimplificationPassTest, CreateFlattenedConcatFlattensNestedTree) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue a = fb.Param("a", p->GetBitsType(1));
+  BValue b = fb.Param("b", p->GetBitsType(1));
+  BValue c = fb.Param("c", p->GetBitsType(1));
+  BValue d = fb.Param("d", p->GetBitsType(1));
+  BValue inner = fb.Concat({b, c});
+  BValue outer = fb.Concat({a, inner});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(d));
+
+  EXPECT_THAT(CreateFlattenedConcat(f, {outer.node(), d.node()}, SourceInfo()),
+              IsOkAndHolds(m::Concat(m::Param("a"), m::Param("b"),
+                                     m::Param("c"), m::Param("d"))));
+}
+
+void IrFuzzConcatSimplification(FuzzPackageWithArgs fuzz_package_with_args) {
+  ConcatSimplificationPass pass;
+  OptimizationPassChangesOutputs(std::move(fuzz_package_with_args), pass);
+}
+FUZZ_TEST(IrFuzzTest, IrFuzzConcatSimplification)
+    .WithDomains(IrFuzzDomainWithArgs(/*arg_set_count=*/10));
 
 }  // namespace
 }  // namespace xls

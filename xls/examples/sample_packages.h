@@ -18,10 +18,14 @@
 #ifndef XLS_EXAMPLES_SAMPLE_PACKAGES_H_
 #define XLS_EXAMPLES_SAMPLE_PACKAGES_H_
 
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include "absl/status/statusor.h"
-#include "absl/strings/string_view.h"
 #include "xls/ir/function.h"
 #include "xls/ir/package.h"
 
@@ -77,7 +81,7 @@ std::pair<std::unique_ptr<Package>, Function*> BuildAccumulateIvar(
 //
 // Another goal is to prepare for control generation and shared FSMs.
 std::pair<std::unique_ptr<Package>, Function*> BuildTwoLoops(
-  bool same_trip_count, bool dependent_loops);
+    bool same_trip_count, bool dependent_loops);
 
 // Build up a simple function with a map().
 std::pair<std::unique_ptr<Package>, Function*> BuildSimpleMap(
@@ -87,7 +91,7 @@ std::pair<std::unique_ptr<Package>, Function*> BuildSimpleMap(
 // directory. 'name' should be the name of the dslx_test target (e.g.,
 // "sha256"). The optional 'optimize' indicates whether to return the IR after
 // optimizations.
-absl::StatusOr<std::unique_ptr<Package>> GetBenchmark(absl::string_view name,
+absl::StatusOr<std::unique_ptr<Package>> GetBenchmark(std::string_view name,
                                                       bool optimized);
 
 // Returns the names of all benchmarks.

@@ -18,19 +18,17 @@
 // expression. In this case we do through an alias, just because it's more
 // interesting than without an alias.
 
-import xls.dslx.tests.mod_simple_enum as exporter
+import xls.dslx.tests.mod_simple_enum as exporter;
 
 fn main(x: exporter::EnumType) -> u32 {
-  match x {
-    exporter::EnumType::FIRST => u32:0,
-    exporter::EnumType::SECOND => u32:1,
-    _ => fail!(u32:1),
-  }
+    match x {
+        exporter::EnumType::FIRST => u32:0,
+        exporter::EnumType::SECOND => u32:1,
+    }
 }
 
-#![test]
+#[test]
 fn test_main() {
-  let _ = assert_eq(u32:0, main(exporter::EnumType::FIRST));
-  let _ = assert_eq(u32:1, main(exporter::EnumType::SECOND));
-  ()
+    assert_eq(u32:0, main(exporter::EnumType::FIRST));
+    assert_eq(u32:1, main(exporter::EnumType::SECOND));
 }

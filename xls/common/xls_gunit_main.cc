@@ -12,11 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cstdlib>
+
 #include "gtest/gtest.h"
-#include "xls/common/init_xls.h"
+#include "fuzztest/init_fuzztest.h"
+#include "xls/common/benchmark_support.h"
+#include "xls/common/gunit_init_xls.h"
 
 int main(int argc, char* argv[]) {
-  xls::InitXls(argv[0], argc, argv);
-  testing::InitGoogleTest(&argc, argv);
+  xls::InitXlsForTest(argv[0], argc, argv);
+  fuzztest::InitFuzzTest(&argc, &argv);
+  if (xls::RunSpecifiedBenchmarks()) {
+    return EXIT_SUCCESS;
+  }
+
   return RUN_ALL_TESTS();
 }

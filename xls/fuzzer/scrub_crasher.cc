@@ -14,8 +14,18 @@
 
 #include "xls/fuzzer/scrub_crasher.h"
 
+#include <string>
+#include <string_view>
+
+#include "re2/re2.h"
+
 namespace xls {
 
-std::string ScrubCrasher(absl::string_view s) { return std::string{s}; }
+std::string ScrubCrasher(std::string_view s) {
+  std::string scrubbed(s);
+  // e.g. Use this to canonicalize paths.
+  RE2::GlobalReplace(&scrubbed, R"(/[\S+]*/xls)", "/xls");
+  return scrubbed;
+}
 
 }  // namespace xls

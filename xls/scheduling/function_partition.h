@@ -19,7 +19,6 @@
 #include <vector>
 
 #include "absl/types/span.h"
-#include "xls/ir/function.h"
 #include "xls/ir/node.h"
 
 namespace xls {
@@ -54,7 +53,7 @@ namespace sched {
 // Returns the two partitions as a std::pair. The first element is the
 // predecessor partition of the dicut (partition A in the example above).
 std::pair<std::vector<Node*>, std::vector<Node*>> MinCostFunctionPartition(
-    Function* f, absl::Span<Node* const> partitionable_nodes);
+    FunctionBase* f, absl::Span<Node* const> partitionable_nodes);
 
 }  // namespace sched
 }  // namespace xls

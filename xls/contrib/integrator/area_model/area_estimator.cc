@@ -14,16 +14,21 @@
 
 #include "xls/contrib/integrator/area_model/area_estimator.h"
 
-#include "absl/status/statusor.h"
+#include <memory>
+#include <string_view>
 
-namespace xls {
+#include "absl/status/statusor.h"
+#include "xls/common/status/status_macros.h"
+#include "xls/estimators/delay_model/delay_estimator.h"
+
+namespace xls::integrator {
 
 absl::StatusOr<std::unique_ptr<AreaEstimator>> GetAreaEstimatorByName(
-    absl::string_view name) {
+    std::string_view name) {
   DelayEstimatorManager& singleton = GetDelayEstimatorManagerSingleton();
   XLS_ASSIGN_OR_RETURN(DelayEstimator * delay_estimator,
                        singleton.GetDelayEstimator(name));
   return std::make_unique<AreaEstimator>(delay_estimator);
 }
 
-}  // namespace xls
+}  // namespace xls::integrator

@@ -14,12 +14,15 @@
 
 #include "xls/noc/simulation/network_graph_builder.h"
 
-#include <cstdint>
+#include <string>
+#include <string_view>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
-#include "xls/common/status/ret_check.h"
+#include "absl/types/variant.h"
+#include "xls/common/status/status_macros.h"
 #include "xls/noc/config/network_config.pb.h"
 #include "xls/noc/simulation/common.h"
 #include "xls/noc/simulation/network_graph.h"
@@ -74,7 +77,7 @@ class NetworkGraphBuilderImpl {
   // Memoizes mapping from proto naming of ports to PortIds.
   void MemoizePortNameToId(const std::string& name, PortId id);
 
-  // Retreives PortId given the proto naming of a port.
+  // Retrieves PortId given the proto naming of a port.
   absl::StatusOr<PortId> GetPortIdFromName(const std::string& name);
 
   // External reference to NetworkGraph that will be built.
@@ -88,17 +91,16 @@ class NetworkGraphBuilderImpl {
 };
 
 absl::StatusOr<PortConfigProto::Direction> GetPortConfigProtoDirection(
-    const PortConfigProto& port, absl::string_view msg) {
+    const PortConfigProto& port, std::string_view msg) {
   PortConfigProto::Direction dir = port.direction();
 
   if (dir == PortConfigProto::INPUT || dir == PortConfigProto::OUTPUT) {
     return dir;
-  } else {
-    return absl::InvalidArgumentError(
-        absl::StrFormat("%s PortConfigProto %s "
-                        "must have a direction field set.",
-                        msg, port.name()));
   }
+  return absl::InvalidArgumentError(
+      absl::StrFormat("%s PortConfigProto %s "
+                      "must have a direction field set.",
+                      msg, port.name()));
 }
 
 absl::Status NetworkGraphBuilderImpl::BuildNetwork(
@@ -263,7 +265,7 @@ absl::Status BuildNetworkGraphFromProto(const NetworkConfigProto& proto,
 }
 
 absl::StatusOr<NetworkComponentId> FindNetworkComponentByName(
-    absl::string_view name, NetworkManager& network_mgr,
+    std::string_view name, NetworkManager& network_mgr,
     NocParameters& noc_parameters) {
   for (Network& network : network_mgr.GetNetworks()) {
     for (NetworkComponentId nc : network.GetNetworkComponentIds()) {
@@ -284,7 +286,7 @@ absl::StatusOr<NetworkComponentId> FindNetworkComponentByName(
       "Unable to find network component with param name %s", name));
 }
 
-absl::StatusOr<PortId> FindPortByName(absl::string_view name,
+absl::StatusOr<PortId> FindPortByName(std::string_view name,
                                       NetworkManager& network_mgr,
                                       NocParameters& noc_parameters) {
   for (Network& network : network_mgr.GetNetworks()) {

@@ -14,24 +14,28 @@
 
 #include "xls/passes/map_inlining_pass.h"
 
+#include <vector>
+
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/str_format.h"
-#include "absl/time/time.h"
-#include "xls/common/math_util.h"
-#include "xls/common/status/ret_check.h"
+#include "absl/types/span.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/ir/bits.h"
 #include "xls/ir/function_builder.h"
+#include "xls/ir/nodes.h"
+#include "xls/ir/value.h"
+#include "xls/passes/optimization_pass.h"
 #include "xls/passes/pass_base.h"
 
 namespace xls {
 
 MapInliningPass::MapInliningPass()
-    : FunctionBasePass("map_inlining", "Inline map operations") {}
+    : OptimizationFunctionBasePass(MapInliningPass::kName,
+                                   "Inline map operations") {}
 
 absl::StatusOr<bool> MapInliningPass::RunOnFunctionBaseInternal(
-    FunctionBase* function, const PassOptions& options,
-    PassResults* results) const {
+    FunctionBase* function, const OptimizationPassOptions& options,
+    PassResults* results, OptimizationContext& context) const {
   bool changed = false;
   std::vector<Node*> map_nodes;
   for (Node* node : function->nodes()) {
@@ -46,6 +50,11 @@ absl::StatusOr<bool> MapInliningPass::RunOnFunctionBaseInternal(
   }
 
   return changed;
+}
+
+absl::Status MapInliningPass::InlineOneMap(Map* map) {
+  MapInliningPass pass;
+  return pass.ReplaceMap(map);
 }
 
 absl::Status MapInliningPass::ReplaceMap(Map* map) const {

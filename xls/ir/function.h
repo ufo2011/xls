@@ -15,24 +15,29 @@
 #ifndef XLS_IR_FUNCTION_H_
 #define XLS_IR_FUNCTION_H_
 
+#include <functional>
+#include <list>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
+#include "absl/base/casts.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "xls/common/iterator_range.h"
-#include "xls/common/status/ret_check.h"
-#include "xls/ir/dfs_visitor.h"
+#include "absl/types/optional_ref.h"
+#include "absl/types/span.h"
+#include "xls/common/attribute_data.h"
+#include "xls/common/status/status_macros.h"
 #include "xls/ir/function_base.h"
-#include "xls/ir/name_uniquer.h"
+#include "xls/ir/ir_annotator.h"
 #include "xls/ir/node.h"
 #include "xls/ir/nodes.h"
 #include "xls/ir/package.h"
 #include "xls/ir/type.h"
-#include "xls/ir/unwrapping_iterator.h"
-#include "xls/ir/verifier.h"
 
 namespace xls {
 
@@ -41,51 +46,123 @@ class Function : public FunctionBase {
   using NodeList = std::list<std::unique_ptr<Node>>;
 
  public:
-  Function(absl::string_view name, Package* package)
+  Function(std::string_view name, Package* package)
       : FunctionBase(name, package) {}
-  virtual ~Function() = default;
+
+  ~Function() override = default;
+
+  void MoveFrom(Function& other) {
+    FunctionBase::MoveFrom(other);
+    return_value_ = other.return_value();
+    return_type_ = return_value_->GetType();
+  }
+
+  void MoveParamsFrom(Function& other) {
+    FunctionBase::MoveFrom(other, [](const Node* n) { return n->Is<Param>(); });
+    other.params_.clear();
+  }
 
   // Returns the node that serves as the return value of this function.
   Node* return_value() const { return return_value_; }
 
+  // Return the return type from the return value, or the directly-set return
+  // type.
+  Type* return_type() const { return return_type_; };
+
   // Sets the node that serves as the return value of this function.
-  absl::Status set_return_value(Node* n) {
-    XLS_RET_CHECK_EQ(n->function_base(), this) << absl::StreamFormat(
-        "Return value node %s is not in this function %s (is in function %s)",
-        n->GetName(), name(), n->function_base()->name());
-    return_value_ = n;
-    return absl::OkStatus();
-  }
+  absl::Status set_return_value(Node* n, bool validate = true);
+
+  // This only needs to be used directly for a nested source `Function` inside a
+  // block.
+  void set_return_type(Type* type) { return_type_ = type; }
 
   FunctionType* GetType();
 
-  // DumpIr emits the IR in a parsable, hierarchical text format.
-  // Parameter:
-  //   'recursive' if true, will dump counted-for body functions as well.
-  //   This is only useful when dumping individual functions, and not packages.
-  std::string DumpIr(bool recursive = false) const override;
+  bool non_synth() const { return non_synth_; }
+  void set_non_synth(bool value) { non_synth_ = value; }
+
+  FunctionBase::Kind kind() const final {
+    return FunctionBase::Kind::kFunction;
+  }
+
+  std::vector<std::string> AttributeIrStrings() const override;
+
+  void AddAttribute(AttributeData attr) {
+    attributes_.push_back(std::move(attr));
+  }
+  absl::Span<const AttributeData> attributes() const { return attributes_; }
+  bool HasAttribute(AttributeKind kind) const {
+    for (const auto& attr : attributes_) {
+      if (attr.kind() == kind) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  using FunctionBase::DumpIr;
+  std::string DumpIr(const IrAnnotator& annotate) const override;
+
+  // DumpIr emits the IR in a hierarchical text format with the returned
+  // annotations after each node definition.
+  std::string DumpIrWithAnnotations(
+      const std::function<std::optional<std::string>(Node*)>& annotate) const;
 
   // Creates a clone of the function with the new name 'new_name'. Function is
-  // owned by targt_package.  call_remapping specifies any function
+  // owned by target_package.  call_remapping specifies any function
   // substitutions to be used in the cloned function, e.g. If call_remapping
   // holds {funcA, funcB}, any references to funcA in the function will be
   // references to funcB in the cloned function.
   absl::StatusOr<Function*> Clone(
-      absl::string_view new_name, Package* target_package = nullptr,
+      std::string_view new_name, Package* target_package = nullptr,
       const absl::flat_hash_map<const Function*, Function*>& call_remapping =
-          {}) const;
+          {},
+      absl::optional_ref<absl::flat_hash_map<Node*, Node*>>
+          original_node_to_clone = std::nullopt) const;
 
   // Returns true if analysis indicates that this function always produces the
   // same value as 'other' when run with the same arguments. The analysis is
   // conservative and false may be returned for some "equivalent" functions.
   bool IsDefinitelyEqualTo(const Function* other) const;
 
-  bool HasImplicitUse(Node* node) const override {
-    return node == return_value();
-  }
+  bool HasImplicitUse(Node* node) const final { return node == return_value(); }
+
+ protected:
+  absl::Status InternalRebuildSideTables() final;
 
  private:
   Node* return_value_ = nullptr;
+  Type* return_type_ = nullptr;
+  // If true this is a non-synth function. It must have an empty-tuple return
+  // type.
+  bool non_synth_ = false;
+
+  std::vector<AttributeData> attributes_;
+};
+
+// A function which has been scheduled and contains information about which
+// nodes execute in which pipeline stage.
+class ScheduledFunction : public Function {
+ public:
+  ScheduledFunction(std::string_view name, Package* package)
+      : Function(name, package) {}
+
+  bool IsScheduled() const override { return true; }
+
+  // Creates a clone of the scheduled function with the new name 'new_name'.
+  // Function is owned by target_package.  call_remapping specifies any function
+  // substitutions to be used in the cloned function, e.g. If call_remapping
+  // holds {funcA, funcB}, any references to funcA in the function will be
+  // references to funcB in the cloned function.
+  absl::StatusOr<ScheduledFunction*> Clone(
+      std::string_view new_name, Package* target_package = nullptr,
+      const absl::flat_hash_map<const Function*, Function*>& call_remapping =
+          {}) const {
+    XLS_ASSIGN_OR_RETURN(
+        Function * cloned_function,
+        Function::Clone(new_name, target_package, call_remapping));
+    return absl::down_cast<ScheduledFunction*>(cloned_function);
+  }
 };
 
 }  // namespace xls

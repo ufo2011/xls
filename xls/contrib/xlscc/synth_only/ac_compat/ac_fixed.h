@@ -1,4 +1,4 @@
-// Copyright 2021 The XLS Authors
+// Copyright 2022 The XLS Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,20 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef __AC_FIXED_H__
-#define __AC_FIXED_H__
+#ifndef __AC_FIXED_COMPAT_H__
+#define __AC_FIXED_COMPAT_H__
 
 #include "ac_int.h"
+#include "xls_fixed.h"
 
-// Non-functional stub for ac_fixed
-template <int W, int I, bool S = true, ac_q_mode Q = AC_TRN,
-          ac_o_mode O = AC_WRAP>
-class ac_fixed {
- public:
-  ac_fixed() {}
-  template <typename T>
-  ac_fixed(const T& o) {}
-  int to_int() { return 0; }
-};
+template <int Width, int IntegerWidth, bool Signed,
+          ac_datatypes::ac_q_mode Quantization = AC_TRN,
+          ac_datatypes::ac_o_mode Overflow = AC_WRAP>
+using ac_fixed = XlsFixed<Width, IntegerWidth, Signed, Quantization, Overflow>;
 
-#endif  //__AC_FIXED_H__
+#endif  //__AC_FIXED_COMPAT_H__

@@ -15,8 +15,16 @@
 #ifndef XLS_IR_SOURCE_LOCATION_H_
 #define XLS_IR_SOURCE_LOCATION_H_
 
+#include <compare>
+#include <iterator>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/algorithm/container.h"
 #include "absl/strings/str_format.h"
-#include "absl/types/optional.h"
+#include "absl/strings/str_join.h"
+#include "absl/types/span.h"
 #include "xls/ir/fileno.h"
 
 namespace xls {
@@ -27,7 +35,7 @@ class SourceLocation {
  public:
   SourceLocation() : SourceLocation(Fileno(0), Lineno(0), Colno(0)) {}
   SourceLocation(Fileno fileno, Lineno lineno, Colno colno)
-    : fileno_(fileno), lineno_(lineno), colno_(colno) {}
+      : fileno_(fileno), lineno_(lineno), colno_(colno) {}
   SourceLocation(const SourceLocation& other) = default;
   SourceLocation& operator=(const SourceLocation& other) = default;
 
@@ -40,10 +48,55 @@ class SourceLocation {
                            colno_.value());
   }
 
+  bool operator==(const SourceLocation& other) const = default;
+
+  std::strong_ordering operator<=>(const SourceLocation& other) const {
+    if (fileno_ != other.fileno_) {
+      return fileno_.value() <=> other.fileno_.value();
+    }
+    if (lineno_ != other.lineno_) {
+      return lineno_.value() <=> other.lineno_.value();
+    }
+    return colno_.value() <=> other.colno_.value();
+  }
+
  private:
   Fileno fileno_;
   Lineno lineno_;
   Colno colno_;
+};
+
+struct SourceInfo {
+  std::vector<SourceLocation> locations;
+
+  SourceInfo() = default;
+  explicit SourceInfo(const SourceLocation& loc) : locations({loc}) {}
+  explicit SourceInfo(std::vector<SourceLocation>&& locs)
+      : locations(std::move(locs)) {}
+  explicit SourceInfo(absl::Span<const SourceLocation> locs)
+      : locations(locs.begin(), locs.end()) {}
+
+  bool Empty() const { return locations.empty(); }
+
+  std::string ToString() const {
+    std::vector<std::string> strings;
+    strings.reserve(locations.size());
+    for (const SourceLocation& location : locations) {
+      strings.push_back(absl::StrFormat("(%s)", location.ToString()));
+    }
+    return absl::StrFormat("[%s]", absl::StrJoin(strings, ", "));
+  }
+
+  SourceInfo Extend(const SourceLocation& location) const {
+    SourceInfo extended = *this;
+    extended.locations.push_back(location);
+    return extended;
+  }
+  SourceInfo Extend(const SourceInfo& source_info) const {
+    SourceInfo extended = *this;
+    absl::c_copy(source_info.locations, std::back_inserter(extended.locations));
+    return extended;
+  }
 };
 
 }  // namespace xls

@@ -14,16 +14,33 @@
 
 #include "xls/netlist/lib_parser.h"
 
+#include <cctype>
+#include <cstdint>
+#include <fstream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/container/inlined_vector.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
-#include "xls/common/logging/logging.h"
+#include "absl/types/variant.h"
+#include "xls/common/status/status_macros.h"
 
 namespace xls {
 namespace netlist {
 namespace cell_lib {
 
 /* static */ absl::StatusOr<CharStream> CharStream::FromPath(
-    absl::string_view path) {
+    std::string_view path) {
   std::ifstream file_stream{std::string(path)};
   if (file_stream.is_open()) {
     return CharStream(std::move(file_stream));
@@ -64,19 +81,19 @@ std::string TokenKindToString(TokenKind kind) {
 
 absl::StatusOr<Token> Scanner::ScanIdentifier() {
   const Pos start_pos = cs_->GetPos();
-  XLS_CHECK(IsIdentifierStart(cs_->PeekCharOrDie()));
+  CHECK(IsIdentifierStart(cs_->PeekCharOrDie()));
   absl::InlinedVector<char, 16> chars;
   while (!cs_->AtEof() && IsIdentifierRest(cs_->PeekCharOrDie())) {
     chars.push_back(cs_->PopCharOrDie());
   }
   return Token::Identifier(
-      start_pos, std::string(absl::string_view(chars.data(), chars.size())));
+      start_pos, std::string(std::string_view(chars.data(), chars.size())));
 }
 
 // Scans a number token.
 absl::StatusOr<Token> Scanner::ScanNumber() {
   const Pos start_pos = cs_->GetPos();
-  XLS_CHECK(std::isdigit(cs_->PeekCharOrDie()));
+  CHECK_NE(std::isdigit(cs_->PeekCharOrDie()), 0);
   absl::InlinedVector<char, 16> chars;
   while (!cs_->AtEof()) {
     if (IsNumberRest(cs_->PeekCharOrDie())) {
@@ -89,13 +106,13 @@ absl::StatusOr<Token> Scanner::ScanNumber() {
     }
   }
   return Token::Number(
-      start_pos, std::string(absl::string_view(chars.data(), chars.size())));
+      start_pos, std::string(std::string_view(chars.data(), chars.size())));
 }
 
 // Scans a string token.
 absl::StatusOr<Token> Scanner::ScanQuotedString() {
   const Pos start_pos = cs_->GetPos();
-  XLS_CHECK(cs_->TryDropChar('"'));
+  CHECK(cs_->TryDropChar('"'));
   absl::InlinedVector<char, 16> chars;
   while (true) {
     if (cs_->AtEof()) {
@@ -110,12 +127,12 @@ absl::StatusOr<Token> Scanner::ScanQuotedString() {
     chars.push_back(c);
   }
   return Token::QuotedString(
-      start_pos, std::string(absl::string_view(chars.data(), chars.size())));
+      start_pos, std::string(std::string_view(chars.data(), chars.size())));
 }
 
 absl::Status Scanner::PeekInternal() {
-  XLS_DCHECK(!lookahead_.has_value());
-  XLS_DCHECK(!cs_->AtEof());
+  DCHECK(!lookahead_.has_value());
+  DCHECK(!cs_->AtEof());
   if (IsIdentifierStart(cs_->PeekCharOrDie())) {
     XLS_ASSIGN_OR_RETURN(lookahead_, ScanIdentifier());
     DropWhitespaceAndComments();
@@ -173,7 +190,7 @@ absl::Status Scanner::PeekInternal() {
   if (const KVEntry* kv = absl::get_if<KVEntry>(&entry)) {
     return absl::StrFormat("(%s \"%s\")", kv->key, kv->value);
   }
-  const auto& block = absl::get<std::unique_ptr<Block>>(entry);
+  const auto& block = std::get<std::unique_ptr<Block>>(entry);
   return block->ToString();
 }
 
@@ -190,7 +207,7 @@ std::string Block::ToString() const {
 }
 
 std::vector<const Block*> Block::GetSubBlocks(
-    absl::optional<absl::string_view> target_kind) const {
+    std::optional<std::string_view> target_kind) const {
   std::vector<const Block*> results;
   for (const BlockEntry& item : entries) {
     if (const auto* block = absl::get_if<std::unique_ptr<Block>>(&item)) {
@@ -202,25 +219,25 @@ std::vector<const Block*> Block::GetSubBlocks(
   return results;
 }
 
-const std::string& Block::GetKVOrDie(absl::string_view target_key) const {
+const std::string& Block::GetKVOrDie(std::string_view target_key) const {
   for (const BlockEntry& item : entries) {
     if (const KVEntry* kv_entry = absl::get_if<KVEntry>(&item);
         kv_entry->key == target_key) {
       return kv_entry->value;
     }
   }
-  XLS_LOG(FATAL) << "Target key is not present in " << kind
-                 << " block: " << target_key;
+  LOG(FATAL) << "Target key is not present in " << kind
+             << " block: " << target_key;
 }
 
-int64_t Block::CountEntries(absl::string_view target) const {
+int64_t Block::CountEntries(std::string_view target) const {
   int64_t count = 0;
   for (const BlockEntry& entry : entries) {
     if (const KVEntry* kv = absl::get_if<KVEntry>(&entry)) {
-      count += kv->key == target;
+      count += static_cast<int64_t>(kv->key == target);
     } else {
-      const Block* block = absl::get<std::unique_ptr<Block>>(entry).get();
-      count += block->kind == target;
+      const Block* block = std::get<std::unique_ptr<Block>>(entry).get();
+      count += static_cast<int64_t>(block->kind == target);
     }
   }
   return count;
@@ -232,7 +249,7 @@ absl::StatusOr<bool> Parser::TryDropToken(TokenKind target, Pos* pos) {
     if (pos != nullptr) {
       *pos = peek->pos();
     }
-    XLS_CHECK(scanner_->Pop().ok());
+    CHECK(scanner_->Pop().ok());
     return true;
   }
   return false;
@@ -246,7 +263,7 @@ absl::Status Parser::DropTokenOrError(TokenKind kind) {
   }
   return absl::OkStatus();
 }
-absl::Status Parser::DropIdentifierOrError(absl::string_view target) {
+absl::Status Parser::DropIdentifierOrError(std::string_view target) {
   XLS_ASSIGN_OR_RETURN(std::string identifier, PopIdentifierOrError());
   if (identifier != target) {
     return absl::InvalidArgumentError(absl::StrFormat(
@@ -296,6 +313,14 @@ absl::StatusOr<std::vector<BlockEntry>> Parser::ParseEntries() {
     if (dropped_colon) {
       Pos last_pos;
       XLS_ASSIGN_OR_RETURN(std::string value, PopValueOrError(&last_pos));
+
+      // Could be a colon-ref-type value, e.g., Foo:Bar.
+      XLS_ASSIGN_OR_RETURN(bool dropped_another_colon,
+                           TryDropToken(TokenKind::kColon));
+      if (dropped_another_colon) {
+        XLS_ASSIGN_OR_RETURN(std::string sub_value, PopValueOrError());
+        absl::StrAppend(&value, ":", sub_value);
+      }
       result.push_back(KVEntry{identifier, value});
       XLS_ASSIGN_OR_RETURN(bool dropped_semi, TryDropToken(TokenKind::kSemi));
       if (!dropped_semi) {
@@ -327,7 +352,8 @@ absl::StatusOr<absl::InlinedVector<std::string, 4>> Parser::ParseValues(
         *end_pos = pos;
       }
       break;
-    } else if (!result.empty()) {
+    }
+    if (!result.empty()) {
       XLS_RETURN_IF_ERROR(DropTokenOrError(TokenKind::kComma));
     }
     XLS_ASSIGN_OR_RETURN(std::string value, PopValueOrError());
@@ -338,7 +364,7 @@ absl::StatusOr<absl::InlinedVector<std::string, 4>> Parser::ParseValues(
 
 absl::StatusOr<std::unique_ptr<Block>> Parser::ParseBlock(
     std::string identifier) {
-  auto block = absl::make_unique<Block>();
+  auto block = std::make_unique<Block>();
   block->kind = std::move(identifier);
 
   // Once we've seen the block kind we know whether it's in the allowlist or

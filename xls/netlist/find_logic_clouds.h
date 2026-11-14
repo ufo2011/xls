@@ -15,8 +15,10 @@
 #ifndef XLS_NETLIST_FIND_LOGIC_CLOUDS_H_
 #define XLS_NETLIST_FIND_LOGIC_CLOUDS_H_
 
+#include <string>
 #include <vector>
 
+#include "absl/types/span.h"
 #include "xls/netlist/netlist.h"
 
 namespace xls {

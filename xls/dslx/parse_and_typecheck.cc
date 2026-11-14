@@ -14,29 +14,170 @@
 
 #include "xls/dslx/parse_and_typecheck.h"
 
-#include "xls/dslx/parser.h"
-#include "xls/dslx/scanner.h"
-#include "xls/dslx/typecheck.h"
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/cleanup/cleanup.h"
+#include "absl/log/check.h"
+#include "absl/status/statusor.h"
+#include "xls/common/file/get_runfile_path.h"
+#include "xls/common/status/ret_check.h"
+#include "xls/common/status/status_macros.h"
+#include "xls/dslx/frontend/comment_data.h"
+#include "xls/dslx/frontend/module.h"
+#include "xls/dslx/frontend/parser.h"
+#include "xls/dslx/frontend/pos.h"
+#include "xls/dslx/frontend/scanner.h"
+#include "xls/dslx/frontend/semantics_analysis.h"
+#include "xls/dslx/frontend/test_function_transformer.h"
+#include "xls/dslx/import_data.h"
+#include "xls/dslx/ir_convert/convert_options.h"
+#include "xls/dslx/type_system/type_info.h"
+#include "xls/dslx/type_system_v2/builtin_trait_deriver.h"
+#include "xls/dslx/type_system_v2/populate_table.h"
+#include "xls/dslx/type_system_v2/trait_deriver.h"
+#include "xls/dslx/type_system_v2/type_inference_error_handler.h"
+#include "xls/dslx/type_system_v2/typecheck_module_v2.h"
+#include "xls/dslx/warning_collector.h"
 
 namespace xls::dslx {
 
 absl::StatusOr<TypecheckedModule> ParseAndTypecheck(
-    absl::string_view text, absl::string_view path,
-    absl::string_view module_name, ImportData* import_data,
-    absl::Span<const std::string> additional_search_paths) {
-  Scanner scanner{std::string{path}, std::string{text}};
-  Parser parser(std::string{module_name}, &scanner);
-  XLS_ASSIGN_OR_RETURN(std::unique_ptr<Module> module, parser.ParseModule());
+    std::string_view text, std::string_view path, std::string_view module_name,
+    ImportData* import_data, std::vector<CommentData>* comments,
+    const ConvertOptions& options, TypeInferenceErrorHandler error_handler,
+    TraitDeriver* trait_deriver) {
+  XLS_RET_CHECK(import_data != nullptr);
+
+  FileTable& file_table = import_data->file_table();
+  Fileno fileno = file_table.GetOrCreate(path);
+
+  // The outermost import doesn't have a real import statement associated with
+  // it, but we need the filename to be correct to detect cycles.
+  const Span fake_import_span = Span(Pos(fileno, 0, 0), Pos(fileno, 0, 0));
+  XLS_RETURN_IF_ERROR(import_data->AddToImporterStack(fake_import_span, path));
+  absl::Cleanup cleanup = [&] {
+    CHECK_OK(import_data->PopFromImporterStack(fake_import_span));
+  };
+
+  if (!import_data->GetBuiltinStubsModule().ok()) {
+    WarningCollector warnings(import_data->enabled_warnings());
+    XLS_RETURN_IF_ERROR(PopulateBuiltinStubs(
+        import_data, &warnings, import_data->GetOrCreateInferenceTable()));
+  }
+
+  XLS_ASSIGN_OR_RETURN(Module * builtin_stubs,
+                       import_data->GetBuiltinStubsModule());
   XLS_ASSIGN_OR_RETURN(
-      TypeInfo * type_info,
-      CheckModule(module.get(), import_data, additional_search_paths));
-  TypecheckedModule result{module.get(), type_info};
+      std::unique_ptr<Module> module,
+      ParseModule(text, path, module_name, import_data->file_table(), comments,
+                  /*parse_fn_stubs=*/false, builtin_stubs));
+
+  XLS_RETURN_IF_ERROR(
+      import_data->RegisterConfiguredValues(options.configured_values));
+  module->SetConfiguredValuesMap(import_data->ResolveConfiguredValuesForModule(
+      module_name, path, /*is_entry_module=*/true));
+  return TypecheckModule(std::move(module), path, import_data, error_handler,
+                         trait_deriver, /*transform_test_functions=*/true);
+}
+
+absl::StatusOr<std::unique_ptr<Module>> ParseModule(
+    std::string_view text, std::string_view path, std::string_view module_name,
+    FileTable& file_table, std::vector<CommentData>* comments,
+    bool parse_fn_stubs, const Module* builtin_stubs) {
+  Fileno fileno = file_table.GetOrCreate(path);
+  Scanner scanner(file_table, fileno, std::string{text});
+  Parser parser(std::string{module_name}, &scanner, parse_fn_stubs);
+  XLS_ASSIGN_OR_RETURN(auto module,
+                       parser.ParseModule(/*bindings=*/nullptr, builtin_stubs));
+  if (comments != nullptr) {
+    *comments = scanner.PopComments();
+  }
+  return module;
+}
+
+absl::StatusOr<std::unique_ptr<Module>> ParseModuleFromFileAtPath(
+    std::string_view file_path, std::string_view module_name,
+    ImportData* import_data) {
+  XLS_ASSIGN_OR_RETURN(std::filesystem::path path,
+                       GetXlsRunfilePath(file_path));
+  XLS_ASSIGN_OR_RETURN(std::string text_dslx,
+                       import_data->vfs().GetFileContents(path));
+  if (!import_data->GetBuiltinStubsModule().ok()) {
+    WarningCollector warnings(import_data->enabled_warnings());
+    XLS_RETURN_IF_ERROR(PopulateBuiltinStubs(
+        import_data, &warnings, import_data->GetOrCreateInferenceTable()));
+  }
+  XLS_ASSIGN_OR_RETURN(Module * builtin_stubs,
+                       import_data->GetBuiltinStubsModule());
+  return ParseModule(text_dslx, file_path, module_name,
+                     import_data->file_table(), /*comments=*/nullptr,
+                     /*parse_fn_stubs=*/false, builtin_stubs);
+}
+
+absl::StatusOr<TypecheckedModule> TypecheckModule(
+    std::unique_ptr<Module> module, std::string_view path,
+    ImportData* import_data, TypeInferenceErrorHandler error_handler,
+    TraitDeriver* trait_deriver, bool transform_test_functions) {
+  XLS_RET_CHECK(module.get() != nullptr);
+  XLS_RET_CHECK(import_data != nullptr);
+
+  if (trait_deriver == nullptr) {
+    trait_deriver = import_data->GetBuiltinTraitDeriver();
+  }
+
+  std::string_view module_name = module->name();
+
+  WarningCollector warnings(import_data->enabled_warnings());
+
+  std::unique_ptr<SemanticsAnalysis> semantics_analysis =
+      std::make_unique<SemanticsAnalysis>();
+  XLS_ASSIGN_OR_RETURN(
+      std::unique_ptr<ModuleInfo> module_info,
+      TypecheckModuleV2(std::move(module), path, import_data, &warnings,
+                        std::move(semantics_analysis), error_handler,
+                        trait_deriver));
+
+  if (transform_test_functions) {
+    // Transform proc-spawning test functions into test procs.
+    TestFunctionTransformer transformer(module_info->module(),
+                                        *module_info->type_info());
+    XLS_ASSIGN_OR_RETURN(std::unique_ptr<Module> new_module,
+                         transformer.TransformTestFunctions());
+    if (new_module != nullptr) {
+      // The module was modified, so we will re-parse and typecheck it again.
+      std::string new_module_as_string = new_module->ToString();
+      XLS_ASSIGN_OR_RETURN(Module * builtin_stubs,
+                           import_data->GetBuiltinStubsModule());
+      XLS_ASSIGN_OR_RETURN(
+          std::unique_ptr<Module> newly_parsed_module,
+          ParseModule(new_module_as_string, path, module_name,
+                      import_data->file_table(), /*comments=*/nullptr,
+                      /*parse_fn_stubs=*/false, builtin_stubs));
+      newly_parsed_module->SetConfiguredValuesMap(
+          module_info->module().configured_values());
+      // Keep the old module alive until import_data is destroyed.
+      import_data->KeepAlive(std::move(module_info));
+      return TypecheckModule(std::move(newly_parsed_module), path, import_data,
+                             error_handler, trait_deriver,
+                             // Prevent infinite recursion.
+                             /*transform_test_functions=*/false);
+    }
+  }
+
+  TypeInfo* type_info = module_info->type_info();
   XLS_ASSIGN_OR_RETURN(ImportTokens subject,
                        ImportTokens::FromString(module_name));
-  XLS_RETURN_IF_ERROR(
-      import_data->Put(subject, ModuleInfo{std::move(module), type_info})
-          .status());
-  return result;
+  XLS_ASSIGN_OR_RETURN(ModuleInfo * stored_info,
+                       import_data->Put(subject, std::move(module_info)));
+  return TypecheckedModule{.module = &stored_info->module(),
+                           .type_info = type_info,
+                           .warnings = std::move(warnings)};
 }
 
 }  // namespace xls::dslx

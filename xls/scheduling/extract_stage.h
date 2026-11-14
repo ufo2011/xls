@@ -17,13 +17,14 @@
 
 #include "absl/status/statusor.h"
 #include "xls/ir/function.h"
+#include "xls/ir/function_base.h"
 #include "xls/scheduling/pipeline_schedule.h"
 
 namespace xls {
 
 // Creates a new function containing only the nodes within the specified
 // pipeline stage and new params/output nodes.
-absl::StatusOr<Function*> ExtractStage(Function* src,
+absl::StatusOr<Function*> ExtractStage(FunctionBase* src,
                                        const PipelineSchedule& schedule,
                                        int stage);
 

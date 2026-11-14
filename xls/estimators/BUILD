@@ -1,0 +1,265 @@
+# Copyright 2024 The XLS Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@protobuf//bazel:py_proto_library.bzl", "py_proto_library")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//xls/build_rules:py_oss_defs.bzl", "pytype_strict_binary", "pytype_strict_contrib_test", "pytype_strict_library")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//xls:xls_internal"],
+    licenses = ["notice"],  # Apache 2.0
+)
+
+# Helper alias for all the configured area and delay models.
+cc_library(
+    name = "estimators",
+    # Don't remove this. It registers the models.
+    tags = ["keep_dep"],
+    visibility = ["//xls:xls_users"],
+    deps = [
+        "//xls/estimators/area_model/models",
+        "//xls/estimators/delay_model/models",
+    ],
+    alwayslink = 1,
+)
+
+proto_library(
+    name = "estimator_model_proto",
+    srcs = ["estimator_model.proto"],
+)
+
+cc_proto_library(
+    name = "estimator_model_cc_proto",
+    deps = [":estimator_model_proto"],
+)
+
+cc_library(
+    name = "proto_estimator_utils",
+    srcs = ["proto_estimator_utils.cc"],
+    hdrs = ["proto_estimator_utils.h"],
+    deps = [
+        ":estimator_model_cc_proto",
+        "//xls/common/status:status_macros",
+        "//xls/ir",
+        "//xls/ir:op",
+        "//xls/ir:op_list",
+        "//xls/ir:type",
+        "@abseil-cpp//absl/base:no_destructor",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+py_proto_library(
+    name = "estimator_model_py_pb2",
+    deps = [":estimator_model_proto"],
+)
+
+pytype_strict_binary(
+    name = "generate_compiled_estimator_model",
+    srcs = ["generate_compiled_estimator_model.py"],
+    deps = [
+        ":estimator_model",
+        ":estimator_model_py_pb2",
+        "//xls/estimators/area_model:area_model_utils",
+        "@abseil-py//absl:app",
+        "@abseil-py//absl/flags",
+        "@protobuf//:protobuf_python",
+    ],
+)
+
+pytype_strict_library(
+    name = "estimator_model",
+    srcs = ["estimator_model.py"],
+    deps = [
+        ":estimator_model_py_pb2",
+        "@xls_pip_deps//numpy",
+        "@xls_pip_deps//scipy",
+    ],
+)
+
+pytype_strict_contrib_test(
+    name = "estimator_model_test",
+    srcs = ["estimator_model_test.py"],
+    tags = ["nomsan"],  # scipy seems not to be msan-clean.
+    deps = [
+        ":estimator_model",
+        ":estimator_model_py_pb2",
+        "@abseil-py//absl/testing:absltest",
+        "@protobuf//:protobuf_python",
+    ],
+)
+
+pytype_strict_library(
+    name = "op_module_generator",
+    srcs = ["op_module_generator.py"],
+    data = [
+        "//xls/dev_tools:parse_ir",
+        "//xls/tools:codegen_main",
+    ],
+    deps = [
+        "//xls/codegen:module_signature_py_pb2",
+        "//xls/common:runfiles",
+        "@protobuf//:protobuf_python",
+    ],
+)
+
+pytype_strict_contrib_test(
+    name = "op_module_generator_test",
+    srcs = ["op_module_generator_test.py"],
+    data = glob(["testdata/*"]),
+    deps = [
+        ":op_module_generator",
+        "//xls/common:runfiles",
+        "@abseil-py//absl/testing:absltest",
+    ],
+)
+
+pytype_strict_binary(
+    name = "estimator_model_join",
+    srcs = ["estimator_model_join.py"],
+    deps = [
+        ":estimator_model",
+        ":estimator_model_py_pb2",
+        ":estimator_model_utils",
+        "//xls/common:gfile",
+        "@abseil-py//absl:app",
+        "@abseil-py//absl/flags",
+        "@protobuf//:protobuf_python",
+    ],
+)
+
+pytype_strict_contrib_test(
+    name = "estimator_model_join_test",
+    srcs = ["estimator_model_join_test.py"],
+    data = [
+        ":estimator_model_join",
+    ],
+    deps = [
+        "//xls/common:runfiles",
+        "//xls/common:test_base",
+        "@abseil-py//absl/testing:absltest",
+    ],
+)
+
+pytype_strict_library(
+    name = "estimator_model_utils",
+    srcs = ["estimator_model_utils.py"],
+    deps = [":estimator_model_py_pb2"],
+)
+
+pytype_strict_contrib_test(
+    name = "estimator_model_utils_test",
+    srcs = ["estimator_model_utils_test.py"],
+    deps = [
+        ":estimator_model_py_pb2",
+        ":estimator_model_utils",
+        "//xls/common:test_base",
+        "@abseil-py//absl/testing:absltest",
+        "@abseil-py//absl/testing:parameterized",
+    ],
+)
+
+pytype_strict_binary(
+    name = "extract_sample_points_from_estimator_model",
+    srcs = ["extract_sample_points_from_estimator_model.py"],
+    deps = [
+        ":estimator_model_py_pb2",
+        "//xls/common:gfile",
+        "@abseil-py//absl:app",
+        "@abseil-py//absl/flags",
+        "@protobuf//:protobuf_python",
+    ],
+)
+
+pytype_strict_contrib_test(
+    name = "extract_sample_points_from_estimator_model_test",
+    srcs = ["extract_sample_points_from_estimator_model_test.py"],
+    data = [
+        ":extract_sample_points_from_estimator_model",
+    ],
+    deps = [
+        "//xls/common:runfiles",
+        "//xls/common:test_base",
+        "@abseil-py//absl/testing:absltest",
+    ],
+)
+
+pytype_strict_binary(
+    name = "estimator_model_stats",
+    srcs = ["estimator_model_stats.py"],
+    deps = [
+        ":estimator_model",
+        ":estimator_model_py_pb2",
+        "@abseil-py//absl:app",
+        "@abseil-py//absl/flags",
+        "@abseil-py//absl/logging",
+        "@protobuf//:protobuf_python",
+        "@xls_pip_deps//numpy",
+    ],
+)
+
+pytype_strict_contrib_test(
+    name = "estimator_model_stats_test",
+    srcs = ["estimator_model_stats_test.py"],
+    data = [
+        "testdata/asap7_delay_data_points.textproto",
+        "testdata/asap7_delay_model_stats.csv",
+        "testdata/sky130_delay_data_points.textproto",
+        "testdata/sky130_delay_model_stats.csv",
+        "testdata/unit_delay_data_points.textproto",
+        "testdata/unit_delay_model_stats.csv",
+        ":estimator_model_stats",
+    ],
+    tags = [
+        "noasan",  # TODO: b/436249343 - Remove this when SciPy is patched.
+        "nomsan",  # scipy seems not to be msan-clean.
+    ],
+    deps = [
+        "//xls/common:runfiles",
+        "//xls/common:test_base",
+        "@abseil-py//absl/testing:absltest",
+    ],
+)
+
+pytype_strict_binary(
+    name = "run_op_characterization",
+    srcs = ["run_op_characterization.py"],
+    deps = [
+        "@abseil-py//absl:app",
+        "@abseil-py//absl/flags",
+        "@abseil-py//absl/logging",
+        "@xls_pip_deps//portpicker",
+    ],
+)
+
+bzl_library(
+    name = "build_defs_bzl",
+    srcs = ["build_defs.bzl"],
+    visibility = ["//xls:xls_internal"],
+    deps = [
+        "//xls/build_rules:xls_cc_embed_data_rules_bzl",
+        "//xls/build_rules:xls_diff_test_bzl",
+        "//xls/build_rules:xls_utilities_bzl",
+        "@rules_cc//cc:core_rules",
+        "@rules_cc//cc/common",
+    ],
+)

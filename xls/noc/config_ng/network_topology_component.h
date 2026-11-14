@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef XLS_NOC_CONFIG_NETWORK_TOPOLOGY_COMPONENT_H_
-#define XLS_NOC_CONFIG_NETWORK_TOPOLOGY_COMPONENT_H_
+#ifndef XLS_NOC_CONFIG_NG_NETWORK_TOPOLOGY_COMPONENT_H_
+#define XLS_NOC_CONFIG_NG_NETWORK_TOPOLOGY_COMPONENT_H_
 
+#include "absl/status/status.h"
 #include "xls/noc/config_ng/coordinate.h"
 #include "xls/noc/config_ng/network_component.h"
 
@@ -27,9 +28,9 @@ class ChannelTopologyComponent final : public NetworkComponent {
   explicit ChannelTopologyComponent(NetworkView* view);
 
   // See xls::noc::NetworkComponent::Visit.
-  absl::Status Visit(NetworkComponentVisitor& v);
+  absl::Status Visit(NetworkComponentVisitor& v) override;
 
-  ~ChannelTopologyComponent();
+  ~ChannelTopologyComponent() override;
 };
 
 // A receive port used in the network topology view.
@@ -39,9 +40,9 @@ class ReceivePortTopologyComponent final : public NetworkComponent {
   explicit ReceivePortTopologyComponent(NetworkView* view);
 
   // See xls::noc::NetworkComponent::Visit.
-  absl::Status Visit(NetworkComponentVisitor& v);
+  absl::Status Visit(NetworkComponentVisitor& v) override;
 
-  ~ReceivePortTopologyComponent();
+  ~ReceivePortTopologyComponent() override;
 };
 
 // A router used in the network topology view.
@@ -55,9 +56,9 @@ class RouterTopologyComponent final : public NetworkComponent {
   RouterTopologyComponent& SetCoordinate(const Coordinate& coordinate);
 
   // See xls::noc::NetworkComponent::Visit.
-  absl::Status Visit(NetworkComponentVisitor& v);
+  absl::Status Visit(NetworkComponentVisitor& v) override;
 
-  ~RouterTopologyComponent();
+  ~RouterTopologyComponent() override;
 
  private:
   Coordinate coordinate_;
@@ -70,11 +71,11 @@ class SendPortTopologyComponent final : public NetworkComponent {
   explicit SendPortTopologyComponent(NetworkView* view);
 
   // See xls::noc::NetworkComponent::Visit.
-  absl::Status Visit(NetworkComponentVisitor& v);
+  absl::Status Visit(NetworkComponentVisitor& v) override;
 
-  ~SendPortTopologyComponent();
+  ~SendPortTopologyComponent() override;
 };
 
 }  // namespace xls::noc
 
-#endif  // XLS_NOC_CONFIG_NETWORK_TOPOLOGY_COMPONENT_H_
+#endif  // XLS_NOC_CONFIG_NG_NETWORK_TOPOLOGY_COMPONENT_H_

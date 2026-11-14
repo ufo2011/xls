@@ -12,32 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub const IDX = u32:5;
+const IDX = s32:5;
 
-fn p<N: u32>(a: u32) -> uN[N] {
-  a[:N]
-}
+fn p<N: s32, N_U32: u32 = {N as u32}>(a: u32) -> uN[N_U32] { a[:N] }
 
-fn p1<N: u32, M: u32 = N+u32:1>(a: u32) -> uN[M] {
-  // TODO(leary): 2021-03-05 This should flag a typechecking error for a bare
-  // literal.
-  //a[:N+1]
-  a[:N+u32:1]
-}
+fn p1<N: s32, M: s32 = {N + s32:1}, M_U32: u32 = {M as u32}>(a: u32) -> uN[M_U32] { a[:N + s32:1] }
 
 fn main() -> (u8, u16, u8, u4, u17) {
-  let a = u32:0xdeadbeef;
-  let x = u32:8;
-  let i: u8 = a[0:8];
-  let j: u16 = p<u32:16>(a);
-  let k: u8 = a[u32:1 + u32:8 : 17];
-  let l: u4 = a[1:IDX];
-  let m: u17 = p1<u32:16>(a);
-  (i, j, k, l, m)
+    let a = u32:0xdeadbeef;
+    let i: u8 = a[0:8];
+    let j: u16 = p<s32:16>(a);
+    let k: u8 = a[s32:1 + s32:8:17];
+    let l: u4 = a[1:IDX];
+    let m: u17 = p1<s32:16>(a);
+    (i, j, k, l, m)
 }
 
-#![test]
+#[test]
 fn test_non_constexpr_slice() {
-  let t = main();
-  assert_eq(t, (u8:239, u16:48879, u8:223, u4:7, u17:114415))
+    let t = main();
+    assert_eq(t, (u8:239, u16:48879, u8:223, u4:7, u17:114415))
 }

@@ -12,20 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import std
+import std;
 
 // Rotates the nibbles in the u8.
 fn main(x: u8) -> u8 {
-  for (i, x): (u4, u8) in range(u4:0, u4:4) {
-    std::rrot(x, u8:1)
-  }(x)
+    for (_, x): (u4, u8) in u4:0..u4:4 {
+        std::rotr(x, u8:1)
+    }(x)
 }
 
-#![test]
+#[test]
 fn main_test() {
-  let _ = assert_eq(u8:0xba, main(u8:0xab));
-  let _ = assert_eq(u8:0xdc, main(u8:0xcd));
-  let _ = assert_eq(u8:0x55, main(u8:0x55));
-  let _ = assert_eq(u8:0xaa, main(u8:0xaa));
-  ()
+    assert_eq(u8:0xba, main(u8:0xab));
+    assert_eq(u8:0xdc, main(u8:0xcd));
+    assert_eq(u8:0x55, main(u8:0x55));
+    assert_eq(u8:0xaa, main(u8:0xaa));
 }

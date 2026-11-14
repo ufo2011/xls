@@ -14,6 +14,8 @@
 
 """Generates a fuzz issue regression suite."""
 
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
 def _to_suffix(path):
     basename = path.split("/")[-1]
     if not basename.endswith(".x"):
@@ -23,7 +25,7 @@ def _to_suffix(path):
         basename = basename[len("crasher_"):]
     return basename
 
-def generate_crasher_regression_tests(name, srcs, prefix, failing = None, tags = None):
+def generate_crasher_regression_tests(name, srcs, prefix, failing = None, no_unopt_interpreter = None, tags = None):
     """Generates targets for fuzz-found issues.
 
     Also generates a manual suite called ":regression_tests" that will include
@@ -35,12 +37,15 @@ def generate_crasher_regression_tests(name, srcs, prefix, failing = None, tags =
         prefix: Prefix directory path for the testdata files.
         failing: Optional list of failing testdata paths (must be a string
             match with a member in srcs).
+        no_unopt_interpreter: Optional list of testdata paths that should not
+            use the unopt interpreter.
         tags: Optional mapping of testdata paths to additional tags (must
             be a string match with a member in srcs).
     """
     names = []
     failing = failing or []
     tags = tags or {}
+    no_unopt_interpreter = no_unopt_interpreter or []
     for f in srcs:
         if not f.endswith(".x"):
             fail()
@@ -49,16 +54,40 @@ def generate_crasher_regression_tests(name, srcs, prefix, failing = None, tags =
         names.append(test_name)
         fullpath = prefix + "/" + f
         broken = f in failing
-        native.sh_test(
+        target_tags = tags.get(f, [])
+        extra_args = []
+        if f in no_unopt_interpreter:
+            extra_args.append("--unopt_interpreter=false")
+        sh_test(
             name = test_name,
             srcs = ["//xls/fuzzer:run_crasher_sh"],
-            args = [fullpath],
+            args = [fullpath] + extra_args,
             data = [
                 "//xls/fuzzer:run_crasher",
                 f,
             ],
             tags = tags.get(f, []) + (["broken", "manual"] if broken else []),
         )
+
+        # Run a test that just tries to parse the config even if the tested code
+        # is failing. This ensures that failures remain at least somewhat
+        # runnable.
+        sh_test(
+            name = test_name + "_check_config_valid",
+            srcs = ["//xls/fuzzer:run_crasher_sh"],
+            args = [fullpath] + ["--only_check_config"],
+            data = [
+                "//xls/fuzzer:run_crasher",
+                f,
+            ],
+            tags = tags.get(f, []),
+        )
+
+    native.test_suite(
+        name = "failing_{}".format(name),
+        tags = ["broken", "manual"],
+        tests = [":run_crasher_test_{}".format(_to_suffix(f)) for f in failing],
+    )
 
     native.test_suite(
         name = name,

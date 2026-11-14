@@ -15,17 +15,21 @@
 #ifndef XLS_COMMON_BITS_UTIL_H_
 #define XLS_COMMON_BITS_UTIL_H_
 
-#include "xls/common/logging/logging.h"
+#include <algorithm>
+#include <cstdint>
+
+#include "absl/log/check.h"
+#include "absl/types/span.h"
 
 namespace xls {
 
 // Bits in a byte. Large-typed version of CHAR_BIT.
-constexpr int64_t kCharBit = 8;
+inline constexpr int64_t kCharBit = 8;
 
 // Helper that generates an (unsigned) mask with "bit_count" low bits set.
 inline uint64_t Mask(int64_t bit_count) {
-  XLS_DCHECK_GE(bit_count, 0);
-  XLS_DCHECK_LE(bit_count, 64);
+  DCHECK_GE(bit_count, 0);
+  DCHECK_LE(bit_count, 64);
   return bit_count == 64 ? -1ULL : (1ULL << bit_count) - 1;
 }
 

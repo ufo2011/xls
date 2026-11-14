@@ -14,39 +14,42 @@
 
 #include "xls/common/status/ret_check.h"
 
+#include <cstddef>
+#include <memory>
+#include <ostream>
+#include <sstream>
 #include <string>
 
-#include "absl/base/attributes.h"
-#include "absl/base/const_init.h"
 #include "absl/base/log_severity.h"
-#include "absl/flags/flag.h"
 #include "absl/status/status.h"
+#include "absl/status/status_builder.h"
+#include "xls/common/source_location.h"
 
 namespace xls {
 namespace internal_status_macros_ret_check {
 
-xabsl::StatusBuilder RetCheckFailSlowPath(xabsl::SourceLocation location) {
-  return xabsl::InternalErrorBuilder(location)
+absl::StatusBuilder RetCheckFailSlowPath(xabsl::SourceLocation location) {
+  return absl::StatusBuilder(absl::StatusCode::kInternal, location)
              .Log(absl::LogSeverity::kError)
              .EmitStackTrace()
          << "XLS_RET_CHECK failure (" << location.file_name() << ":"
          << location.line() << ") ";
 }
 
-xabsl::StatusBuilder RetCheckFailSlowPath(xabsl::SourceLocation location,
-                                          std::string* condition) {
+absl::StatusBuilder RetCheckFailSlowPath(xabsl::SourceLocation location,
+                                         std::string* condition) {
   std::unique_ptr<std::string> cleanup(condition);
   return RetCheckFailSlowPath(location) << *condition << " ";
 }
 
-xabsl::StatusBuilder RetCheckFailSlowPath(xabsl::SourceLocation location,
-                                          const char* condition) {
+absl::StatusBuilder RetCheckFailSlowPath(xabsl::SourceLocation location,
+                                         const char* condition) {
   return RetCheckFailSlowPath(location) << condition << " ";
 }
 
-xabsl::StatusBuilder RetCheckFailSlowPath(xabsl::SourceLocation location,
-                                          const char* condition,
-                                          const absl::Status& status) {
+absl::StatusBuilder RetCheckFailSlowPath(xabsl::SourceLocation location,
+                                         const char* condition,
+                                         const absl::Status& status) {
   return RetCheckFailSlowPath(location)
          << condition << " returned " << status.ToString() << " ";
 }

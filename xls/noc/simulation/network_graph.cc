@@ -14,11 +14,17 @@
 
 #include "xls/noc/simulation/network_graph.h"
 
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
-#include "xls/common/logging/logging.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/noc/simulation/common.h"
 
 namespace {
 
@@ -79,7 +85,16 @@ Network& NetworkManager::GetNetwork(NetworkId id) {
   return networks_.at(id.id());
 }
 
+const Network& NetworkManager::GetNetwork(NetworkId id) const {
+  return networks_.at(id.id());
+}
+
 NetworkComponent& NetworkManager::GetNetworkComponent(NetworkComponentId id) {
+  return networks_.at(id.GetNetworkId().id()).GetNetworkComponent(id);
+}
+
+const NetworkComponent& NetworkManager::GetNetworkComponent(
+    NetworkComponentId id) const {
   return networks_.at(id.GetNetworkId().id()).GetNetworkComponent(id);
 }
 
@@ -87,16 +102,24 @@ Connection& NetworkManager::GetConnection(ConnectionId id) {
   return networks_.at(id.GetNetworkId().id()).GetConnection(id);
 }
 
+const Connection& NetworkManager::GetConnection(ConnectionId id) const {
+  return networks_.at(id.GetNetworkId().id()).GetConnection(id);
+}
+
 Port& NetworkManager::GetPort(PortId id) {
   return networks_.at(id.GetNetworkId().id()).GetPort(id);
 }
 
-void NetworkManager::Dump(int indent_level) {
-  XLS_VLOG(1) << IndentLevel(indent_level) << "Network Manager:";
+const Port& NetworkManager::GetPort(PortId id) const {
+  return networks_.at(id.GetNetworkId().id()).GetPort(id);
+}
+
+void NetworkManager::Dump(int indent_level) const {
+  VLOG(1) << IndentLevel(indent_level) << "Network Manager:";
 
   int64_t i = 0;
-  for (auto network : networks_) {
-    XLS_VLOG(1) << IndentLevel(indent_level) << "- #" << i << " Network:";
+  for (const auto& network : networks_) {
+    VLOG(1) << IndentLevel(indent_level) << "- #" << i << " Network:";
 
     network.Dump(indent_level + 1);
 
@@ -177,7 +200,16 @@ NetworkComponent& Network::GetNetworkComponent(NetworkComponentId id) {
   return components_.at(id.id());
 }
 
+const NetworkComponent& Network::GetNetworkComponent(
+    NetworkComponentId id) const {
+  return components_.at(id.id());
+}
+
 Connection& Network::GetConnection(ConnectionId id) {
+  return connections_.at(id.id());
+}
+
+const Connection& Network::GetConnection(ConnectionId id) const {
   return connections_.at(id.id());
 }
 
@@ -185,20 +217,24 @@ Port& Network::GetPort(PortId id) {
   return components_.at(id.GetNetworkComponentId().id()).GetPort(id);
 }
 
-void Network::Dump(int indent_level) {
-  XLS_VLOG(1) << IndentLevel(indent_level)
-              << absl::StreamFormat("Network id %x", id_.AsUInt64());
+const Port& Network::GetPort(PortId id) const {
+  return components_.at(id.GetNetworkComponentId().id()).GetPort(id);
+}
+
+void Network::Dump(int indent_level) const {
+  VLOG(1) << IndentLevel(indent_level)
+          << absl::StreamFormat("Network id %x", id_.AsUInt64());
 
   int64_t i = 0;
-  for (auto component : components_) {
-    XLS_VLOG(1) << IndentLevel(indent_level) << "- #" << i << " Component:";
+  for (const auto& component : components_) {
+    VLOG(1) << IndentLevel(indent_level) << "- #" << i << " Component:";
     component.Dump(indent_level + 1);
     ++i;
   }
 
   i = 0;
   for (auto connection : connections_) {
-    XLS_VLOG(1) << IndentLevel(indent_level) << "- #" << i << " Connection:";
+    VLOG(1) << IndentLevel(indent_level) << "- #" << i << " Connection:";
     connection.Dump(indent_level + 1);
     ++i;
   }
@@ -219,8 +255,11 @@ absl::StatusOr<PortId> NetworkComponent::CreatePort(PortDirection dir) {
 }
 
 Port& NetworkComponent::GetPort(PortId id) { return ports_.at(id.id()); }
+const Port& NetworkComponent::GetPort(PortId id) const {
+  return ports_.at(id.id());
+}
 
-std::vector<PortId> NetworkComponent::GetPortIds() {
+std::vector<PortId> NetworkComponent::GetPortIds() const {
   std::vector<PortId> ret(ports_.size());
   for (int64_t i = 0; i < ports_.size(); ++i) {
     ret[i] = GetPortIdByIndex(i);
@@ -228,7 +267,7 @@ std::vector<PortId> NetworkComponent::GetPortIds() {
   return ret;
 }
 
-std::vector<PortId> NetworkComponent::GetOutputPortIds() {
+std::vector<PortId> NetworkComponent::GetOutputPortIds() const {
   std::vector<PortId> ret;
   ret.reserve(ports_.size());
 
@@ -240,7 +279,7 @@ std::vector<PortId> NetworkComponent::GetOutputPortIds() {
   return ret;
 }
 
-std::vector<PortId> NetworkComponent::GetInputPortIds() {
+std::vector<PortId> NetworkComponent::GetInputPortIds() const {
   std::vector<PortId> ret;
   ret.reserve(ports_.size());
 
@@ -252,25 +291,24 @@ std::vector<PortId> NetworkComponent::GetInputPortIds() {
   return ret;
 }
 
-void NetworkComponent::Dump(int indent_level) {
-  XLS_VLOG(1) << IndentLevel(indent_level)
-              << absl::StreamFormat("NetworkComponent id %x kind %d",
-                                    id_.AsUInt64(), kind_);
+void NetworkComponent::Dump(int indent_level) const {
+  VLOG(1) << IndentLevel(indent_level)
+          << absl::StreamFormat("NetworkComponent id %x kind %d",
+                                id_.AsUInt64(), kind_);
 
   int64_t i = 0;
   for (auto port : ports_) {
-    XLS_VLOG(1) << IndentLevel(indent_level) << "- #" << i << " Port:";
+    VLOG(1) << IndentLevel(indent_level) << "- #" << i << " Port:";
     port.Dump(indent_level + 1);
     ++i;
   }
 }
 
 // - Port
-void Port::Dump(int indent_level) {
-  XLS_VLOG(1) << IndentLevel(indent_level)
-              << absl::StreamFormat("Port id %x Dir %d Connection %x",
-                                    id_.AsUInt64(), dir_,
-                                    connection_.AsUInt64());
+void Port::Dump(int indent_level) const {
+  VLOG(1) << IndentLevel(indent_level)
+          << absl::StreamFormat("Port id %x Dir %d Connection %x",
+                                id_.AsUInt64(), dir_, connection_.AsUInt64());
 }
 
 // -  Connection
@@ -304,7 +342,8 @@ PortId Connection::Attach(PortId port) {
       p.SetAttached(id_);
 
       return port;
-    } else if (p.direction() == PortDirection::kInput) {  // To --> Input
+    }
+    if (p.direction() == PortDirection::kInput) {  // To --> Input
       // Detach this connection from the existing to port (if any)
       DetachSink();
 
@@ -319,11 +358,11 @@ PortId Connection::Attach(PortId port) {
   return PortId::kInvalid;
 }
 
-void Connection::Dump(int indent_level) {
-  XLS_VLOG(1) << IndentLevel(indent_level)
-              << absl::StreamFormat("Connection id %x src %x sink %x",
-                                    id_.AsUInt64(), src_.AsUInt64(),
-                                    sink_.AsUInt64());
+void Connection::Dump(int indent_level) const {
+  VLOG(1) << IndentLevel(indent_level)
+          << absl::StreamFormat("Connection id %x src %x sink %x",
+                                id_.AsUInt64(), src_.AsUInt64(),
+                                sink_.AsUInt64());
 }
 
 }  // namespace noc

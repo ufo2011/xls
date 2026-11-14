@@ -12,21 +12,42 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef XLS_CODEGEN_VERILOG_TEST_BASE_H_
-#define XLS_CODEGEN_VERILOG_TEST_BASE_H_
+#ifndef XLS_SIMULATION_VERILOG_TEST_BASE_H_
+#define XLS_SIMULATION_VERILOG_TEST_BASE_H_
 
+#include <cctype>
 #include <filesystem>
+#include <memory>
+#include <optional>
+#include <ostream>
+#include <string>
+#include <string_view>
+#include <vector>
 
-#include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/log/vlog_is_on.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
+#include "absl/strings/str_replace.h"
 #include "absl/strings/str_split.h"
-#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "xls/codegen/vast.h"
+#include "xls/codegen/codegen_options.h"
+#include "xls/codegen/module_signature.h"
+#include "xls/codegen/vast/vast.h"
+#include "xls/common/golden_files.h"
+#include "xls/common/logging/log_lines.h"
+#include "xls/common/source_location.h"
+#include "xls/common/status/matchers.h"
+#include "xls/simulation/module_simulator.h"
+#include "xls/simulation/module_testbench.h"
+#include "xls/simulation/verilog_include.h"
 #include "xls/simulation/verilog_simulator.h"
-#include "xls/simulation/verilog_simulators.h"
 
 namespace xls {
 namespace verilog {
@@ -58,19 +79,19 @@ namespace verilog {
 struct SimulationTarget {
   // Name of the simulator (e.g., "iverilog"). This string is passed to
   // xls::verilog::GetVerilogSimulator.
-  std::string simulator;
+  std::string_view simulator;
   // Whether or not to use SystemVerilog.
   bool use_system_verilog;
 };
 
 // Improve test error messages by adding a stream overload for SimulationTarget.
-inline std::ostream& operator<<(std::ostream& os, SimulationTarget t) {
+inline std::ostream& operator<<(std::ostream& os, const SimulationTarget& t) {
   os << absl::StreamFormat("%s/%s", t.simulator,
                            t.use_system_verilog ? "SystemVerilog" : "Verilog");
   return os;
 }
 
-#include "xls/simulation/simulation_targets.inc"
+#include "xls/simulation/simulation_targets.inc"  // IWYU pragma: keep
 
 // Returns the name of the parameterized test from the Paramtype info. Use in
 // INSTANTIATE_TEST_SUITE_P invocation so tests have meaningful names (e.g.,
@@ -92,14 +113,25 @@ std::string ParameterizedTestName(
                                                     : "Verilog");
 }
 
-class VerilogTestBase : public testing::TestWithParam<SimulationTarget> {
+// Base class for parameterized tests that produce Verilog files.
+//
+// See VerilogTestBase for the common case where ParamType is SimulationTarget.
+template <typename ParamType>
+class VerilogTestBaseWithParam : public testing::TestWithParam<ParamType> {
  protected:
-  VerilogTestBase() = default;
+  VerilogTestBaseWithParam() = default;
 
   // Returns the name of the test. Include the parameterization. Example:
   // TestTheThing/FancySimulatorVerilog.
-  std::string TestName() {
+  static std::string TestName() {
     return ::testing::UnitTest::GetInstance()->current_test_info()->name();
+  }
+
+  // Returns the name of the test with slashes converted to underscores.
+  static std::string SanitizedTestName() {
+    std::string name =
+        ::testing::UnitTest::GetInstance()->current_test_info()->name();
+    return absl::StrReplaceAll(name, {{"/", "_"}});
   }
 
   // Returns the base name of the test (the string which appears in the TEST_P
@@ -110,31 +142,84 @@ class VerilogTestBase : public testing::TestWithParam<SimulationTarget> {
   // TestBaseName returns "TestTheThing".
   std::string TestBaseName() {
     std::vector<std::string> parts = absl::StrSplit(TestName(), '/');
-    XLS_CHECK_EQ(parts.size(), 2);
+    CHECK_EQ(parts.size(), 2);
     return parts.front();
   }
 
+  // Returns a newly created VerilogFile of the type (SystemVerilog or Verilog)
+  // indicated by the TestParam.
+  VerilogFile NewVerilogFile() { return VerilogFile(GetFileType()); }
+
+  // Returns a module testbench for testing the given verilog and signature. The
+  // underlying simulator and file type is determined by the test parameters.
+  absl::StatusOr<std::unique_ptr<ModuleTestbench>> NewModuleTestbench(
+      std::string_view verilog_text, const ModuleSignature& signature,
+      bool reset_dut = true, absl::Span<const VerilogInclude> includes = {}) {
+    return ModuleTestbench::CreateFromVerilogText(
+        verilog_text, GetFileType(), signature, GetSimulator(),
+        /*reset_dut=*/reset_dut, includes);
+  }
+
+  ModuleSimulator NewModuleSimulator(
+      std::string_view verilog_text, const ModuleSignature& signature,
+      absl::Span<const VerilogInclude> includes = {}) {
+    return ModuleSimulator(signature, verilog_text, GetFileType(),
+                           GetSimulator(), includes);
+  }
+
+  // Returns a CodegenOptions data structure with the system verilog option
+  // set to the test param value.
+  CodegenOptions codegen_options() {
+    return CodegenOptions().use_system_verilog(UseSystemVerilog());
+  }
+
+  virtual SimulationTarget GetSimulationTarget() const = 0;
+
   // Returns the Verilog simulator as determined by the test parameter.
-  VerilogSimulator* GetSimulator() {
-    return GetVerilogSimulator(GetParam().simulator).value();
+  VerilogSimulator* GetSimulator() const {
+    return simulators_->at(GetSimulationTarget().simulator).get();
   }
 
   // Returns whether or not the SystemVerilog or Verilog should be used as the
   // codegen target language as determined by the test parameters.
-  bool UseSystemVerilog() { return GetParam().use_system_verilog; }
+  bool UseSystemVerilog() const {
+    return GetSimulationTarget().use_system_verilog;
+  }
+
+  // Returns the type of file (SystemVerilog or Verilog) being tested by this
+  // test instance.
+  FileType GetFileType() const {
+    return UseSystemVerilog() ? FileType::kSystemVerilog : FileType::kVerilog;
+  }
 
   // Validates the given verilog text by running it through the verilog
   // simulator. No functional testing is performed.
-  absl::Status ValidateVerilog(absl::string_view text,
-                               absl::Span<const VerilogInclude> includes = {});
+  absl::Status ValidateVerilog(
+      std::string_view text,
+      absl::Span<const VerilogSimulator::MacroDefinition> macro_definitions =
+          {},
+      absl::Span<const VerilogInclude> includes = {}) {
+    return GetSimulator()->RunSyntaxChecking(text, GetFileType(),
+                                             macro_definitions, includes);
+  }
 
   // EXPECTs that the given strings are equal and are valid Verilog. The
-  // includes are used for validating the verilog.
-  void ExpectVerilogEqual(absl::string_view expected, absl::string_view actual,
-                          absl::Span<const VerilogInclude> includes = {});
+  // includes and macro definitions are used for validating the verilog.
+  void ExpectVerilogEqual(std::string_view expected, std::string_view actual,
+                          absl::Span<const VerilogSimulator::MacroDefinition>
+                              macro_definitions = {},
+                          absl::Span<const VerilogInclude> includes = {}) {
+    if (VLOG_IS_ON(1)) {
+      XLS_LOG_LINES(INFO, absl::StrCat("Actual Verilog:\n", actual));
+      XLS_LOG_LINES(INFO, absl::StrCat("Expected Verilog:\n", expected));
+    }
+    EXPECT_EQ(expected, actual);
+    XLS_EXPECT_OK(ValidateVerilog(actual, macro_definitions, includes));
+  }
 
-  // EXPECTs that the given text is equal to the golden reference file specified
-  // by golden_file_path. Also EXPECTs that the text is valid Verilog.
+  // EXPECTs that the given text is equal to the golden reference file
+  // specified by golden_file_path. Also EXPECTs that the text is valid
+  // Verilog.
   //
   // `golden_file_path` should be relative to the main XLS source directory.
   //
@@ -144,8 +229,33 @@ class VerilogTestBase : public testing::TestWithParam<SimulationTarget> {
   //   ./path/to/foo_test --test_update_golden_files
   //
   void ExpectVerilogEqualToGoldenFile(
-      const std::filesystem::path& golden_file_path, absl::string_view text,
-      absl::Span<const VerilogInclude> includes = {});
+      const std::filesystem::path& golden_file_path, std::string_view text,
+      absl::Span<const VerilogSimulator::MacroDefinition> macro_definitions =
+          {},
+      absl::Span<const VerilogInclude> includes = {},
+      xabsl::SourceLocation loc = xabsl::SourceLocation::current()) {
+    ExpectEqualToGoldenFile(golden_file_path, text, loc);
+    XLS_EXPECT_OK(ValidateVerilog(text, macro_definitions, includes));
+  }
+
+  // EXPECTs that the given ModuleSignature is equal to the golden reference
+  // file specified by golden_file_path.
+  //
+  // `golden_file_path` should be relative to the main XLS source directory.
+  //
+  // To update golden file run test binary directly (not via bazel run/test)
+  // with --test_update_golden_files:
+  //
+  //   ./path/to/foo_test --test_update_golden_files
+  //
+  void ExpectSignatureEqualToGoldenFile(
+      const std::filesystem::path& golden_file_path,
+      const ModuleSignature& signature,
+      xabsl::SourceLocation loc = xabsl::SourceLocation::current()) {
+    // TODO(epastor): This should parse the golden textproto and compare to it.
+    // For now, we just compare strings.
+    ExpectEqualToGoldenFile(golden_file_path, signature.AsTextProto(), loc);
+  }
 
   // Returns the path to the testdata file associated with a unit test. The
   // return path has the form:
@@ -154,14 +264,66 @@ class VerilogTestBase : public testing::TestWithParam<SimulationTarget> {
   //
   // If UseSystemVerilog() is true the file extension will be ".sv" or ".v"
   // otherwise. test_file_name should be the name of the test file without the
-  // .cc extension. testdata_dir should the path the the testdata directory
+  // .cc extension. testdata_dir should the path the testdata directory
   // relative to the XLS source top.
-  std::filesystem::path GoldenFilePath(
-      absl::string_view test_file_name,
-      const std::filesystem::path& testdata_dir);
+  virtual std::filesystem::path GoldenFilePath(
+      std::string_view test_file_name,
+      const std::filesystem::path& testdata_dir,
+      std::optional<std::string_view> forced_test_base_name = std::nullopt) {
+    // We suffix the golden reference files with "txt" on top of the extension
+    // just to indicate they're compiler byproduct comparison points and not
+    // Verilog files that have been written by hand.
+    std::string filename =
+        absl::StrFormat("%s_%s.%s", test_file_name,
+                        forced_test_base_name.value_or(TestBaseName()),
+                        UseSystemVerilog() ? "svtxt" : "vtxt");
+    return testdata_dir / filename;
+  }
+
+  // Returns the path to the signature testdata file associated with a unit
+  // test. The return path has the form:
+  //
+  //  ${XLS_top}/${testdata_dir}/${test_file_name}_${TestBaseName}.signature.txtpb
+  //
+  // test_file_name should be the name of the test file without the .cc
+  // extension. testdata_dir should be the path of the testdata directory
+  // relative to the XLS source top.
+  virtual std::filesystem::path SignatureGoldenFilePath(
+      std::string_view test_file_name,
+      const std::filesystem::path& testdata_dir) {
+    // We suffix the golden reference files with ".signature.txtpb".
+    std::string filename = absl::StrFormat("%s_%s.signature.txtpb",
+                                           test_file_name, TestBaseName());
+    return testdata_dir / filename;
+  }
+
+  // Verilog simulators can be slow to construct so keep it across test fixures.
+  static void SetUpTestSuite() {
+    simulators_ = new absl::flat_hash_map<std::string,
+                                          std::unique_ptr<VerilogSimulator>>();
+    VerilogSimulatorManager& sim_manager =
+        GetVerilogSimulatorManagerSingleton();
+    for (const std::string& name : sim_manager.simulator_names()) {
+      (*simulators_)[name] = sim_manager.GetVerilogSimulator(name).value();
+    }
+  }
+
+  static void TearDownTestSuite() { delete simulators_; }
+
+ private:
+  static absl::flat_hash_map<std::string, std::unique_ptr<VerilogSimulator>>*
+      simulators_;
+};
+
+template <typename ParamType>
+absl::flat_hash_map<std::string, std::unique_ptr<VerilogSimulator>>*
+    VerilogTestBaseWithParam<ParamType>::simulators_;
+
+class VerilogTestBase : public VerilogTestBaseWithParam<SimulationTarget> {
+  SimulationTarget GetSimulationTarget() const final { return GetParam(); }
 };
 
 }  // namespace verilog
 }  // namespace xls
 
-#endif  // XLS_CODEGEN_VERILOG_TEST_BASE_H_
+#endif  // XLS_SIMULATION_VERILOG_TEST_BASE_H_

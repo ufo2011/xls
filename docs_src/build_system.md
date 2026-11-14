@@ -3,79 +3,88 @@
 XLS uses the [Bazel](http://bazel.build) build system for itself and all its
 dependencies. Bazel is an easy to configure and use, and has powerful extension
 facilities. (It's also
-[well-documented](https://docs.bazel.build/versions/master/bazel-overview.html)!)
-XLS provdes a number of
-[Starlark](https://docs.bazel.build/versions/master/skylark/language.html)
-[macros](https://docs.bazel.build/versions/master/skylark/macros.html),
-described below, to simplify build target definition.
+[well-documented](https://bazel.build/start/bazel-intro)!) XLS provides a number
+of [Starlark](https://bazel.build/rules/language)
+[rules](https://bazel.build/rules/rules) and
+[macros](https://bazel.build/rules/macros) to define a build flow.
 
 [TOC]
 
-## Macros
+## Whirlwind Intro To Bazel
 
-Below are summaries of public macro functionality. Full documentation is
-available in
-[xls/build_rules/build_defs.bzl](https://github.com/google/xls/tree/main/xls/build_rules/build_defs.bzl).
+Many developers are familiar with a make-style build flow. Bazel, by contrast,
+provides more built-in structure for where generated files and binary artifacts
+are placed, in order to keep the source tree unmodified and the build process
+fully declarative / repeatable. In Bazel, one of the key principles is "the user
+should not need to `bazel clean`".
 
-### `dslx_codegen`
+A typical build command looks like:
 
-This macro generates Verilog from an DSLX target (currently given as a
-`dslx_test` target). This target also accepts several key/value parameters (as
-`configs` for generation):
+```
+$ bazel build -c opt //xls/tools:opt_main
+```
 
-*   `clock_period_ps`: The target clock period in picoseconds. Only used with
-    the pipeline generator.
-*   `clock_margin_percent`: The percent of the target clock period to reserve as
-    "margin". Only used with the pipeline generator.
-*   `entry`: The DSLX function to synthesize. If not given, a "best guess" will
-    be made.
-*   `flop_inputs`, `flop_outputs`: Whether to add flops at the inputs/outputs of
-    the generated module. Only used with the pipeline generator.
-*   `generator`: The code generator to be used. Can be either `combinational` or
-    `pipeline`.
-*   `module_name`: The desired name of the generated Verilog module.
-*   `pipeline_stages`: The desired number of pipeline stages.
-*   `reset`: The name of the reset signal to use, if any.
-*   `reset_active_low`: Whether the reset signal is active low. Must also
-    specify `reset` option. Only used with the pipeline generator.
+The `-c opt` flag is requesting we produce an optimized build. Other options for
+development are:
 
-### `dslx_jit_wrapper`
+-   `-c fastbuild`: fewer optimizations, quicker turn around time on builds, and
+-   `-c dbg`: debug binaries, minimal optimization level and debug information
+    produced, e.g. for using binaries under `gdb`
 
-Generates a source/header file pair to wrap invocation of a DSLX function by the
-JIT - this wrapper is a much more straightforward way to interact with the JIT
-versus direct use. It accepts a DSLX target and entry function in the same
-manner as above.
+Targets are referenced with `//` as the root of the current repository -- it is
+generally optional. From there you specify the path to a directory with a
+`BUILD` file, and then `:target_name` to reference a named target within that
+`BUILD` file. In the case above, the build target referenced is a C++ binary --
+its build definition is described by a `cc_binary` rule in the `xls/tools/BUILD`
+file.
 
-### `dslx_test`
+### Where the output files go
 
-Main driver for:
+The above command notes the following in its output:
 
-*   Compiling DSLX files to IR
-*   Running DSLX test cases (defined alongside the designs)
-*   Proving DSLX/IR equivalence
-*   Generating a benchmark for the associated IR
-*   Proving logical equivalence for the optimized vs. unoptimized IR
+```
+Target //xls/tools:opt_main up-to-date:
+  bazel-bin/xls/tools/opt_main
+```
 
-In general, if one has a DSLX .x file, there should be an associated `dslx_test`
-target - this is the entry point to "downstream" capabilities (IR
-transformations, codegen, interpretation/JIT, etc.).
+We can see binary result files go to `bazel-bin` within our repository's root
+directory. (Aside: `bazel-bin` is a convenient symlink to an out-of-tree
+location where build artifacts are placed.)
 
-Note: This macro is targeted for refactoring, as it currently contains a broad
-swath of not-always-directly-related functionality.
+**Generated** files that are intermediate entities in the build process are also
+visible via a similar symlink, `bazel-out`. Within the following directory:
 
-### `dslx_generated_rtl`
+```
+$ ls bazel-out/host/bin/xls/ir/
+```
 
-This macro is for internal developer use only, for generating RTL with
-internally-released toolchains.
+We can see files that were part of the build of the IR library, like `op.h` and
+`op.cc`.
+
+## XLS Project Build Rules
+
+XLS provides a set of Bazel build rules and macros that allow users to
+quickly/easily create XLS-based design artifacts -- analogous to the way C++,
+Python, etc are done in Bazel. For example, `dslx_library` lets a user make a
+library target written in XLS' Domain Specific Language frontend.
+
+XLS build rules and macros are defined in
+[xls/build_rules/xls_build_defs.bzl](https://github.com/google/xls/tree/main/xls/build_rules/xls_build_defs.bzl).
+
+Examples using the rules and macros are found at
+[xls/build_rules/tests/BUILD](https://github.com/google/xls/tree/main/xls/build_rules/tests/BUILD).
+
+A detailed description of the bazel rules/macros can be found
+[here](bazel_rules_macros.md).
 
 ## Bazel queries
 
 Understanding the build tree for a new project can be difficult, but fortunately
 Bazel provides a
-[powerful query mechanism](https://docs.bazel.build/versions/master/query.html).
-`bazel query` enables a user to examine build targets, dependencies between
-them, and much more. A few usage examples are provided here, but the full
-documentation (linked above) is comprehensive.
+[powerful query mechanism](https://bazel.build/reference/query). `bazel query`
+enables a user to examine build targets, dependencies between them, and much
+more. A few usage examples are provided here, but the full documentation (linked
+above) is comprehensive.
 
 ### Finding transitive dependencies
 
@@ -83,15 +92,15 @@ To understand why, for example, the combinational verilog generator depends on
 the ABSL container algorithm library, one could run:
 
 ```
-$ bazel query 'somepath(//xls/codegen:combinational_generator, @com_google_absl//absl/algorithm:container)'
+$ bazel query 'somepath(//xls/codegen:combinational_generator, @abseil-cpp//absl/algorithm:container)'
 //xls/codegen:combinational_generator
 //xls/codegen:vast
-@com_google_absl//absl/algorithm:container
+@abseil-cpp//absl/algorithm:container
 ```
 
 This result shows that one such path goes through the `:vast` target. Another
 such path goes through the xls/ir:ir target, then the xls/ir:value target.
-`somepath` provides _some_ path, not all paths (that's what `allpaths` is for).
+`somepath` provides *some* path, not all paths (that's what `allpaths` is for).
 
 ### Finding dependees ("reverse dependencies")
 
@@ -100,7 +109,7 @@ target - the `rdeps` query performs this:
 
 ```
 $ bazel query 'rdeps(//xls/codegen:all, //xls/codegen:combinational_generator)'
-//xls/codegen:flattening_test
+//xls/codegen:expression_flattening_test
 //xls/ir:ir_test_base
 //xls/codegen:combinational_generator_test
 //xls/codegen:combinational_generator
@@ -108,6 +117,31 @@ $ bazel query 'rdeps(//xls/codegen:all, //xls/codegen:combinational_generator)'
 
 This shows the transitive closure of all dependencies of the combinational
 generator, with the starting set being all targets in `//xls/codegen:all`. This
-set of dependees can quickly grow to be unmanageable, so keep the initial set
+set of dependencies can quickly grow to be unmanageable, so keep the initial set
 (the first argument) as small as possible, and consider specifying a third
 argument for maximum search depth.
+
+## Configuration
+
+Bazel mostly configures itself and generally any target configuration should be
+put into `BUILD` rules. However there are some configuration flags defined by
+XLS for testing or development purposes.
+
+### `--//xls/common/config:profile_opt_passes`
+
+See the [Pass Profiling documentation](ir_pass_profiling.md) for more
+documentation.
+
+If passed this flag makes `opt_main` runs performed by bazel automatically
+record a [pprof](https://github.com/google/pprof) file profiling the pass
+pipeline. It contains timing for how long and how many times each optimization
+pass runs. This file is included in the result files generated by a `bazel
+build`.
+
+### `--//xls/common/config:extra_opt_args=...`, `--//xls/common/config:extra_codegen_args=...`, and `--//xls/common/config:extra_ir_convert_args=...` {#extra_opts}
+
+If passed these add the comma-separated compiler arguments to `opt_main`,
+`codegen_main`, or `ir_converter_main` when these tools are run by bazel. These
+flags are added as plain-text and are not checked by bazel in any way. These
+flags should only be used during XLS development. Flags required to build a
+target should be included in the build target.

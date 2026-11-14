@@ -14,15 +14,25 @@
 
 #include "xls/noc/config/router_config_proto_builder.h"
 
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "xls/noc/config/arbiter_scheme_config_proto_builder.h"
+#include "xls/noc/config/network_config.pb.h"
+#include "xls/noc/config/network_config_proto_builder_utils.h"
+#include "xls/noc/config/port_config_proto_builder.h"
+#include "xls/noc/config/routing_scheme_config_proto_builder.h"
 
 namespace xls::noc {
 
 // Test the field values of a router with an input port.
 TEST(RouterConfigBuilderTest, InputPortFieldValues) {
-  constexpr absl::string_view kName = "Test";
-  constexpr absl::string_view kRouterPortName = "RouterPort";
+  constexpr std::string_view kName = "Test";
+  constexpr std::string_view kRouterPortName = "RouterPort";
   RouterConfigProto proto;
   RouterConfigProtoBuilder builder(&proto);
   builder.WithName(kName);
@@ -48,8 +58,8 @@ TEST(RouterConfigBuilderTest, InputPortFieldValues) {
 
 // Test the field values of a router with an output port.
 TEST(RouterConfigBuilderTest, OutputPortFieldValues) {
-  constexpr absl::string_view kName = "Test";
-  constexpr absl::string_view kRouterPortName = "RouterPort";
+  constexpr std::string_view kName = "Test";
+  constexpr std::string_view kRouterPortName = "RouterPort";
   RouterConfigProto proto;
   RouterConfigProtoBuilder builder(&proto);
   builder.WithName(kName);
@@ -77,8 +87,8 @@ TEST(RouterConfigBuilderTest, OutputPortFieldValues) {
 // input port with non-default virtual channels, default virtual channels, then
 // non-default virtual channels (in that order).
 TEST(RouterConfigBuilderTest, VirtualChannelsInputPortDefaultFields) {
-  constexpr absl::string_view kNonDefault = "NonDefault";
-  constexpr absl::string_view kDefault = "Default";
+  constexpr std::string_view kNonDefault = "NonDefault";
+  constexpr std::string_view kDefault = "Default";
   const std::vector<std::string> kVirtualChannels = {std::string(kDefault)};
   RouterConfigProto proto;
   RouterConfigProtoBuilder builder(&proto);
@@ -86,7 +96,7 @@ TEST(RouterConfigBuilderTest, VirtualChannelsInputPortDefaultFields) {
   port_builder.WithVirtualChannel(kNonDefault);
   builder.SetDefaultVirtualChannelsForInputPort(kVirtualChannels);
   builder.WithInputPort("Test");
-  builder.SetDefaultVirtualChannelsForInputPort(absl::nullopt);
+  builder.SetDefaultVirtualChannelsForInputPort(std::nullopt);
   port_builder = builder.WithInputPort("Test");
   port_builder.WithVirtualChannel(kNonDefault);
 
@@ -103,8 +113,8 @@ TEST(RouterConfigBuilderTest, VirtualChannelsInputPortDefaultFields) {
 // output port with non-default virtual channels, default virtual channels, then
 // non-default virtual channels (in that order).
 TEST(RouterConfigBuilderTest, VirtualChannelsOutputPortDefaultFields) {
-  constexpr absl::string_view kNonDefault = "NonDefault";
-  constexpr absl::string_view kDefault = "Default";
+  constexpr std::string_view kNonDefault = "NonDefault";
+  constexpr std::string_view kDefault = "Default";
   const std::vector<std::string> kVirtualChannels = {std::string(kDefault)};
   RouterConfigProto proto;
   RouterConfigProtoBuilder builder(&proto);
@@ -112,7 +122,7 @@ TEST(RouterConfigBuilderTest, VirtualChannelsOutputPortDefaultFields) {
   port_builder.WithVirtualChannel(kNonDefault);
   builder.SetDefaultVirtualChannelsForOutputPort(kVirtualChannels);
   builder.WithOutputPort("Test");
-  builder.SetDefaultVirtualChannelsForOutputPort(absl::nullopt);
+  builder.SetDefaultVirtualChannelsForOutputPort(std::nullopt);
   port_builder = builder.WithOutputPort("Test");
   port_builder.WithVirtualChannel(kNonDefault);
 

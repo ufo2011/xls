@@ -14,18 +14,21 @@
 
 #include "xls/noc/config/arbiter_scheme_config_proto_builder.h"
 
-#include "xls/common/proto_adaptor_utils.h"
+#include <string_view>
+
+#include "absl/types/span.h"
+#include "xls/noc/config/network_config.pb.h"
+#include "xls/noc/config/network_config_proto_builder_utils.h"
 
 namespace xls::noc {
 
 ArbiterSchemeConfigProtoBuilder&
 ArbiterSchemeConfigProtoBuilder::WithPriorityEntry(
-    absl::string_view output_port_name,
+    std::string_view output_port_name,
     absl::Span<const PortVirtualChannelTuple> priority_list) {
   RouterConfigProto::ArbiterPriorityEntryConfig* arbiter_priority_entry_config =
       proto_->mutable_priority()->add_entries();
-  arbiter_priority_entry_config->set_output_port_name(
-      xls::ToProtoString(output_port_name));
+  arbiter_priority_entry_config->set_output_port_name(output_port_name);
   for (const PortVirtualChannelTuple& priority_entry : priority_list) {
     RouterConfigProto::PortVirtualChannelTupleConfig* tuple_config =
         arbiter_priority_entry_config->add_input_port_tuples();

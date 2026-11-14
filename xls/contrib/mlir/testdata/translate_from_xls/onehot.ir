@@ -1,0 +1,64 @@
+// RUN: xls_translate --xls-to-mlir-xls %s 2>&1 | FileCheck %s
+
+package translate_ops
+
+file_number 0 "./onehot.x"
+
+// CHECK: func @test_onehot([[ARG1:%.*]]: i4) -> i4 {
+fn test_onehot(a: bits[4] id=1) -> bits[4] {
+
+  // CHECK-DAG: [[VAL1:%.*]] = xls.decode [[ARG1]] <width = 16> : (i4) -> i16
+  decode.2: bits[16] = decode(a, width=16, id=2, pos=[(0,1,6)])
+
+  // CHECK-DAG: [[VAL2:%.*]] = "xls.constant_scalar"() <{value = 1 : i2}>
+  literal.5: bits[2] = literal(value=1, id=5, pos=[(0,1,6)])
+
+  // CHECK-DAG: [[VAL3:%.*]] = "xls.constant_scalar"() <{value = 1 : i4}>
+  literal.6: bits[4] = literal(value=1, id=6, pos=[(0,1,6)])
+
+  // CHECK: %{{.*}} = xls.encode [[VAL1]] : (i16) -> i4
+  encode.3: bits[4] = encode(decode.2, id=3, pos=[(0,1,6)])
+
+  // CHECK: %{{.*}} = xls.one_hot [[VAL1]] <lsb_prio = true> : (i16) -> i17
+  one_hot.4: bits[17] = one_hot(decode.2, lsb_prio=true, id=4, pos=[(0,1,6)])
+
+  // CHECK: %{{.*}} = "xls.one_hot_sel"([[VAL2]], [[ARG1]], [[VAL3]]) : (i2, i4, i4) -> i4
+  ret one_hot_sel.7: bits[4] = one_hot_sel(literal.5, cases=[a, literal.6], id=7, pos=[(0,1,6)])
+}
+
+// CHECK: func @test_onehot_sel_array(
+// CHECK-SAME: [[SEL:%.*]]: i2,
+// CHECK-SAME: [[ARR1:%.*]]: !xls.array<2xi32>,
+// CHECK-SAME: [[ARR2:%.*]]: !xls.array<2xi32>)
+// CHECK-SAME: -> !xls.array<2xi32> {
+fn test_onehot_sel_array(
+    sel: bits[2] id=10,
+    a: bits[32][2] id=11,
+    b: bits[32][2] id=12
+) -> bits[32][2] {
+  // CHECK: %{{.*}} = "xls.one_hot_sel"([[SEL]], [[ARR1]], [[ARR2]]) : (
+  // CHECK-SAME: i2,
+  // CHECK-SAME: !xls.array<2xi32>,
+  // CHECK-SAME: !xls.array<2xi32>
+  // CHECK-SAME: ) -> !xls.array<2xi32>
+  ret one_hot_sel.13: bits[32][2] = one_hot_sel(sel, cases=[a, b], id=13)
+}
+
+// -----
+// CHECK: func @test_onehot_sel_tuple(
+// CHECK-SAME: [[SEL:%.*]]: i2,
+// CHECK-SAME: [[TUP1:%.*]]: tuple<i8, i16>,
+// CHECK-SAME: [[TUP2:%.*]]: tuple<i8, i16>)
+// CHECK-SAME: -> tuple<i8, i16> {
+fn test_onehot_sel_tuple(
+    sel: bits[2] id=20,
+    a: (bits[8], bits[16]) id=21,
+    b: (bits[8], bits[16]) id=22
+) -> (bits[8], bits[16]) {
+  // CHECK: %{{.*}} = "xls.one_hot_sel"([[SEL]], [[TUP1]], [[TUP2]]) : (
+  // CHECK-SAME: i2,
+  // CHECK-SAME: tuple<i8, i16>,
+  // CHECK-SAME: tuple<i8, i16>
+  // CHECK-SAME: ) -> tuple<i8, i16>
+  ret one_hot_sel.23: (bits[8], bits[16]) = one_hot_sel(sel, cases=[a, b], id=23)
+}

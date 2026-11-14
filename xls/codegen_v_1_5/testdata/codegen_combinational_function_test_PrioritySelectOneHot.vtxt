@@ -1,0 +1,15 @@
+module main(
+  input wire p,
+  input wire [15:0] x,
+  input wire [15:0] y,
+  input wire [15:0] d,
+  output wire [15:0] out
+);
+  wire [1:0] one_hot_22;
+  wire [2:0] one_hot_33;
+  wire eq_35;
+  assign one_hot_22 = {!p, p};
+  assign one_hot_33 = {one_hot_22[1:0] == 2'h0, one_hot_22[1] && !one_hot_22[0], one_hot_22[0]};
+  assign eq_35 = one_hot_22 == one_hot_33[1:0];
+  assign out = x & {16{one_hot_22[0]}} | y & {16{one_hot_22[1]}};
+endmodule

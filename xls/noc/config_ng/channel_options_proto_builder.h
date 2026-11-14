@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef XLS_NOC_CONFIG_CHANNEL_OPTIONS_PROTO_BUILDER_H_
-#define XLS_NOC_CONFIG_CHANNEL_OPTIONS_PROTO_BUILDER_H_
+#ifndef XLS_NOC_CONFIG_NG_CHANNEL_OPTIONS_PROTO_BUILDER_H_
+#define XLS_NOC_CONFIG_NG_CHANNEL_OPTIONS_PROTO_BUILDER_H_
 
-#include "absl/strings/string_view.h"
+#include <string_view>
+
 #include "xls/noc/config_ng/topology_options_network_config_builder.pb.h"
 
 namespace xls::noc {
@@ -43,11 +44,11 @@ class ChannelOptionsProtoBuilder {
   // Sets the source node name of the channel options. Makes a copy of the
   // source node name.
   ChannelOptionsProtoBuilder& SetSourceNodeName(
-      absl::string_view source_node_name);
+      std::string_view source_node_name);
 
   // Sets the sink node name of the channel options. Makes a copy of the sink
   // node name.
-  ChannelOptionsProtoBuilder& SetSinkNodeName(absl::string_view sink_node_name);
+  ChannelOptionsProtoBuilder& SetSinkNodeName(std::string_view sink_node_name);
 
  private:
   ChannelOptionsProto* proto_ptr_;
@@ -55,4 +56,4 @@ class ChannelOptionsProtoBuilder {
 
 }  // namespace xls::noc
 
-#endif  // XLS_NOC_CONFIG_CHANNEL_OPTIONS_PROTO_BUILDER_H_
+#endif  // XLS_NOC_CONFIG_NG_CHANNEL_OPTIONS_PROTO_BUILDER_H_

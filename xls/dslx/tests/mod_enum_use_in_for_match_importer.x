@@ -15,23 +15,21 @@
 // Imports a module that holds an enum definition, and uses it inside of a match
 // expression inside of a for loop.
 
-import xls.dslx.tests.mod_simple_enum
+import xls.dslx.tests.mod_simple_enum;
 
 type EnumType = mod_simple_enum::EnumType;
 
 fn main(x: EnumType) -> bool {
-  for (i, accum): (u32, bool) in range(u32:0, u32:1) {
-    match x {
-      EnumType::FIRST => false,
-      EnumType::SECOND => true,
-      _ => false,
-    }
-  }(false)
+    for (_, _): (u32, bool) in u32:0..u32:1 {
+        match x {
+            EnumType::FIRST => false,
+            EnumType::SECOND => true,
+        }
+    }(false)
 }
 
-#![test]
+#[test]
 fn test_main() {
-  let _ = assert_eq(false, main(EnumType::FIRST));
-  let _ = assert_eq(true, main(EnumType::SECOND));
-  ()
+    assert_eq(false, main(EnumType::FIRST));
+    assert_eq(true, main(EnumType::SECOND));
 }

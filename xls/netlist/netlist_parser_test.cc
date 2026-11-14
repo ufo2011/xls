@@ -14,19 +14,32 @@
 
 #include "xls/netlist/netlist_parser.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "absl/memory/memory.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/strings/substitute.h"
 #include "xls/common/status/matchers.h"
+#include "xls/netlist/cell_library.h"
 #include "xls/netlist/fake_cell_library.h"
+#include "xls/netlist/netlist.h"
 
 namespace xls {
 namespace netlist {
 namespace rtl {
 namespace {
+
+using ::absl_testing::StatusIs;
+using ::testing::HasSubstr;
 
 TEST(NetlistParserTest, EmptyModule) {
   std::string netlist = R"(module main(); endmodule)";
@@ -76,16 +89,16 @@ endmodule)";
 
 TEST(NetlistParserTest, Attributes) {
   std::string netlist = R"((* on_module  = "foo" *)
-module main(a, z);
+module main(_a, z);
   (* on_net = "first" *)
   (* on_net = "second" *)
   wire foo, bar, baz;
   (* on_input = "baz" *)
-  input a;
+  input _a;
   (* on_output = "baz" *)
   output z;
   (* on_instance = "bar" *)
-  INV inv_0(.A(a), .ZN(z));
+  INV inv_0(.A(_a), .ZN(z));
 endmodule)";
   Scanner scanner(netlist);
   XLS_ASSERT_OK_AND_ASSIGN(CellLibrary cell_library, MakeFakeCellLibrary());
@@ -136,9 +149,8 @@ endmodule)";
   XLS_ASSERT_OK_AND_ASSIGN(NetRef i2, m->ResolveNet("i[2]"));
   EXPECT_EQ("i[2]", i2->name());
   EXPECT_THAT(m->ResolveNet("i[3]"),
-              status_testing::StatusIs(
-                  absl::StatusCode::kNotFound,
-                  ::testing::HasSubstr("Could not find net: i[3]")));
+              StatusIs(absl::StatusCode::kNotFound,
+                       HasSubstr("Could not find net: i[3]")));
 
   XLS_ASSERT_OK_AND_ASSIGN(Cell * c, m->ResolveCell("aoi21_0"));
   EXPECT_EQ(cell_library.GetEntry("AOI21").value(), c->cell_library_entry());
@@ -241,6 +253,199 @@ endmodule
 
   XLS_ASSERT_OK_AND_ASSIGN(Cell * lut_cell, m->ResolveCell("q0_SB_LUT4_O"));
   EXPECT_EQ("<lut_0x8000>", lut_cell->cell_library_entry()->name());
+}
+
+TEST(NetlistParserTest, PortOrderDeclarationDuplicateError) {
+  // Test that a "real world" netlist parses
+  std::string netlist =
+      R"(
+module main(double_decl);
+  input double_decl;
+  input double_decl;
+endmodule
+)";
+  Scanner scanner(netlist);
+  XLS_ASSERT_OK_AND_ASSIGN(CellLibrary cell_library, MakeFakeCellLibrary());
+  EXPECT_THAT(
+      Parser::ParseNetlist(&cell_library, &scanner),
+      StatusIs(absl::StatusCode::kAlreadyExists,
+               HasSubstr("Duplicate declaration of port 'double_decl'.")));
+}
+
+TEST(NetlistParserTest, PortOrderDeclarationNotFoundError) {
+  // Test that a "real world" netlist parses
+  std::string netlist =
+      R"(
+module main(o);
+  input missing;
+  output o;
+endmodule
+)";
+  Scanner scanner(netlist);
+  XLS_ASSERT_OK_AND_ASSIGN(CellLibrary cell_library, MakeFakeCellLibrary());
+  EXPECT_THAT(
+      Parser::ParseNetlist(&cell_library, &scanner),
+      StatusIs(absl::StatusCode::kNotFound,
+               HasSubstr("No match for input 'missing' in parameter list.")));
+}
+
+static void TestAssignHelper(const Module* m) {
+  // Walk over the outputs and make sure that each of them is covered by an
+  // assignment, that the right-hand-side of the assignment is an input, and
+  // that while walking the ouputs, we cover all the assignments.
+  const std::vector<NetRef>& inputs = m->inputs();
+  const std::vector<NetRef>& outputs = m->outputs();
+  const absl::flat_hash_map<NetRef, NetRef>& assigns = m->assigns();
+  absl::flat_hash_set<NetRef> visited_assigns;
+  for (const NetRef& output : outputs) {
+    EXPECT_TRUE(assigns.contains(output));
+    const NetRef rhs = assigns.at(output);
+    EXPECT_TRUE(std::find(inputs.begin(), inputs.end(), rhs) != inputs.end() ||
+                rhs == m->zero() || rhs == m->one());
+    EXPECT_FALSE(visited_assigns.contains(output));
+    visited_assigns.insert(output);
+  }
+  EXPECT_EQ(visited_assigns.size(), assigns.size());
+}
+
+TEST(NetlistParserTest, SimpleAssign) {
+  std::string netlist = R"(module main(i,o);
+  input i;
+  output o;
+  assign o = i;
+endmodule)";
+  Scanner scanner(netlist);
+  XLS_ASSERT_OK_AND_ASSIGN(CellLibrary cell_library, MakeFakeCellLibrary());
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Netlist> n,
+                           Parser::ParseNetlist(&cell_library, &scanner));
+  XLS_ASSERT_OK_AND_ASSIGN(const Module* m, n->GetModule("main"));
+  EXPECT_EQ("main", m->name());
+
+  TestAssignHelper(m);
+}
+
+TEST(NetlistParserTest, SimpleRangeAssign) {
+  std::string netlist = R"(module main(i,o);
+  input [1:0] i;
+  output [1:0] o;
+  assign o[1:0] = i[1:0];
+endmodule)";
+  Scanner scanner(netlist);
+  XLS_ASSERT_OK_AND_ASSIGN(CellLibrary cell_library, MakeFakeCellLibrary());
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Netlist> n,
+                           Parser::ParseNetlist(&cell_library, &scanner));
+  XLS_ASSERT_OK_AND_ASSIGN(const Module* m, n->GetModule("main"));
+  EXPECT_EQ("main", m->name());
+
+  TestAssignHelper(m);
+}
+
+TEST(NetlistParserTest, SimpleRangeAssign2) {
+  std::string netlist = R"(module main(i,j,o);
+  input i;
+  input j;
+  output [1:0] o;
+  assign o[1] = i;
+  assign o[0] = j;
+endmodule)";
+  Scanner scanner(netlist);
+  XLS_ASSERT_OK_AND_ASSIGN(CellLibrary cell_library, MakeFakeCellLibrary());
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Netlist> n,
+                           Parser::ParseNetlist(&cell_library, &scanner));
+  XLS_ASSERT_OK_AND_ASSIGN(const Module* m, n->GetModule("main"));
+  EXPECT_EQ("main", m->name());
+
+  TestAssignHelper(m);
+}
+
+TEST(NetlistParserTest, ComplexAssign) {
+  std::string netlist = R"(module main(a, b, c, o);
+  input [3:0] a;
+  input b;
+  input c;
+  output [5:0] o;
+
+  assign o[5] = c;
+  assign o[3:2] = a[3:2];
+  assign { o[4], o[1:0] } = { b, a[1:0] };
+endmodule)";
+  Scanner scanner(netlist);
+  XLS_ASSERT_OK_AND_ASSIGN(CellLibrary cell_library, MakeFakeCellLibrary());
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Netlist> n,
+                           Parser::ParseNetlist(&cell_library, &scanner));
+  XLS_ASSERT_OK_AND_ASSIGN(const Module* m, n->GetModule("main"));
+  EXPECT_EQ("main", m->name());
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef a0, m->ResolveNet("a[0]"));
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef a1, m->ResolveNet("a[1]"));
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef a2, m->ResolveNet("a[2]"));
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef a3, m->ResolveNet("a[3]"));
+  EXPECT_EQ("a[0]", a0->name());
+  EXPECT_EQ("a[1]", a1->name());
+  EXPECT_EQ("a[2]", a2->name());
+  EXPECT_EQ("a[3]", a3->name());
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef b, m->ResolveNet("b"));
+  EXPECT_EQ("b", b->name());
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef c, m->ResolveNet("c"));
+  EXPECT_EQ("c", c->name());
+  EXPECT_THAT(m->ResolveNet("a[4]"),
+              StatusIs(absl::StatusCode::kNotFound,
+                       HasSubstr("Could not find net: a[4]")));
+
+  TestAssignHelper(m);
+}
+
+TEST(NetlistParserTest, ComplexMismatchedAssignA) {
+  std::string netlist = R"(module main(a, b, c, o);
+  input [3:0] a;
+  input b;
+  input c;
+  output [5:0] o;
+  assign o = { c, a[3:2], b, a[1:0] };
+endmodule)";
+  Scanner scanner(netlist);
+  XLS_ASSERT_OK_AND_ASSIGN(CellLibrary cell_library, MakeFakeCellLibrary());
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Netlist> n,
+                           Parser::ParseNetlist(&cell_library, &scanner));
+  XLS_ASSERT_OK_AND_ASSIGN(const Module* m, n->GetModule("main"));
+  EXPECT_EQ("main", m->name());
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef a0, m->ResolveNet("a[0]"));
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef a1, m->ResolveNet("a[1]"));
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef a2, m->ResolveNet("a[2]"));
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef a3, m->ResolveNet("a[3]"));
+  EXPECT_EQ("a[0]", a0->name());
+  EXPECT_EQ("a[1]", a1->name());
+  EXPECT_EQ("a[2]", a2->name());
+  EXPECT_EQ("a[3]", a3->name());
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef b, m->ResolveNet("b"));
+  EXPECT_EQ("b", b->name());
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef c, m->ResolveNet("c"));
+  EXPECT_EQ("c", c->name());
+
+  TestAssignHelper(m);
+}
+
+TEST(NetlistParserTest, ComplexMismatchedAssignB) {
+  std::string netlist = R"(module main(a, o);
+  input [3:0] a;
+  output [5:0] o;
+  assign o = { a[3:2], 2'b10, a[1:0] };
+endmodule)";
+  Scanner scanner(netlist);
+  XLS_ASSERT_OK_AND_ASSIGN(CellLibrary cell_library, MakeFakeCellLibrary());
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Netlist> n,
+                           Parser::ParseNetlist(&cell_library, &scanner));
+  XLS_ASSERT_OK_AND_ASSIGN(const Module* m, n->GetModule("main"));
+  EXPECT_EQ("main", m->name());
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef a0, m->ResolveNet("a[0]"));
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef a1, m->ResolveNet("a[1]"));
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef a2, m->ResolveNet("a[2]"));
+  XLS_ASSERT_OK_AND_ASSIGN(NetRef a3, m->ResolveNet("a[3]"));
+  EXPECT_EQ("a[0]", a0->name());
+  EXPECT_EQ("a[1]", a1->name());
+  EXPECT_EQ("a[2]", a2->name());
+  EXPECT_EQ("a[3]", a3->name());
+
+  TestAssignHelper(m);
 }
 
 }  // namespace

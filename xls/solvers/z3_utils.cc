@@ -13,24 +13,65 @@
 // limitations under the License.
 #include "xls/solvers/z3_utils.h"
 
-#include "absl/base/internal/sysinfo.h"
-#include "absl/strings/match.h"
-#include "absl/strings/numbers.h"
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
-#include "absl/strings/str_join.h"
-#include "absl/strings/str_split.h"
-#include "absl/strings/string_view.h"
-#include "xls/common/logging/logging.h"
+#include "absl/time/time.h"
+#include "absl/types/span.h"
+#include "re2/re2.h"
+#include "xls/common/source_location.h"
+#include "xls/common/status/status_macros.h"
 #include "xls/ir/bits.h"
 #include "xls/ir/bits_ops.h"
+#include "xls/ir/format_preference.h"
+#include "xls/ir/interval.h"
+#include "xls/ir/interval_set.h"
+#include "xls/ir/ternary.h"
 #include "xls/ir/type.h"
-#include "../z3/src/api/z3_api.h"
-#include "re2/re2.h"
+#include "xls/ir/value.h"
+#include "z3/src/api/z3_api.h"
 
 namespace xls {
 namespace solvers {
 namespace z3 {
+
+// Since the callback from z3 does not pass a void* as context we rely on RAII
+// to establish this thread local value for retrieval from the static error
+// handler.
+thread_local ScopedErrorHandler* g_handler = nullptr;
+
+ScopedErrorHandler::ScopedErrorHandler(Z3_context ctx,
+                                       xabsl::SourceLocation source_location)
+    : ctx_(ctx), source_location_(source_location) {
+  Z3_set_error_handler(ctx_, Handler);
+  prev_handler_ = g_handler;
+  g_handler = this;
+}
+
+ScopedErrorHandler::~ScopedErrorHandler() {
+  Z3_set_error_handler(ctx_, nullptr);
+  CHECK_EQ(g_handler, this);
+  g_handler = prev_handler_;
+}
+
+/* static */ void ScopedErrorHandler::Handler(Z3_context c, Z3_error_code e) {
+  g_handler->status_ = absl::InternalError(absl::StrFormat(
+      "Z3 error @ %s:%d: %s", g_handler->source_location_.file_name(),
+      g_handler->source_location_.line(), Z3_get_error_msg(c, e)));
+  LOG(ERROR) << g_handler->status_;
+}
+
 namespace {
 
 // Helper for TypeToSort below.
@@ -66,10 +107,11 @@ Z3_sort CreateTupleSort(Z3_context ctx, const Type& type) {
 Z3_solver CreateSolver(Z3_context ctx, int num_threads) {
   Z3_params params = Z3_mk_params(ctx);
   Z3_params_inc_ref(ctx, params);
-  Z3_params_set_uint(ctx, params, Z3_mk_string_symbol(ctx, "sat.threads"),
+  Z3_params_set_uint(ctx, params, Z3_mk_string_symbol(ctx, "smt.threads"),
                      num_threads);
   Z3_params_set_uint(ctx, params, Z3_mk_string_symbol(ctx, "threads"),
                      num_threads);
+  Z3_params_set_bool(ctx, params, Z3_mk_string_symbol(ctx, "ctrl_c"), false);
 
   Z3_solver solver = Z3_mk_solver(ctx);
   Z3_solver_inc_ref(ctx, solver);
@@ -78,6 +120,27 @@ Z3_solver CreateSolver(Z3_context ctx, int num_threads) {
   Z3_params_dec_ref(ctx, params);
   return solver;
 }
+
+ScopedSolverParams::ScopedSolverParams(Z3_context ctx, Z3_solver solver,
+                                       std::optional<absl::Duration> timeout,
+                                       std::optional<int64_t> rlimit)
+    : ctx_(ctx) {
+  params_ = Z3_mk_params(ctx);
+  Z3_params_inc_ref(ctx, params_);
+  Z3_params_set_bool(ctx, params_, Z3_mk_string_symbol(ctx, "ctrl_c"), false);
+  if (timeout.has_value()) {
+    Z3_symbol timeout_sym = Z3_mk_string_symbol(ctx, "timeout");
+    Z3_params_set_uint(ctx, params_, timeout_sym,
+                       absl::ToInt64Milliseconds(*timeout));
+  }
+  if (rlimit.has_value()) {
+    Z3_symbol rlimit_sym = Z3_mk_string_symbol(ctx, "rlimit");
+    Z3_params_set_uint(ctx, params_, rlimit_sym, *rlimit);
+  }
+  Z3_solver_set_params(ctx, solver, params_);
+}
+
+ScopedSolverParams::~ScopedSolverParams() { Z3_params_dec_ref(ctx_, params_); }
 
 std::string SolverResultToString(Z3_context ctx, Z3_solver solver,
                                  Z3_lbool satisfiable, bool hexify) {
@@ -100,7 +163,8 @@ std::string SolverResultToString(Z3_context ctx, Z3_solver solver,
       absl::StrFormat("Solver result; satisfiable: %s\n", result_str);
   if (satisfiable == Z3_L_TRUE) {
     Z3_model model = Z3_solver_get_model(ctx, solver);
-    absl::StrAppend(&output, "\n  Model:\n", Z3_model_to_string(ctx, model));
+    absl::StrAppend(&output, "\n  Model:\n```", Z3_model_to_string(ctx, model),
+                    "```");
   }
 
   if (hexify) {
@@ -120,21 +184,126 @@ std::string QueryNode(Z3_context ctx, Z3_model model, Z3_ast node,
   return output;
 }
 
+absl::StatusOr<Value> NodeValue(Z3_context ctx, Z3_model model, Z3_ast node,
+                                Type* type) {
+  Z3_sort sort = Z3_get_sort(ctx, node);
+  switch (type->kind()) {
+    case TypeKind::kBits: {
+      if (Z3_get_sort_kind(ctx, sort) != Z3_BV_SORT ||
+          Z3_get_bv_sort_size(ctx, sort) != type->GetFlatBitCount()) {
+        return absl::InvalidArgumentError(
+            absl::StrFormat("Node failed to parse as type %s; had sort %s",
+                            type->ToString(), Z3_sort_to_string(ctx, sort)));
+      }
+
+      Z3_ast node_eval;
+      if (!Z3_model_eval(ctx, model, node, true, &node_eval)) {
+        return absl::InvalidArgumentError(absl::StrFormat(
+            "Node failed to evaluate as type %s; Z3_model_eval() error: %s",
+            type->ToString(), Z3_get_error_msg(ctx, Z3_get_error_code(ctx))));
+      }
+      const char* z3_result = Z3_get_numeral_binary_string(ctx, node_eval);
+      if (z3_result == nullptr) {
+        return absl::InvalidArgumentError(absl::StrFormat(
+            "Node failed to parse as type %s; "
+            "Z3_get_numeral_binary_string() error: %s",
+            type->ToString(), Z3_get_error_msg(ctx, Z3_get_error_code(ctx))));
+      }
+      const std::string_view binary_string = z3_result;
+      if (binary_string.empty()) {
+        return absl::InvalidArgumentError(absl::StrFormat(
+            "Node failed to parse as type %s; "
+            "Z3_get_numeral_binary_string() error: %s",
+            type->ToString(), Z3_get_error_msg(ctx, Z3_get_error_code(ctx))));
+      }
+
+      BitsRope rope(type->GetFlatBitCount());
+      for (auto it = binary_string.crbegin(); it != binary_string.crend();
+           ++it) {
+        rope.push_back(*it == '1');
+      }
+      rope.push_back(Bits(type->GetFlatBitCount() - binary_string.size()));
+      return Value(rope.Build());
+    }
+    case TypeKind::kToken: {
+      // Token types don't contain any data. A 0-field tuple is a convenient
+      // way to let (most of) the rest of the z3 infrastructure treat
+      // token like a normal data-type.
+      if (Z3_get_sort_kind(ctx, sort) != Z3_DATATYPE_SORT ||
+          Z3_get_tuple_sort_num_fields(ctx, sort) != 0) {
+        return absl::InvalidArgumentError(
+            absl::StrFormat("Node failed to parse as type %s; had sort %s",
+                            type->ToString(), Z3_sort_to_string(ctx, sort)));
+      }
+      return Value::Token();
+    }
+    case TypeKind::kTuple: {
+      std::vector<Value> elements;
+      if (Z3_get_sort_kind(ctx, sort) != Z3_DATATYPE_SORT ||
+          Z3_get_datatype_sort_num_constructors(ctx, sort) != 1 ||
+          Z3_get_tuple_sort_num_fields(ctx, sort) !=
+              type->AsTupleOrDie()->element_types().size()) {
+        return absl::InvalidArgumentError(
+            absl::StrFormat("Node failed to parse as type %s; had sort %s",
+                            type->ToString(), Z3_sort_to_string(ctx, sort)));
+      }
+      for (unsigned int i = 0; i < type->AsTupleOrDie()->element_types().size();
+           i++) {
+        Z3_func_decl proj_fn = Z3_get_tuple_sort_field_decl(ctx, sort, i);
+        Z3_ast element_node = Z3_mk_app(ctx, proj_fn, 1, &node);
+        XLS_ASSIGN_OR_RETURN(
+            Value element, NodeValue(ctx, model, element_node,
+                                     type->AsTupleOrDie()->element_types()[i]));
+        elements.push_back(std::move(element));
+      }
+      return Value::Tuple(elements);
+    }
+    case TypeKind::kArray: {
+      if (Z3_get_sort_kind(ctx, sort) != Z3_ARRAY_SORT) {
+        return absl::InvalidArgumentError(
+            absl::StrFormat("Node failed to parse as type %s; had sort %s",
+                            type->ToString(), Z3_sort_to_string(ctx, sort)));
+      }
+      std::vector<Value> elements;
+      for (int i = 0; i < type->AsArrayOrDie()->size(); ++i) {
+        std::string index_str = absl::StrCat(i);
+        Z3_ast index = Z3_mk_numeral(ctx, index_str.c_str(),
+                                     Z3_get_array_sort_domain(ctx, sort));
+        Z3_ast value;
+        if (!Z3_model_eval(ctx, model, Z3_mk_select(ctx, node, index), true,
+                           &value)) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Failed to evaluate element %d of array; Z3_model_eval() error: "
+              "%s",
+              i, Z3_get_error_msg(ctx, Z3_get_error_code(ctx))));
+        }
+        XLS_ASSIGN_OR_RETURN(
+            Value element,
+            NodeValue(ctx, model, value, type->AsArrayOrDie()->element_type()));
+        elements.push_back(std::move(element));
+      }
+      return Value::Array(elements);
+    }
+    default:
+      LOG(FATAL) << "Unsupported type kind: " << TypeKindToString(type->kind());
+  }
+}
+
 std::string HexifyOutput(const std::string& input) {
   std::string text = input;
   std::string match;
   // If this was ever used to match a wall of text, it'd be faster to chop up
-  // the input, rather than searching over the whole string over and over...but
-  // that's not the expected use case.
+  // the input, rather than searching over the whole string over and
+  // over...but that's not the expected use case.
   while (RE2::PartialMatch(text, "(#b[01]+)", &match)) {
     BitsRope rope(match.size() - 2);
     for (int i = match.size() - 1; i >= 2; i--) {
       rope.push_back(match[i] == '1');
     }
 
-    std::string new_text = rope.Build().ToString(FormatPreference::kHex);
+    std::string new_text = BitsToString(rope.Build(), FormatPreference::kHex);
     new_text[0] = '#';
-    XLS_CHECK(RE2::Replace(&text, "#b[01]+", new_text));
+    CHECK(RE2::Replace(&text, "#b[01]+", new_text));
   }
 
   return text;
@@ -146,18 +315,24 @@ std::string BitVectorToString(Z3_context ctx,
   constexpr const char kZ3One[] = "#x1";
   BitsRope rope(z3_bits.size());
 
-  for (int i = 0; i < z3_bits.size(); i++) {
-    rope.push_back(QueryNode(ctx, model, z3_bits.at(i)) == kZ3One);
+  for (auto z3_bit : z3_bits) {
+    rope.push_back(QueryNode(ctx, model, z3_bit) == kZ3One);
   }
   Bits bits = bits_ops::Reverse(rope.Build());
-  return absl::StrCat("0b", bits.ToRawDigits(FormatPreference::kBinary,
-                                             /*emit_leading_zeros=*/true));
+  return absl::StrCat("0b", BitsToRawDigits(bits, FormatPreference::kBinary,
+                                            /*emit_leading_zeros=*/true));
 }
 
 Z3_sort TypeToSort(Z3_context ctx, const Type& type) {
   switch (type.kind()) {
-    case TypeKind::kBits:
+    case TypeKind::kBits: {
+      if (type.AsBitsOrDie()->bit_count() == 0) {
+        // Represent bits[0] as an empty tuple. We don't allow math in the z3
+        // (right now) on these so this is good enough.
+        return CreateTupleSort(ctx, TupleType(/*members=*/{}));
+      }
       return Z3_mk_bv_sort(ctx, type.GetFlatBitCount());
+    }
     case TypeKind::kTuple:
       return CreateTupleSort(ctx, type);
     case TypeKind::kArray: {
@@ -174,9 +349,119 @@ Z3_sort TypeToSort(Z3_context ctx, const Type& type) {
       return CreateTupleSort(ctx, TupleType(/*members=*/{}));
     }
     default:
-      XLS_LOG(FATAL) << "Unsupported type kind: "
-                     << TypeKindToString(type.kind());
+      LOG(FATAL) << "Unsupported type kind: " << TypeKindToString(type.kind());
   }
+}
+
+Z3_ast DoUnsignedMul(Z3_context ctx, Z3_ast lhs, Z3_ast rhs, int result_size) {
+  int lhs_size = Z3_get_bv_sort_size(ctx, Z3_get_sort(ctx, lhs));
+  int rhs_size = Z3_get_bv_sort_size(ctx, Z3_get_sort(ctx, rhs));
+
+  int operation_size = std::max(result_size, std::max(lhs_size, rhs_size));
+  // Add an extra 0 MSb to make sure Z3 knows that we are doing unsigned
+  // multiplication.
+  operation_size += 1;
+  lhs = Z3_mk_zero_ext(ctx, operation_size - lhs_size, lhs);
+  rhs = Z3_mk_zero_ext(ctx, operation_size - rhs_size, rhs);
+
+  Z3_ast result = Z3_mk_bvmul(ctx, lhs, rhs);
+  return Z3_mk_extract(ctx, result_size - 1, 0, result);
+}
+
+Z3_ast BitVectorToBoolean(Z3_context c, Z3_ast bit_vector) {
+  std::unique_ptr<bool[]> bits(new bool[1]);
+  bits[0] = true;
+  return Z3_mk_eq(c, bit_vector, Z3_mk_bv_numeral(c, 1, &bits[0]));
+}
+
+Z3_ast BooleanToBitVector(Z3_context c, Z3_ast boolean) {
+  Z3_sort bit_sort = Z3_mk_bv_sort(c, 1);
+  return Z3_mk_ite(c, boolean, Z3_mk_unsigned_int64(c, 1, bit_sort),
+                   Z3_mk_unsigned_int64(c, 0, bit_sort));
+}
+
+Z3_ast BitsToZ3(Z3_context ctx, const Bits& value) {
+  std::unique_ptr<bool[]> bools(new bool[value.bit_count()]);
+  for (int64_t i = 0; i < value.bit_count(); ++i) {
+    bools[i] = value.Get(i);
+  }
+  return Z3_mk_bv_numeral(ctx, value.bit_count(), &bools[0]);
+}
+
+absl::StatusOr<Z3_ast> TernaryToZ3Constraint(Z3_context ctx,
+                                             Z3_ast target_value,
+                                             TernarySpan ternary) {
+  int64_t bit_count = ternary.size();
+  if (bit_count == 0) {
+    return Z3_mk_true(ctx);
+  }
+  std::vector<Z3_ast> bit_constraints;
+  for (int64_t i = 0; i < bit_count; ++i) {
+    if (ternary_ops::IsUnknown(ternary[i])) {
+      continue;
+    }
+    Z3_ast bit_extract = Z3_mk_extract(ctx, i, i, target_value);
+    Z3_ast expected_bit =
+        Z3_mk_int(ctx, ternary[i] == TernaryValue::kKnownOne ? 1 : 0,
+                  Z3_mk_bv_sort(ctx, 1));
+    bit_constraints.push_back(Z3_mk_eq(ctx, bit_extract, expected_bit));
+  }
+  if (bit_constraints.empty()) {
+    return Z3_mk_true(ctx);
+  }
+  if (bit_constraints.size() == 1) {
+    return bit_constraints.front();
+  }
+  return Z3_mk_and(ctx, bit_constraints.size(), bit_constraints.data());
+}
+
+absl::StatusOr<Z3_ast> IntervalSetToZ3Constraint(Z3_context ctx,
+                                                 Z3_ast target_value,
+                                                 const IntervalSet& intervals) {
+  if (intervals.IsMaximal()) {
+    return Z3_mk_true(ctx);
+  }
+  int64_t bit_count = intervals.BitCount();
+  if (bit_count == 0) {
+    return Z3_mk_true(ctx);
+  }
+
+  if (intervals.IsEmpty()) {
+    return Z3_mk_false(ctx);
+  }
+
+  std::vector<Z3_ast> interval_constraints;
+  for (const Interval& interval : intervals.Intervals()) {
+    std::vector<Z3_ast> bounds;
+
+    if (!interval.LowerBound().IsZero()) {
+      Z3_ast lower_ast = BitsToZ3(ctx, interval.LowerBound());
+      bounds.push_back(Z3_mk_bvuge(ctx, target_value, lower_ast));
+    }
+
+    if (!interval.UpperBound().IsAllOnes()) {
+      Z3_ast upper_ast = BitsToZ3(ctx, interval.UpperBound());
+      bounds.push_back(Z3_mk_bvule(ctx, target_value, upper_ast));
+    }
+
+    if (bounds.empty()) {
+      interval_constraints.push_back(Z3_mk_true(ctx));
+    } else if (bounds.size() == 1) {
+      interval_constraints.push_back(bounds.front());
+    } else {
+      interval_constraints.push_back(
+          Z3_mk_and(ctx, bounds.size(), bounds.data()));
+    }
+  }
+
+  if (interval_constraints.empty()) {
+    return Z3_mk_false(ctx);
+  }
+  if (interval_constraints.size() == 1) {
+    return interval_constraints.front();
+  }
+  return Z3_mk_or(ctx, interval_constraints.size(),
+                  interval_constraints.data());
 }
 
 }  // namespace z3

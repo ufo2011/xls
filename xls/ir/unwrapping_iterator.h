@@ -15,7 +15,9 @@
 #ifndef XLS_IR_UNWRAPPING_ITERATOR_H_
 #define XLS_IR_UNWRAPPING_ITERATOR_H_
 
+#include <cstddef>
 #include <iterator>
+#include <type_traits>
 #include <utility>
 
 namespace xls {
@@ -58,17 +60,23 @@ namespace xls {
 // For simplicity, UnwrappingIterator is currently unconditionally an
 // input_iterator -- it doesn't inherit any superpowers NestedIterator may have.
 template <typename NestedIter>
-class UnwrappingIterator
-    : public std::iterator<std::input_iterator_tag,
-                           decltype(std::declval<NestedIter>()->get())> {
- private:
-  NestedIter iter_;
-
+  requires(std::input_iterator<NestedIter>)
+class UnwrappingIterator {
  public:
+  using iterator_category = std::input_iterator_tag;
+  using value_type = decltype(std::declval<NestedIter>()->get());
+  using difference_type = ptrdiff_t;
+  using pointer = value_type*;
+  using reference = value_type&;
+
   explicit UnwrappingIterator(NestedIter iter) : iter_(std::move(iter)) {}
 
-  auto operator*() -> decltype(iter_->get()) { return iter_->get(); }
-  auto operator-> () -> decltype(iter_->get()) { return iter_->get(); }
+  UnwrappingIterator()
+    requires(std::is_default_constructible_v<NestedIter>)
+      : iter_() {}
+
+  auto operator*() const -> value_type { return iter_->get(); }
+  auto operator->() const -> value_type { return iter_->get(); }
   UnwrappingIterator& operator++() {
     ++iter_;
     return *this;
@@ -88,6 +96,9 @@ class UnwrappingIterator
                          const UnwrappingIterator& b) {
     return !(a == b);
   }
+
+ private:
+  NestedIter iter_;
 };
 
 template <typename NestedIter>

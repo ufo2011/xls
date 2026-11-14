@@ -14,12 +14,16 @@
 
 #include "xls/netlist/cell_library.h"
 
-#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
-#include "google/protobuf/text_format.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "absl/memory/memory.h"
+#include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
+#include "google/protobuf/text_format.h"
+#include "google/protobuf/util/message_differencer.h"
 #include "xls/common/status/matchers.h"
 #include "xls/netlist/netlist.pb.h"
 
@@ -27,7 +31,8 @@ namespace xls {
 namespace netlist {
 namespace {
 
-using status_testing::IsOkAndHolds;
+using ::absl_testing::IsOkAndHolds;
+using ::google::protobuf::TextFormat;
 
 TEST(CellLibraryTest, SerializeToProto) {
   CellLibrary cell_library;
@@ -35,9 +40,9 @@ TEST(CellLibraryTest, SerializeToProto) {
   pins["Z"] = "W";
   XLS_ASSERT_OK(cell_library.AddEntry(
       CellLibraryEntry(CellKind::kInverter, "INV",
-                       std::vector<std::string>{"A"}, pins, absl::nullopt)));
+                       std::vector<std::string>{"A"}, pins, std::nullopt)));
   XLS_ASSERT_OK_AND_ASSIGN(CellLibraryProto proto, cell_library.ToProto());
-  EXPECT_EQ(R"(entries {
+  std::string expected_proto_text = R"(entries {
   kind: INVERTER
   name: "INV"
   input_names: "A"
@@ -48,8 +53,10 @@ TEST(CellLibraryTest, SerializeToProto) {
     }
   }
 }
-)",
-            proto.DebugString());
+)";
+  CellLibraryProto expected_proto;
+  TextFormat::ParseFromString(expected_proto_text, &expected_proto);
+  EXPECT_TRUE(google::protobuf::util::MessageDifferencer::Equals(proto, expected_proto));
 }
 
 TEST(CellLibraryTest, EvaluateStateTable) {
@@ -136,13 +143,12 @@ TEST(CellLibraryTest, EvaluateStateTable) {
   // BLT is unspecified.
   stimulus.clear();
   stimulus["i1"] = false;
-  EXPECT_THAT(
-      table.GetSignalValue(stimulus, "ham_sandwich"),
-      status_testing::StatusIs(absl::StatusCode::kNotFound,
-                               ::testing::HasSubstr("No matching row")));
+  EXPECT_THAT(table.GetSignalValue(stimulus, "ham_sandwich"),
+              absl_testing::StatusIs(absl::StatusCode::kNotFound,
+                                     ::testing::HasSubstr("No matching row")));
 
   EXPECT_THAT(table.GetSignalValue(stimulus, "PB&J"),
-              status_testing::StatusIs(absl::StatusCode::kInvalidArgument));
+              absl_testing::StatusIs(absl::StatusCode::kInvalidArgument));
 }
 
 TEST(CellLibraryTest, LutStateTable) {

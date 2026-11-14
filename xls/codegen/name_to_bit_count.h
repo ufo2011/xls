@@ -22,11 +22,10 @@
 #define XLS_CODEGEN_NAME_TO_BIT_COUNT_H_
 
 #include <cstdint>
+#include <string>
 
 #include "absl/container/flat_hash_map.h"
-#include "absl/strings/string_view.h"
 #include "xls/ir/bits.h"
-#include "xls/ir/type.h"
 
 namespace xls {
 

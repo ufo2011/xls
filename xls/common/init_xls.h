@@ -15,9 +15,8 @@
 #ifndef XLS_COMMON_INIT_XLS_H_
 #define XLS_COMMON_INIT_XLS_H_
 
+#include <string_view>
 #include <vector>
-
-#include "absl/strings/string_view.h"
 
 namespace xls {
 
@@ -29,7 +28,7 @@ namespace xls {
 // Is typically called early on in main().
 //
 // `usage` provides a short usage message passed to
-// absl::SetProgramUsageMessage(). It can be nullptr, then it's ignored.
+// absl::SetProgramUsageMessage().
 //
 // `argc` and `argv` are the command line flags to parse. This function does not
 // modify `argc`.
@@ -38,9 +37,15 @@ namespace xls {
 // command-line flag (or arguments to a flag), not including the program
 // invocation name. (This includes positional arguments after the
 // flag-terminating delimiter '--'.)
-std::vector<absl::string_view> InitXls(absl::string_view usage, int argc,
-                                       char* argv[]);
+std::vector<std::string_view> InitXls(std::string_view usage, int argc,
+                                      char* argv[]);
 
+namespace internal {
+// Internal function which sets up post-absl common components shared by both
+// testing and non-testing inits. Should only be called by InitXls or
+// InitXlsForTest.
+void InitXlsPostAbslFlagParse();
+}  // namespace internal
 }  // namespace xls
 
 #endif  // XLS_COMMON_INIT_XLS_H_

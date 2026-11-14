@@ -15,26 +15,38 @@ on:
 
 jobs:
   build:
-    name: Bazel Test All (opt)
-    runs-on: ubuntu-20.04
+    name: Bazel Build (opt)
+    runs-on:
+      labels: ubuntu-22.04-64core
     timeout-minutes: 600
     steps:
       - uses: actions/checkout@v2
-      - name: Mount Bazel Cache
-        uses: actions/cache@v1
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Run pre-commit checks
+        run: pre-commit run --all-files --show-diff-on-failure
+
+      - name: Install dependencies via apt
+        run: |
+          sudo apt-get install -y python3-dev python-is-python3 build-essential liblapack-dev libblas-dev gfortran libtinfo6
+
+      - name: Restore Nightly Bazel Cache
+        uses: actions/cache/restore@v4
         with:
           path: "~/.cache/bazel"
-          key: bazel
-      - name: Install bazelisk
+          key: bazel-cache-nightly-${{ runner.os }}-${{ github.sha }}
+          restore-keys: bazel-cache-nightly-${{ runner.os }}-
+
+      - name: Bazel Build Tools (opt)
         run: |
-          curl -LO "https://github.com/bazelbuild/bazelisk/releases/download/v1.1.0/bazelisk-linux-amd64"
-          mkdir -p "${GITHUB_WORKSPACE}/bin/"
-          mv bazelisk-linux-amd64 "${GITHUB_WORKSPACE}/bin/bazel"
-          chmod +x "${GITHUB_WORKSPACE}/bin/bazel"
-      - name: Install dependencies via apt
-        run: sudo apt-get install python3-dev python3-distutils python3-dev python-is-python3 libtinfo5
-      # Note: xlscc is excluded because it builds Clang, and that pushes us
-      # over 6 hours of build time.
-      - name: Bazel Test All (opt)
+          bazel build --config=ci -c opt --noshow_progress --test_output=errors -- //xls/dslx:interpreter_main //xls/dslx/ir_convert:ir_converter_main //xls/tools:opt_main //xls/tools:codegen_main
+
+      - name: Bazel Test xls/... (opt)
         run: |
-          "${GITHUB_WORKSPACE}/bin/bazel" test -c opt -- //xls/... -//xls/contrib/xlscc/...
+          bazel test --config=ci -c opt --noshow_progress --test_output=errors -- //xls/... -//xls/contrib/... -//xls/dev_tools/... //docs_src/... //xls/tests:documentation_test
+
+      - name: Bazel Test Including Contrib & DevTools (opt)
+        run: |
+          bazel test --config=ci -c opt --noshow_progress --test_output=errors -- //...

@@ -14,10 +14,20 @@
 
 #include "xls/passes/unroll_pass.h"
 
+#include <cstdint>
+#include <vector>
+
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "xls/common/status/status_macros.h"
-#include "xls/ir/node_iterator.h"
+#include "xls/ir/bits.h"
+#include "xls/ir/function.h"
+#include "xls/ir/node.h"
+#include "xls/ir/nodes.h"
+#include "xls/ir/value.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/pass_base.h"
 
 namespace xls {
 namespace {
@@ -25,7 +35,7 @@ namespace {
 // Finds an "effectively used" (has users or is return value) counted for in the
 // function f, or returns nullptr if none is found.
 CountedFor* FindCountedFor(FunctionBase* f) {
-  for (Node* node : TopoSort(f)) {
+  for (Node* node : f->nodes()) {
     if (node->Is<CountedFor>() &&
         (f->HasImplicitUse(node) || !node->users().empty())) {
       return node->As<CountedFor>();
@@ -64,7 +74,8 @@ absl::Status UnrollCountedFor(CountedFor* loop) {
 }  // namespace
 
 absl::StatusOr<bool> UnrollPass::RunOnFunctionBaseInternal(
-    FunctionBase* f, const PassOptions& options, PassResults* results) const {
+    FunctionBase* f, const OptimizationPassOptions& options,
+    PassResults* results, OptimizationContext& context) const {
   bool changed = false;
   while (true) {
     CountedFor* loop = FindCountedFor(f);

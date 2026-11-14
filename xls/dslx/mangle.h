@@ -15,16 +15,38 @@
 #ifndef XLS_DSLX_MANGLE_H_
 #define XLS_DSLX_MANGLE_H_
 
-#include "xls/dslx/ast.h"
-#include "xls/dslx/symbolic_bindings.h"
+#include <cstdint>
+#include <string>
+#include <string_view>
+
+#include "absl/container/btree_set.h"
+#include "absl/status/statusor.h"
+#include "xls/dslx/type_system/parametric_env.h"
 
 namespace xls::dslx {
 
+enum class CallingConvention : uint8_t {
+  // The IR converted parameters are identical to the DSL parameters in their
+  // type, number, and name.
+  kTypical,
+
+  // DSL functions that have `fail!()` operations inside are IR converted to
+  // automatically take a `(seq: token, activated: bool)` as initial parameters,
+  // so that caller contexts can say whether the function is activated (such
+  // that an assertion should actually cause a failure when the predicate is
+  // false).
+  kImplicitToken,
+
+  // The IR calling convention for a proc next function.
+  kProcNext,
+};
+
 // Returns the mangled name of function with the given parametric bindings.
 absl::StatusOr<std::string> MangleDslxName(
-    absl::string_view function_name,
-    const absl::btree_set<std::string>& free_keys, Module* module,
-    const SymbolicBindings* symbolic_bindings = nullptr);
+    std::string_view module_name, std::string_view function_name,
+    CallingConvention convention,
+    const absl::btree_set<std::string>& free_keys = {},
+    const ParametricEnv& parametric_env = {}, std::string_view scope = "");
 }  // namespace xls::dslx
 
 #endif  // XLS_DSLX_MANGLE_H_

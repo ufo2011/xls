@@ -14,7 +14,11 @@
 
 #include "xls/common/strong_int.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <iostream>
+#include <limits>
+#include <sstream>
 #include <type_traits>
 
 #include "gmock/gmock.h"
@@ -27,15 +31,15 @@ namespace {
 
 using ::testing::Eq;
 
-DEFINE_STRONG_INT_TYPE(StrongInt8, int8_t);
-DEFINE_STRONG_INT_TYPE(StrongUInt8, uint8_t);
-DEFINE_STRONG_INT_TYPE(StrongInt16, int16_t);
-DEFINE_STRONG_INT_TYPE(StrongUInt16, uint16_t);
-DEFINE_STRONG_INT_TYPE(StrongInt32, int32_t);
-DEFINE_STRONG_INT_TYPE(StrongInt64, int64_t);
-DEFINE_STRONG_INT_TYPE(StrongUInt32, uint32_t);
-DEFINE_STRONG_INT_TYPE(StrongUInt64, uint64_t);
-DEFINE_STRONG_INT_TYPE(StrongLong, long);  // NOLINT
+XLS_DEFINE_STRONG_INT_TYPE(StrongInt8, int8_t);
+XLS_DEFINE_STRONG_INT_TYPE(StrongUInt8, uint8_t);
+XLS_DEFINE_STRONG_INT_TYPE(StrongInt16, int16_t);
+XLS_DEFINE_STRONG_INT_TYPE(StrongUInt16, uint16_t);
+XLS_DEFINE_STRONG_INT_TYPE(StrongInt32, int32_t);
+XLS_DEFINE_STRONG_INT_TYPE(StrongInt64, int64_t);
+XLS_DEFINE_STRONG_INT_TYPE(StrongUInt32, uint32_t);
+XLS_DEFINE_STRONG_INT_TYPE(StrongUInt64, uint64_t);
+XLS_DEFINE_STRONG_INT_TYPE(StrongLong, long);  // NOLINT
 
 TEST(StrongIntTypeIdTest, TypeIdIsAsExpected) {
   EXPECT_EQ("StrongInt8", StrongInt8::TypeName());
@@ -45,13 +49,13 @@ TEST(StrongIntTypeIdTest, TypeIdIsAsExpected) {
 template <typename T>
 class StrongIntTest : public ::testing::Test {
  public:
-  typedef T StrongIntTypeUnderTest;
+  using StrongIntTypeUnderTest = T;
 };
 
 // All tests will be executed on the following StrongInt<> types.
-typedef ::testing::Types<StrongInt8, StrongUInt8, StrongInt16, StrongUInt16,
-                         StrongInt32, StrongInt64, StrongUInt64, StrongLong>
-    SupportedStrongIntTypes;
+using SupportedStrongIntTypes =
+    ::testing::Types<StrongInt8, StrongUInt8, StrongInt16, StrongUInt16,
+                     StrongInt32, StrongInt64, StrongUInt64, StrongLong>;
 
 TYPED_TEST_SUITE(StrongIntTest, SupportedStrongIntTypes);
 
@@ -59,7 +63,7 @@ TYPED_TEST_SUITE(StrongIntTest, SupportedStrongIntTypes);
 // comparison operators which must themselves be tested.
 
 TYPED_TEST(StrongIntTest, TestTraits) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
   EXPECT_TRUE(std::is_standard_layout<T>::value);
   EXPECT_TRUE(std::is_trivially_copy_constructible<T>::value);
   EXPECT_TRUE(std::is_trivially_copy_assignable<T>::value);
@@ -67,8 +71,8 @@ TYPED_TEST(StrongIntTest, TestTraits) {
 }
 
 TYPED_TEST(StrongIntTest, TestCtors) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
-  typedef typename T::ValueType V;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
+  using V = typename T::ValueType;
 
   {  // Test default construction.
     T x;
@@ -206,7 +210,7 @@ struct PositiveValidator {
   template <class T, class U>
   static bool ValidateInit(U i) {
     if (i < 0) {
-      std::cerr << "PositiveValidator" << std::endl;
+      std::cerr << "PositiveValidator" << '\n';
       abort();
     }
     return true;
@@ -215,17 +219,17 @@ struct PositiveValidator {
 }  // namespace
 
 TYPED_TEST(StrongIntTest, TestCtorDeath) {
-  typedef typename TestFixture::StrongIntTypeUnderTest::ValueType V;
+  using V = typename TestFixture::StrongIntTypeUnderTest::ValueType;
   if (std::numeric_limits<V>::is_signed) {
     struct CustomTag {};
-    typedef StrongInt<CustomTag, V, PositiveValidator> T;
+    using T = StrongInt<CustomTag, V, PositiveValidator>;
     EXPECT_DEATH(T(static_cast<V>(-123)), "PositiveValidator");
   }
 }
 
 TYPED_TEST(StrongIntTest, TestMetadata) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
-  typedef typename T::ValueType V;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
+  using V = typename T::ValueType;
 
   T t;
   EXPECT_EQ(std::numeric_limits<V>::max(), t.Max());
@@ -233,8 +237,8 @@ TYPED_TEST(StrongIntTest, TestMetadata) {
 }
 
 TYPED_TEST(StrongIntTest, TestUnaryOperators) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
-  typedef typename T::ValueType V;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
+  using V = typename T::ValueType;
 
   {  // Test unary plus and minus of positive values.
     T x(123);
@@ -274,8 +278,8 @@ TYPED_TEST(StrongIntTest, TestUnaryOperators) {
 }
 
 TYPED_TEST(StrongIntTest, TestIncrementDecrementOperators) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
-  typedef typename T::ValueType V;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
+  using V = typename T::ValueType;
 
   {  // Test simple increments and decrements.
     T x(0);
@@ -292,7 +296,7 @@ TYPED_TEST(StrongIntTest, TestIncrementDecrementOperators) {
 }
 
 TYPED_TEST(StrongIntTest, TestAssignmentOperator) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
   {  // Test simple assignment from the same type.
     T x(12);
     T y(34);
@@ -324,8 +328,8 @@ TYPED_TEST(StrongIntTest, TestAssignmentOperator) {
   }
 
 TYPED_TEST(StrongIntTest, TestPlusOperators) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
-  typedef typename T::ValueType V;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
+  using V = typename T::ValueType;
 
   // Test positive vs. positive addition.
   TEST_T_OP_T(9, +, 3)
@@ -352,8 +356,8 @@ TYPED_TEST(StrongIntTest, TestPlusOperators) {
 }
 
 TYPED_TEST(StrongIntTest, TestMinusOperators) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
-  typedef typename T::ValueType V;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
+  using V = typename T::ValueType;
 
   // Test positive vs. positive subtraction.
   TEST_T_OP_T(9, -, 3)
@@ -407,8 +411,8 @@ TYPED_TEST(StrongIntTest, TestMinusOperators) {
   }
 
 TYPED_TEST(StrongIntTest, TestMultiplyOperators) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
-  typedef typename T::ValueType V;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
+  using V = typename T::ValueType;
 
   // Test positive vs. positive multiplication.
   TEST_T_OP_NUM(9, *, V, 3);
@@ -479,8 +483,8 @@ TYPED_TEST(StrongIntTest, TestMultiplyOperators) {
 }
 
 TYPED_TEST(StrongIntTest, TestDivideOperators) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
-  typedef typename T::ValueType V;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
+  using V = typename T::ValueType;
 
   // Test positive vs. positive division.
   TEST_T_OP_NUM(9, /, V, 3);
@@ -527,8 +531,8 @@ TYPED_TEST(StrongIntTest, TestDivideOperators) {
 }
 
 TYPED_TEST(StrongIntTest, TestModuloOperators) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
-  typedef typename T::ValueType V;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
+  using V = typename T::ValueType;
 
   // Test positive vs. positive modulo.
   TEST_T_OP_NUM(7, %, V, 6);
@@ -573,8 +577,8 @@ TYPED_TEST(StrongIntTest, TestModuloOperators) {
 }
 
 TYPED_TEST(StrongIntTest, TestLeftShiftOperators) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
-  typedef typename T::ValueType V;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
+  using V = typename T::ValueType;
 
   // Test basic shift.
   TEST_T_OP_NUM(0x09, <<, int, 3);
@@ -593,8 +597,8 @@ TYPED_TEST(StrongIntTest, TestLeftShiftOperators) {
 }
 
 TYPED_TEST(StrongIntTest, TestRightShiftOperators) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
-  typedef typename T::ValueType V;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
+  using V = typename T::ValueType;
 
   // Test basic shift.
   TEST_T_OP_NUM(0x09, >>, int, 3);
@@ -613,8 +617,8 @@ TYPED_TEST(StrongIntTest, TestRightShiftOperators) {
 }
 
 TYPED_TEST(StrongIntTest, TestBitAndOperators) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
-  typedef typename T::ValueType V;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
+  using V = typename T::ValueType;
 
   // Test basic bit-and.
   TEST_T_OP_T(0x09, &, 0x03);
@@ -633,8 +637,8 @@ TYPED_TEST(StrongIntTest, TestBitAndOperators) {
 }
 
 TYPED_TEST(StrongIntTest, TestBitOrOperators) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
-  typedef typename T::ValueType V;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
+  using V = typename T::ValueType;
 
   // Test basic bit-or.
   TEST_T_OP_T(0x09, |, 0x03);
@@ -653,8 +657,8 @@ TYPED_TEST(StrongIntTest, TestBitOrOperators) {
 }
 
 TYPED_TEST(StrongIntTest, TestBitXorOperators) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
-  typedef typename T::ValueType V;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
+  using V = typename T::ValueType;
 
   // Test basic bit-xor.
   TEST_T_OP_T(0x09, ^, 0x03);
@@ -673,7 +677,7 @@ TYPED_TEST(StrongIntTest, TestBitXorOperators) {
 }
 
 TYPED_TEST(StrongIntTest, TestComparisonOperators) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
 
   T x(93);
 
@@ -713,7 +717,7 @@ TYPED_TEST(StrongIntTest, TestComparisonOperators) {
 }
 
 TYPED_TEST(StrongIntTest, TestStreamOutputOperator) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
 
   T x(93);
   std::ostringstream out;
@@ -722,7 +726,7 @@ TYPED_TEST(StrongIntTest, TestStreamOutputOperator) {
 }
 
 TYPED_TEST(StrongIntTest, TestHasher) {
-  typedef typename TestFixture::StrongIntTypeUnderTest T;
+  using T = typename TestFixture::StrongIntTypeUnderTest;
 
   typename T::Hasher hasher;
   EXPECT_EQ(hasher(T(0)), hasher(T(0)));
@@ -797,7 +801,7 @@ TYPED_TEST(StrongIntTest, ConstexprMinMax) {
 
 template <typename Ttest, typename Tbig>
 bool ExhaustiveTest() {
-  typedef typename Ttest::ValueType V;
+  using V = typename Ttest::ValueType;
   Tbig v_min = std::numeric_limits<V>::min();
   Tbig v_max = std::numeric_limits<V>::max();
   for (Tbig lhs = v_min; lhs <= v_max; ++lhs) {
@@ -848,9 +852,9 @@ TEST(StrongIntTest, ExplicitCasting) {
 // conversions work.
 namespace other_namespace {
 
-DEFINE_STRONG_INT_TYPE(Inches, int64_t);
-DEFINE_STRONG_INT_TYPE(Feet, int64_t);
-DEFINE_STRONG_INT_TYPE(Centimeters, int32_t);
+XLS_DEFINE_STRONG_INT_TYPE(Inches, int64_t);
+XLS_DEFINE_STRONG_INT_TYPE(Feet, int64_t);
+XLS_DEFINE_STRONG_INT_TYPE(Centimeters, int32_t);
 
 constexpr Feet StrongIntConvert(const Inches &arg, Feet * /* unused */) {
   return Feet(arg.value() / 12);

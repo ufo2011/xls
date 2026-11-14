@@ -14,34 +14,44 @@
 
 #include "xls/dslx/interp_value.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "absl/base/casts.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
+#include "absl/strings/substitute.h"
+#include "absl/types/span.h"
+#include "xls/common/math_util.h"
 #include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/data_structures/inline_bitmap.h"
+#include "xls/dslx/channel_direction.h"
+#include "xls/dslx/dslx_builtins.h"
+#include "xls/dslx/frontend/ast.h"
+#include "xls/dslx/frontend/module.h"
+#include "xls/dslx/value_format_descriptor.h"
+#include "xls/ir/bits.h"
 #include "xls/ir/bits_ops.h"
+#include "xls/ir/format_preference.h"
+#include "xls/ir/value.h"
 
 namespace xls::dslx {
-
-absl::StatusOr<Builtin> BuiltinFromString(absl::string_view name) {
-#define TRY_NAME(__name, __enum) \
-  if (name == __name) {          \
-    return Builtin::__enum;      \
-  }
-  XLS_DSLX_BUILTIN_EACH(TRY_NAME)
-#undef TRY_NAME
-  return absl::InvalidArgumentError(
-      absl::StrFormat("Name is not a DSLX builtin: \"%s\"", name));
-}
-
-std::string BuiltinToString(Builtin builtin) {
-  switch (builtin) {
-#define CASIFY(__str, __enum) \
-  case Builtin::__enum:       \
-    return __str;
-    XLS_DSLX_BUILTIN_EACH(CASIFY)
-#undef CASIFY
-  }
-  return absl::StrFormat("<invalid Builtin(%d)>",
-                         static_cast<int64_t>(builtin));
-}
 
 std::string TagToString(InterpValueTag tag) {
   switch (tag) {
@@ -59,6 +69,16 @@ std::string TagToString(InterpValueTag tag) {
       return "function";
     case InterpValueTag::kToken:
       return "token";
+    case InterpValueTag::kChannelReference:
+      return "channel_reference";
+    case InterpValueTag::kStateElementReference:
+      return "state_element_reference";
+    case InterpValueTag::kTypeReference:
+      return "type_reference";
+    case InterpValueTag::kProcInitializer:
+      return "proc_initializer";
+    case InterpValueTag::kChannelArray:
+      return "channel_array";
   }
   return absl::StrFormat("<invalid InterpValueTag(%d)>",
                          static_cast<int64_t>(tag));
@@ -69,9 +89,32 @@ std::string TagToString(InterpValueTag tag) {
   return InterpValue{InterpValueTag::kTuple, std::move(members)};
 }
 
+void InterpValue::ChannelArray::Validate() {
+  CHECK(!elements_.empty());
+  bool all_reference = true;
+  bool all_array = true;
+  for (const auto& el : elements_) {
+    if (!el.IsChannelReference()) {
+      all_reference = false;
+    }
+    if (!el.IsChannelArray()) {
+      all_array = false;
+    }
+  }
+  CHECK(all_reference || all_array)
+      << "ChannelArray elements must be either all ChannelArray or all "
+         "ChannelReference";
+}
+
 /* static */ absl::StatusOr<InterpValue> InterpValue::MakeArray(
     std::vector<InterpValue> elements) {
   return InterpValue{InterpValueTag::kArray, std::move(elements)};
+}
+
+/* static */ absl::StatusOr<InterpValue> InterpValue::MakeRange(
+    std::vector<InterpValue> elements) {
+  return InterpValue{InterpValueTag::kArray, std::move(elements),
+                     /*is_range=*/true};
 }
 
 /* static */ InterpValue InterpValue::MakeUBits(int64_t bit_count,
@@ -80,16 +123,51 @@ std::string TagToString(InterpValueTag tag) {
                      UBits(value, /*bit_count=*/bit_count)};
 }
 
+/* static */ InterpValue InterpValue::MakeZeroValue(bool is_signed,
+                                                    int64_t bit_count) {
+  return InterpValue{
+      is_signed ? InterpValueTag::kSBits : InterpValueTag::kUBits,
+      Bits(bit_count)};
+}
+
+/* static */ InterpValue InterpValue::MakeMaxValue(bool is_signed,
+                                                   int64_t bit_count) {
+  auto bits = Bits::AllOnes(bit_count);
+  if (!is_signed) {
+    return InterpValue{InterpValueTag::kUBits, std::move(bits)};
+  }
+  // Unset the highest bit to get the maximum value in two's complement form.
+  if (bit_count > 0) {
+    bits = bits.UpdateWithSet(bit_count - 1, false);
+  }
+  return InterpValue{InterpValueTag::kSBits, std::move(bits)};
+}
+
+/* static */ InterpValue InterpValue::MakeMinValue(bool is_signed,
+                                                   int64_t bit_count) {
+  auto bits = Bits(bit_count);
+  if (!is_signed) {
+    return InterpValue{InterpValueTag::kUBits, std::move(bits)};
+  }
+  // Set the highest bit to get the most-negative value in two's complement
+  // form.
+  if (bit_count > 0) {
+    bits = bits.UpdateWithSet(bit_count - 1, true);
+  }
+  return InterpValue{InterpValueTag::kSBits, std::move(bits)};
+}
+
 /* static */ InterpValue InterpValue::MakeSBits(int64_t bit_count,
                                                 int64_t value) {
   return InterpValue{InterpValueTag::kSBits,
-                     UBits(value, /*bit_count=*/bit_count)};
+                     SBits(value, /*bit_count=*/bit_count)};
 }
 
 // Converts an interp value (precondition: `v.IsBits()`) to a string, given a
 // format preference.
-static std::string BitsToString(const InterpValue& v, FormatPreference format,
-                                bool include_type = true) {
+static std::string InterpValueBitsToString(const InterpValue& v,
+                                           FormatPreference format,
+                                           bool include_type_prefix = true) {
   const Bits& bits = v.GetBitsOrDie();
   const int64_t bit_count = v.GetBitCount().value();
 
@@ -105,23 +183,28 @@ static std::string BitsToString(const InterpValue& v, FormatPreference format,
 
   switch (v.tag()) {
     case InterpValueTag::kUBits: {
-      std::string value_str = bits.ToString(format);
-      if (!include_type) {
+      std::string value_str = BitsToString(bits, format);
+      if (format == FormatPreference::kSignedDecimal && bits.msb()) {
+        value_str =
+            absl::StrCat("-", BitsToString(bits_ops::Negate(bits), format));
+      }
+      if (!include_type_prefix) {
         return value_str;
       }
       std::string type_str = bits_type_str();
       return absl::StrCat(type_str, ":", value_str);
     }
     case InterpValueTag::kSBits: {
-      std::string value_str = bits.ToString(format);
-      if ((format == FormatPreference::kDecimal ||
+      std::string value_str = BitsToString(bits, format);
+      if ((format == FormatPreference::kSignedDecimal ||
            format == FormatPreference::kDefault) &&
           bits.msb()) {
         // If we're a signed number in decimal format, give the value for the
         // bit pattern that has the leading negative sign.
-        value_str = absl::StrCat("-", bits_ops::Negate(bits).ToString(format));
+        value_str =
+            absl::StrCat("-", BitsToString(bits_ops::Negate(bits), format));
       }
-      if (!include_type) {
+      if (!include_type_prefix) {
         return value_str;
       }
       std::string type_str = bits_type_str();
@@ -130,18 +213,36 @@ static std::string BitsToString(const InterpValue& v, FormatPreference format,
     default:
       break;
   }
-  XLS_LOG(FATAL) << "Invalid tag for BitsToString: " << v.tag();
+  LOG(FATAL) << "Invalid tag for InterpValueBitsToString: " << v.tag();
 }
 
 std::string InterpValue::ToString(bool humanize,
                                   FormatPreference format) const {
+  std::string result = ToStringInternal(humanize, format);
+  if (tag_ == InterpValueTag::kUBits || tag_ == InterpValueTag::kUBits ||
+      tag_ == InterpValueTag::kSBits || tag_ == InterpValueTag::kTuple ||
+      tag_ == InterpValueTag::kArray || tag_ == InterpValueTag::kEnum ||
+      tag_ == InterpValueTag::kFunction || tag_ == InterpValueTag::kToken ||
+      tag_ == InterpValueTag::kChannelReference ||
+      tag_ == InterpValueTag::kTypeReference ||
+      tag_ == InterpValueTag::kProcInitializer ||
+      tag_ == InterpValueTag::kStateElementReference ||
+      tag_ == InterpValueTag::kChannelArray) {
+    return result;
+  }
+  LOG(FATAL) << "Unhandled tag: " << tag_;
+}
+
+std::string InterpValue::ToStringInternal(bool humanize,
+                                          FormatPreference format) const {
   auto make_guts = [&] {
     return absl::StrJoin(
         GetValuesOrDie(), ", ",
         [humanize, format](std::string* out, const InterpValue& v) {
           if (humanize && v.IsBits()) {
             absl::StrAppend(out,
-                            BitsToString(v, format, /*include_type=*/false));
+                            InterpValueBitsToString(
+                                v, format, /*include_type_prefix=*/!humanize));
             return;
           }
           absl::StrAppend(out, v.ToString(humanize, format));
@@ -151,27 +252,379 @@ std::string InterpValue::ToString(bool humanize,
   switch (tag_) {
     case InterpValueTag::kUBits:
     case InterpValueTag::kSBits:
-      return BitsToString(*this, format);
+      return InterpValueBitsToString(*this, format,
+                                     /*include_type_prefix=*/!humanize);
     case InterpValueTag::kArray:
+      if (is_range() &&
+          std::holds_alternative<std::shared_ptr<RangeData>>(payload_)) {
+        const RangeData& range =
+            *std::get<std::shared_ptr<RangeData>>(payload_);
+        return absl::StrFormat(
+            "[%s..%s%s]", range.start.ToString(humanize, format),
+            range.inclusive ? "=" : "", range.end.ToString(humanize, format));
+      }
       return absl::StrFormat("[%s]", make_guts());
     case InterpValueTag::kTuple:
       return absl::StrFormat("(%s)", make_guts());
-    case InterpValueTag::kEnum:
-      return absl::StrFormat("%s:%s", type_->identifier(),
-                             GetBitsOrDie().ToString());
+    case InterpValueTag::kEnum: {
+      EnumData enum_data = std::get<EnumData>(payload_);
+      return absl::StrFormat("%s:%v", enum_data.def->identifier(),
+                             enum_data.value);
+    }
     case InterpValueTag::kFunction:
-      if (absl::holds_alternative<Builtin>(GetFunctionOrDie())) {
+      if (std::holds_alternative<Builtin>(GetFunctionOrDie())) {
         return absl::StrCat(
-            "builtin:",
-            BuiltinToString(absl::get<Builtin>(GetFunctionOrDie())));
+            "builtin:", BuiltinToString(std::get<Builtin>(GetFunctionOrDie())));
       }
       return absl::StrCat(
           "function:",
-          absl::get<UserFnData>(GetFunctionOrDie()).function->identifier());
+          std::get<UserFnData>(GetFunctionOrDie()).function->identifier());
     case InterpValueTag::kToken:
       return absl::StrFormat("token:%p", GetTokenData().get());
+    case InterpValueTag::kStateElementReference:
+      return absl::StrCat(
+          "state:", GetStateElementReferenceOrDie().name_def()->ToString());
+    case InterpValueTag::kChannelReference: {
+      const ChannelReference& channel_ref =
+          std::get<ChannelReference>(payload_);
+      std::string channel_args(
+          ChannelDirectionToString(channel_ref.GetDirection()));
+      absl::StrAppendFormat(&channel_args, ", channel_instance_id=%s",
+                            channel_ref.GetChannelId().has_value()
+                                ? absl::StrCat(*channel_ref.GetChannelId())
+                                : "none");
+      if (channel_ref.GetDefiner().has_value()) {
+        absl::StrAppendFormat(
+            &channel_args, ", definer=`%s` (%s)",
+            (*channel_ref.GetDefiner())->ToString(),
+            AstNodeKindToString((*channel_ref.GetDefiner())->kind()));
+      }
+      return absl::Substitute("channel_reference($0)", channel_args);
+    }
+    case InterpValueTag::kTypeReference:
+      return std::get<TypeReference>(payload_).string;
+    case InterpValueTag::kProcInitializer: {
+      const auto& initializer =
+          std::get<std::shared_ptr<ProcInitializer>>(payload_);
+      std::vector<std::string> parametric_strings;
+      parametric_strings.reserve(initializer->parametrics().size());
+      for (const InterpValue& parametric : initializer->parametrics()) {
+        parametric_strings.push_back(parametric.ToString());
+      }
+      std::vector<std::string> member_strings;
+      for (const InterpValue& member : initializer->members()) {
+        member_strings.push_back(member.ToString());
+      }
+      for (const auto& [param, value] : initializer->forwarded_values()) {
+        member_strings.push_back(absl::Substitute(
+            "fwd $0: $1", param->identifier(), value.ToString()));
+      }
+      return absl::Substitute(
+          "$0$1($2)", initializer->proc_def()->identifier(),
+          parametric_strings.empty()
+              ? ""
+              : absl::StrCat("<", absl::StrJoin(parametric_strings, ", "), ">"),
+          absl::StrJoin(member_strings, ", "));
+    }
+    case InterpValueTag::kChannelArray: {
+      const ChannelArray& channel_array = GetChannelArrayOrDie();
+      std::string guts = absl::StrJoin(
+          channel_array.elements(), ", ",
+          [humanize, format](std::string* out, const InterpValue& v) {
+            absl::StrAppend(out, v.ToString(humanize, format));
+          });
+      return absl::Substitute(
+          "channel_array($0, channel_array_id=$1, definer=$2, elements=[$3])",
+          ChannelDirectionToString(channel_array.direction()),
+          channel_array.channel_array_id(),
+          channel_array.definer() != nullptr
+              ? channel_array.definer()->ToString()
+              : "none",
+          guts);
+    }
   }
-  XLS_LOG(FATAL) << "Unhandled tag: " << tag_;
+  return "<INVALID>";
+}
+
+static std::string IndentString(std::string_view s, int64_t n) {
+  constexpr int64_t kIndentAmount = 4;
+  return absl::StrFormat("%s%s", std::string(n * kIndentAmount, ' '), s);
+}
+
+static bool IsSingleLine(std::string_view s) {
+  return !absl::StrContains(s, '\n');
+}
+
+absl::StatusOr<std::string> InterpValue::ToArrayString(
+    const ValueFormatDescriptor& fmt_desc, bool include_type_prefix,
+    int64_t indentation) const {
+  XLS_RET_CHECK(fmt_desc.IsArray());
+  std::vector<std::string> pieces;
+  pieces.push_back("[");
+  const std::vector<InterpValue>& values = GetValuesOrDie();
+  for (size_t i = 0; i < values.size(); ++i) {
+    const InterpValue& v = values.at(i);
+    XLS_ASSIGN_OR_RETURN(
+        std::string elem,
+        v.ToFormattedString(fmt_desc.array_element_format(),
+                            include_type_prefix, indentation + 1));
+    std::string piece = IndentString(elem, indentation + 1);
+    if (i + 1 != values.size()) {
+      absl::StrAppend(&piece, ",");
+    }
+    pieces.push_back(piece);
+  }
+  pieces.push_back(IndentString("]", indentation));
+  return absl::StrJoin(pieces, "\n");
+}
+
+absl::StatusOr<std::string> InterpValue::ToStructString(
+    const ValueFormatDescriptor& fmt_desc, bool include_type_prefix,
+    int64_t indentation) const {
+  if (!IsTuple()) {
+    return absl::FailedPreconditionError(
+        "Can only format a tuple InterpValue as a struct");
+  }
+  const std::vector<InterpValue>& values = GetValuesOrDie();
+  if (values.size() != fmt_desc.size()) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat("Number of tuple elements (%d) did not correspond to "
+                        "number of struct formatting elements (%d)",
+                        values.size(), fmt_desc.size()));
+  }
+  std::vector<std::string> pieces;
+  for (int64_t i = 0; i < values.size(); ++i) {
+    const InterpValue& e = values.at(i);
+    const ValueFormatDescriptor& fmt_element = fmt_desc.struct_elements()[i];
+    std::string_view field_name = fmt_desc.struct_field_names()[i];
+    XLS_ASSIGN_OR_RETURN(
+        std::string element,
+        e.ToFormattedString(fmt_element, include_type_prefix, indentation + 1));
+    pieces.push_back(IndentString(
+        absl::StrFormat("%s: %s", field_name, element), indentation + 1));
+  }
+  std::string prefix = absl::StrFormat("%s {", fmt_desc.struct_name());
+  std::string interior = absl::StrJoin(pieces, ",\n");
+  std::string suffix = IndentString("}", indentation);
+  return absl::StrJoin({prefix, interior, suffix}, "\n");
+}
+
+absl::StatusOr<std::string> InterpValue::ToTupleString(
+    const ValueFormatDescriptor& fmt_desc, bool include_type_prefix,
+    int64_t indentation) const {
+  if (!IsTuple()) {
+    return absl::FailedPreconditionError(
+        "Can only format a tuple InterpValue as a struct");
+  }
+  const std::vector<InterpValue>& values = GetValuesOrDie();
+  XLS_RET_CHECK_EQ(values.size(), fmt_desc.size());
+
+  std::vector<std::string> pieces;
+  pieces.push_back("(");
+  for (int64_t i = 0; i < values.size(); ++i) {
+    const InterpValue& e = values.at(i);
+    const ValueFormatDescriptor& fmt_element = fmt_desc.tuple_elements()[i];
+    XLS_ASSIGN_OR_RETURN(
+        std::string element,
+        e.ToFormattedString(fmt_element, include_type_prefix, indentation + 1));
+    if (i + 1 != values.size() || values.size() == 1) {
+      pieces.push_back(
+          IndentString(absl::StrCat(element, ","), indentation + 1));
+    } else {
+      pieces.push_back(IndentString(element, indentation + 1));
+    }
+  }
+  pieces.push_back(IndentString(")", indentation));
+  return absl::StrJoin(pieces, "\n");
+}
+
+absl::StatusOr<std::string> InterpValue::ToEnumString(
+    const ValueFormatDescriptor& fmt_desc) const {
+  const auto& value_to_name = fmt_desc.value_to_name();
+  auto it = value_to_name.find(GetBitsOrDie());
+  if (it == value_to_name.end()) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat("Enum value %s was not found in enum descriptor for %s",
+                        ToString(), fmt_desc.enum_name()));
+  }
+  // We show the underlying value after displaying the enum member.
+  auto underlying = InterpValue::MakeBits(IsSigned(), GetBitsOrDie());
+  return absl::StrFormat("%s::%s  // %s", fmt_desc.enum_name(), it->second,
+                         underlying.ToString());
+}
+
+absl::StatusOr<std::string> InterpValue::ToSumString(
+    const ValueFormatDescriptor& fmt_desc, bool include_type_prefix,
+    int64_t indentation) const {
+  XLS_ASSIGN_OR_RETURN(EncodedSumView sum_view, GetEncodedSumView(*this));
+  const InterpValue& tag_value = sum_view.tag;
+  if (!tag_value.HasBits()) {
+    return absl::InvalidArgumentError("Expected sum tag to be bits-valued.");
+  }
+  XLS_ASSIGN_OR_RETURN(uint64_t variant_index, tag_value.GetBitValueUnsigned());
+  if (variant_index >= fmt_desc.sum_variant_count()) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Sum tag %d is out of bounds for `%s` with %d variants",
+        static_cast<int64_t>(variant_index), fmt_desc.sum_name(),
+        static_cast<int64_t>(fmt_desc.sum_variant_count())));
+  }
+  const size_t payload_slot_count = fmt_desc.sum_payload_slot_count();
+  if (sum_view.payload_slots.size() != payload_slot_count) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Sum `%s` expected %d payload slots; got %d", fmt_desc.sum_name(),
+        static_cast<int64_t>(payload_slot_count),
+        static_cast<int64_t>(sum_view.payload_slots.size())));
+  }
+
+  const ValueFormatSumVariantView variant = fmt_desc.sum_variant(variant_index);
+  const absl::Span<const ValueFormatDescriptor> payload_formats =
+      variant.payload_formats();
+  const size_t payload_size = variant.payload_slot_count();
+  const size_t payload_slot_offset = variant.payload_start();
+  const std::string prefix =
+      absl::StrFormat("%s::%s", fmt_desc.sum_name(), variant.name());
+
+  switch (variant.kind()) {
+    case ValueFormatSumVariantKind::kUnit:
+      return prefix;
+    case ValueFormatSumVariantKind::kTuple: {
+      std::vector<std::string> payload_pieces;
+      payload_pieces.reserve(payload_size);
+      for (size_t i = 0; i < payload_size; ++i) {
+        XLS_ASSIGN_OR_RETURN(
+            std::string payload_piece,
+            sum_view.payload_slots[payload_slot_offset + i].ToFormattedString(
+                payload_formats[i], include_type_prefix, indentation + 1));
+        payload_pieces.push_back(std::move(payload_piece));
+      }
+      if (std::all_of(
+              payload_pieces.begin(), payload_pieces.end(),
+              [](const std::string& piece) { return IsSingleLine(piece); })) {
+        return absl::StrCat(prefix, "(", absl::StrJoin(payload_pieces, ", "),
+                            ")");
+      }
+      std::vector<std::string> pieces = {absl::StrCat(prefix, "(")};
+      for (size_t i = 0; i < payload_pieces.size(); ++i) {
+        std::string piece = IndentString(payload_pieces[i], indentation + 1);
+        if (i + 1 != payload_pieces.size()) {
+          absl::StrAppend(&piece, ",");
+        }
+        pieces.push_back(std::move(piece));
+      }
+      pieces.push_back(IndentString(")", indentation));
+      return absl::StrJoin(pieces, "\n");
+    }
+    case ValueFormatSumVariantKind::kStruct: {
+      const absl::Span<const std::string> field_names = variant.field_names();
+      XLS_RET_CHECK_EQ(payload_size, field_names.size());
+      if (payload_size == 0) {
+        return absl::StrCat(prefix, " {}");
+      }
+      std::vector<std::string> pieces;
+      for (size_t i = 0; i < payload_size; ++i) {
+        XLS_ASSIGN_OR_RETURN(
+            std::string payload_piece,
+            sum_view.payload_slots[payload_slot_offset + i].ToFormattedString(
+                payload_formats[i], include_type_prefix, indentation + 1));
+        pieces.push_back(IndentString(
+            absl::StrFormat("%s: %s", field_names[i], payload_piece),
+            indentation + 1));
+      }
+      std::string body = absl::StrJoin(pieces, ",\n");
+      return absl::StrJoin(
+          {absl::StrCat(prefix, " {"), body, IndentString("}", indentation)},
+          "\n");
+    }
+  }
+  return absl::InternalError("Unhandled ValueFormatSumVariantKind.");
+}
+
+absl::StatusOr<std::string> InterpValue::ToFormattedString(
+    const ValueFormatDescriptor& fmt_desc, bool include_type_prefix,
+    int64_t indentation) const {
+  class Visitor : public ValueFormatVisitor {
+   public:
+    explicit Visitor(const InterpValue& v, bool include_type_prefix,
+                     int64_t indentation)
+        : v_(v),
+          include_type_prefix_(include_type_prefix),
+          indentation_(indentation) {}
+
+    absl::Status HandleStruct(const ValueFormatDescriptor& d) override {
+      XLS_ASSIGN_OR_RETURN(
+          result_, v_.ToStructString(d, include_type_prefix_, indentation_));
+      return absl::OkStatus();
+    }
+    absl::Status HandleArray(const ValueFormatDescriptor& d) override {
+      XLS_ASSIGN_OR_RETURN(
+          result_, v_.ToArrayString(d, include_type_prefix_, indentation_));
+      return absl::OkStatus();
+    }
+    absl::Status HandleEnum(const ValueFormatDescriptor& d) override {
+      XLS_ASSIGN_OR_RETURN(result_, v_.ToEnumString(d));
+      return absl::OkStatus();
+    }
+    absl::Status HandleSum(const ValueFormatDescriptor& d) override {
+      XLS_ASSIGN_OR_RETURN(
+          result_, v_.ToSumString(d, include_type_prefix_, indentation_));
+      return absl::OkStatus();
+    }
+    absl::Status HandleTuple(const ValueFormatDescriptor& d) override {
+      XLS_ASSIGN_OR_RETURN(
+          result_, v_.ToTupleString(d, include_type_prefix_, indentation_));
+      return absl::OkStatus();
+    }
+    absl::Status HandleLeafValue(const ValueFormatDescriptor& d) override {
+      result_ =
+          v_.ToString(/*humanize=*/!include_type_prefix_, d.leaf_format());
+      return absl::OkStatus();
+    }
+
+    const std::optional<std::string>& result() const { return result_; }
+
+   private:
+    const InterpValue& v_;
+    bool include_type_prefix_;
+    const int64_t indentation_;
+    std::optional<std::string> result_;
+  };
+
+  Visitor v(*this, include_type_prefix, indentation);
+  XLS_RETURN_IF_ERROR(fmt_desc.Accept(v));
+  XLS_RET_CHECK(v.result().has_value());
+  return v.result().value();
+}
+
+bool InterpValue::ProcInitializer::Eq(const ProcInitializer& other) const {
+  if (proc_def_ != other.proc_def_) {
+    return false;
+  }
+  CHECK_EQ(parametrics_.size(), other.parametrics_.size());
+  for (int i = 0; i < parametrics_.size(); i++) {
+    if (parametrics_[i] != other.parametrics_[i]) {
+      return false;
+    }
+  }
+
+  if (members_.size() != other.members_.size()) {
+    return false;
+  }
+  for (int i = 0; i < members_.size(); i++) {
+    if (members_[i] != other.members_[i]) {
+      return false;
+    }
+  }
+
+  if (forwarded_values_.size() != other.forwarded_values().size()) {
+    return false;
+  }
+  for (int i = 0; i < forwarded_values_.size(); i++) {
+    if (forwarded_values_[i] != other.forwarded_values_[i]) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 bool InterpValue::Eq(const InterpValue& other) const {
@@ -202,15 +655,46 @@ bool InterpValue::Eq(const InterpValue& other) const {
     // bit value can be used in any place an enum type is annotated.
     case InterpValueTag::kSBits:
     case InterpValueTag::kUBits:
-    case InterpValueTag::kEnum:
+    case InterpValueTag::kTypeReference:
+    case InterpValueTag::kEnum: {
       return other.HasBits() && GetBitsOrDie() == other.GetBitsOrDie();
+    }
     case InterpValueTag::kToken:
       return other.IsToken() && GetTokenData() == other.GetTokenData();
     case InterpValueTag::kArray: {
       if (!other.IsArray()) {
         return false;
       }
-      return values_equal();
+      bool self_range = is_range();
+      bool other_range = other.is_range();
+
+      if (self_range && other_range) {
+        bool self_symbolic =
+            std::holds_alternative<std::shared_ptr<RangeData>>(payload_);
+        bool other_symbolic =
+            std::holds_alternative<std::shared_ptr<RangeData>>(other.payload_);
+        if (self_symbolic && other_symbolic) {
+          return *std::get<std::shared_ptr<RangeData>>(payload_) ==
+                 *std::get<std::shared_ptr<RangeData>>(other.payload_);
+        }
+      }
+
+      if (!self_range && !other_range) {
+        return values_equal();
+      }
+
+      // Element-by-element comparison fallback.
+      int64_t self_len = GetLength().value();
+      int64_t other_len = other.GetLength().value();
+      if (self_len != other_len) {
+        return false;
+      }
+      for (int64_t i = 0; i < self_len; ++i) {
+        if (Index(i).value() != other.Index(i).value()) {
+          return false;
+        }
+      }
+      return true;
     }
     case InterpValueTag::kTuple: {
       if (!other.IsTuple()) {
@@ -218,25 +702,47 @@ bool InterpValue::Eq(const InterpValue& other) const {
       }
       return values_equal();
     }
-    // Note: functions are ephemeral values in the interpreter (not first class
-    // values users can hold / manipulate) and cannot currently be compared for
-    // equality.
+    // Functions can't be compared for equality, as they may have parametrics
+    // that would differentiate one function from another, even if they have the
+    // same module and generic implementation.
     case InterpValueTag::kFunction:
       break;
+    case InterpValueTag::kStateElementReference:
+      return other.tag_ == InterpValueTag::kStateElementReference &&
+             GetStateElementReferenceOrDie().name_def() ==
+                 other.GetStateElementReferenceOrDie().name_def();
+    case InterpValueTag::kChannelReference:
+      return GetChannelReferenceOrDie().GetDirection() ==
+                 other.GetChannelReferenceOrDie().GetDirection() &&
+             GetChannelReferenceOrDie().GetChannelId().has_value() &&
+             GetChannelReferenceOrDie().GetChannelId() ==
+                 other.GetChannelReferenceOrDie().GetChannelId();
+    case InterpValueTag::kProcInitializer:
+      return other.IsProcInitializer() &&
+             GetProcInitializerOrDie() == other.GetProcInitializerOrDie();
+    case InterpValueTag::kChannelArray:
+      return other.IsChannelArray() &&
+             GetChannelArrayOrDie().channel_array_id() ==
+                 other.GetChannelArrayOrDie().channel_array_id();
   }
-  XLS_LOG(FATAL) << "Unhandled tag: " << tag_;
+  LOG(FATAL) << "Unhandled tag: " << tag_;
 }
+
+bool InterpValue::operator==(const InterpValue& rhs) const { return Eq(rhs); }
 
 /* static */ absl::StatusOr<InterpValue> InterpValue::Compare(
     const InterpValue& lhs, const InterpValue& rhs, CompareF ucmp,
     CompareF scmp) {
   if (lhs.tag_ != rhs.tag_) {
-    return absl::InvalidArgumentError(absl::StrFormat(
-        "Same tag is required for a comparison operation: lhs %s rhs %s",
-        TagToString(lhs.tag_), TagToString(rhs.tag_)));
+    return absl::InvalidArgumentError(
+        absl::StrFormat("Same tag is required for a comparison operation: lhs "
+                        "tag: %s, rhs tag: %s, lhs value: %s, rhs value: %s",
+                        TagToString(lhs.tag_), TagToString(rhs.tag_),
+                        lhs.ToString(), rhs.ToString()));
   }
   switch (lhs.tag_) {
     case InterpValueTag::kUBits:
+    case InterpValueTag::kTypeReference:
       return MakeBool(ucmp(lhs.GetBitsOrDie(), rhs.GetBitsOrDie()));
     case InterpValueTag::kSBits:
       return MakeBool(scmp(lhs.GetBitsOrDie(), rhs.GetBitsOrDie()));
@@ -263,6 +769,49 @@ absl::StatusOr<InterpValue> InterpValue::Le(const InterpValue& other) const {
 
 absl::StatusOr<InterpValue> InterpValue::Lt(const InterpValue& other) const {
   return Compare(*this, other, &bits_ops::ULessThan, &bits_ops::SLessThan);
+}
+
+std::optional<InterpValue> InterpValue::Increment() const {
+  CHECK(IsBits());
+  Bits b = GetBitsOrDie();
+  if (*this == MakeMaxValue(IsSigned(), GetBitCount().value())) {
+    return std::nullopt;  // Overflow case.
+  }
+  return InterpValue(tag_, bits_ops::Increment(b));
+}
+
+std::optional<InterpValue> InterpValue::Decrement() const {
+  CHECK(IsBits());
+  if (*this == MakeMinValue(IsSigned(), GetBitCount().value())) {
+    return std::nullopt;  // Underflow case.
+  }
+  Bits b = GetBitsOrDie();
+  return InterpValue(tag_, bits_ops::Decrement(b));
+}
+
+absl::StatusOr<InterpValue> InterpValue::IncrementZeroExtendIfOverflow() const {
+  XLS_ASSIGN_OR_RETURN(Bits bits, GetBits());
+  if (*this == MakeMaxValue(IsSigned(), bits.bit_count())) {
+    XLS_ASSIGN_OR_RETURN(InterpValue extended, ZeroExt(bits.bit_count() + 1));
+    XLS_ASSIGN_OR_RETURN(bits, extended.GetBits());
+  }
+  return InterpValue(tag_, bits_ops::Increment(bits));
+}
+
+absl::StatusOr<InterpValue> InterpValue::Min(const InterpValue& other) const {
+  XLS_ASSIGN_OR_RETURN(InterpValue lt, Lt(other));
+  if (lt.IsTrue()) {
+    return *this;
+  }
+  return other;
+}
+
+absl::StatusOr<InterpValue> InterpValue::Max(const InterpValue& other) const {
+  XLS_ASSIGN_OR_RETURN(InterpValue lt, Lt(other));
+  if (lt.IsTrue()) {
+    return other;
+  }
+  return *this;
 }
 
 absl::StatusOr<InterpValue> InterpValue::BitwiseNegate() const {
@@ -314,7 +863,7 @@ absl::StatusOr<InterpValue> InterpValue::Add(const InterpValue& other) const {
 }
 
 absl::StatusOr<InterpValue> InterpValue::SCmp(const InterpValue& other,
-                                              absl::string_view method) {
+                                              std::string_view method) {
   // Note: no tag check, because this is an explicit request for a signed
   // comparison, we're conceptually "coercing" the operands if need be.
   XLS_ASSIGN_OR_RETURN(Bits lhs, GetBits());
@@ -340,27 +889,11 @@ absl::StatusOr<InterpValue> InterpValue::Mul(const InterpValue& other) const {
   XLS_ASSIGN_OR_RETURN(Bits rhs, other.GetBits());
   if (lhs.bit_count() != rhs.bit_count()) {
     return absl::InvalidArgumentError(absl::StrFormat(
-        "Cannot mul different width values: lhs %d bits, rhs %d bits",
-        lhs.bit_count(), rhs.bit_count()));
+        "Cannot mul different width values: lhs `%s` vs rhs `%s`",
+        BitsToString(lhs, FormatPreference::kDefault, true),
+        BitsToString(rhs, FormatPreference::kDefault, true)));
   }
   return InterpValue(tag_, bits_ops::UMul(lhs, rhs).Slice(0, lhs.bit_count()));
-}
-
-absl::StatusOr<InterpValue> InterpValue::AddWithCarry(
-    const InterpValue& other) const {
-  XLS_RET_CHECK(IsUBits());
-  XLS_RET_CHECK(other.IsUBits());
-  XLS_ASSIGN_OR_RETURN(Bits lhs, GetBits());
-  XLS_ASSIGN_OR_RETURN(Bits rhs, other.GetBits());
-  int64_t extended = std::max(lhs.bit_count(), rhs.bit_count()) + 1;
-  Bits new_lhs = bits_ops::ZeroExtend(lhs, extended);
-  Bits new_rhs = bits_ops::ZeroExtend(rhs, extended);
-  Bits result = bits_ops::Add(new_lhs, new_rhs);
-  InterpValue low_bits(InterpValueTag::kUBits,
-                       result.Slice(0, /*width=*/extended - 1));
-  InterpValue carry(InterpValueTag::kUBits,
-                    result.Slice(extended - 1, /*width=*/1));
-  return InterpValue::MakeTuple({carry, low_bits});
 }
 
 absl::StatusOr<InterpValue> InterpValue::Slice(
@@ -388,47 +921,91 @@ absl::StatusOr<InterpValue> InterpValue::Slice(
         TagToString(length.tag())));
   }
   const std::vector<InterpValue>& subject = GetValuesOrDie();
-  XLS_ASSIGN_OR_RETURN(Bits start_bits, start.GetBits());
   XLS_ASSIGN_OR_RETURN(const auto* length_values, length.GetValues());
-  XLS_ASSIGN_OR_RETURN(int64_t start_index, start_bits.ToUint64());
   int64_t length_value = length_values->size();
+  XLS_ASSIGN_OR_RETURN(int64_t start_width, start.GetBitCount());
+  int64_t width = start_width + Bits::MinBitCountSigned(length_value) +
+                  Bits::MinBitCountUnsigned(subject.size()) + 1;
   std::vector<InterpValue> result;
-  for (int64_t i = start_index; i < start_index + length_value; ++i) {
-    if (i < 0 || i >= subject.size()) {
-      return absl::InvalidArgumentError(absl::StrFormat(
-          "Out of bounds slice; index %d size %d", i, subject.size()));
+  for (int64_t i = 0; i < length_value; ++i) {
+    XLS_ASSIGN_OR_RETURN(InterpValue start_big, start.ZeroExt(width));
+    XLS_ASSIGN_OR_RETURN(InterpValue offset,
+                         start_big.Add(MakeUBits(width, i)));
+    XLS_ASSIGN_OR_RETURN(InterpValue out_of_bounds,
+                         offset.Ge(MakeUBits(width, subject.size())));
+    if (out_of_bounds.IsTrue()) {
+      result.push_back(subject.back());
+    } else {
+      XLS_ASSIGN_OR_RETURN(uint64_t offset_int, offset.GetBitValueUnsigned());
+      result.push_back(subject[offset_int]);
     }
-    result.push_back(subject[i]);
   }
   return InterpValue(InterpValueTag::kArray, result);
 }
 
-absl::StatusOr<InterpValue> InterpValue::Index(const InterpValue& other) const {
-  XLS_RET_CHECK(other.IsUBits());
+absl::StatusOr<InterpValue> InterpValue::Index(int64_t index) const {
+  if (is_range() &&
+      std::holds_alternative<std::shared_ptr<RangeData>>(payload_)) {
+    const RangeData& range = *std::get<std::shared_ptr<RangeData>>(payload_);
+    XLS_ASSIGN_OR_RETURN(int64_t len, GetLength());
+    if (index >= len) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Index out of bounds; index: %d >= %d elements; lhs: %s", index, len,
+          ToString()));
+    }
+    XLS_ASSIGN_OR_RETURN(Bits start_bits, range.start.GetBits());
+    InterpValue index_value = InterpValue::MakeBits(
+        range.start.IsSBits(), UBits(index, start_bits.bit_count()));
+    return range.start.Add(index_value);
+  }
   XLS_ASSIGN_OR_RETURN(const std::vector<InterpValue>* lhs, GetValues());
-  XLS_ASSIGN_OR_RETURN(Bits rhs, other.GetBits());
-  XLS_ASSIGN_OR_RETURN(uint64_t index, rhs.ToUint64());
   if (lhs->size() <= index) {
     return absl::InvalidArgumentError(absl::StrFormat(
-        "Index out of bounds: %d >= %d elements", index, lhs->size()));
+        "Index out of bounds; index: %d >= %d elements; lhs: %s", index,
+        lhs->size(), ToString()));
   }
   return (*lhs)[index];
 }
 
+absl::StatusOr<InterpValue> InterpValue::Index(const InterpValue& other) const {
+  XLS_RET_CHECK(other.IsUBits());
+  XLS_ASSIGN_OR_RETURN(Bits rhs, other.GetBits());
+  XLS_ASSIGN_OR_RETURN(uint64_t index, rhs.ToUint64());
+  return Index(static_cast<int64_t>(index));
+}
+
 absl::StatusOr<InterpValue> InterpValue::Update(
     const InterpValue& index, const InterpValue& value) const {
-  XLS_RET_CHECK(index.IsUBits());
-  XLS_ASSIGN_OR_RETURN(const std::vector<InterpValue>* lhs, GetValues());
-  XLS_ASSIGN_OR_RETURN(Bits index_bits, index.GetBits());
-  XLS_ASSIGN_OR_RETURN(uint64_t index_value, index_bits.ToUint64());
-  if (index_value >= lhs->size()) {
-    return absl::InvalidArgumentError(
-        absl::StrFormat("Update index %d is out of bounds; subject size: %d",
-                        index_value, lhs->size()));
+  absl::Span<const xls::dslx::InterpValue> indices;
+  if (index.IsTuple()) {
+    indices =
+        absl::MakeConstSpan(std::get<std::vector<InterpValue>>(index.payload_));
+  } else {
+    indices = absl::MakeConstSpan(&index, 1);
   }
-  std::vector<InterpValue> copy = *lhs;
-  copy[index_value] = value;
-  return InterpValue(tag_, std::move(copy));
+  InterpValue copy = *this;
+  InterpValue* element = &copy;
+  for (const auto& i : indices) {
+    if (!element->IsArray()) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Update of non-array element: %s", element->ToString()));
+    }
+    if (element->is_range()) {
+      element->GetValuesOrDie();  // Forces expansion of the symbolic range
+    }
+    std::vector<InterpValue>& values =
+        std::get<std::vector<InterpValue>>(element->payload_);
+    XLS_ASSIGN_OR_RETURN(Bits index_bits, i.GetBits());
+    XLS_ASSIGN_OR_RETURN(uint64_t index_value, index_bits.ToUint64());
+    if (index_value >= values.size()) {
+      return absl::InvalidArgumentError(
+          absl::StrFormat("Update index %d is out of bounds; subject size: %d",
+                          index_value, values.size()));
+    }
+    element = &values[index_value];
+  }
+  *element = value;
+  return copy;
 }
 
 absl::StatusOr<InterpValue> InterpValue::ArithmeticNegate() const {
@@ -436,20 +1013,76 @@ absl::StatusOr<InterpValue> InterpValue::ArithmeticNegate() const {
   return InterpValue(tag_, bits_ops::Negate(arg));
 }
 
-absl::StatusOr<Bits> InterpValue::GetBits() const {
-  if (absl::holds_alternative<Bits>(payload_)) {
-    return absl::get<Bits>(payload_);
+absl::StatusOr<InterpValue> InterpValue::CeilOfLog2() const {
+  XLS_ASSIGN_OR_RETURN(Bits arg, GetBits());
+  if (arg.IsZero()) {
+    return InterpValue(tag_, UBits(0, 32));
   }
-  return absl::InvalidArgumentError("Value does not contain bits.");
+  // Subtract one to make sure we get the right result for exact powers of 2.
+  int64_t min_bit_width =
+      arg.bit_count() - bits_ops::Decrement(arg).CountLeadingZeros();
+  return InterpValue(tag_, UBits(min_bit_width, 32));
+}
+
+absl::StatusOr<Bits> InterpValue::GetBits() const {
+  if (std::holds_alternative<Bits>(payload_)) {
+    return std::get<Bits>(payload_);
+  }
+
+  if (std::holds_alternative<EnumData>(payload_)) {
+    return std::get<EnumData>(payload_).value;
+  }
+
+  return absl::InvalidArgumentError(
+      absl::StrFormat("Value %s does not contain bits.", ToString()));
+}
+
+const Bits& InterpValue::GetBitsOrDie() const {
+  if (std::holds_alternative<Bits>(payload_)) {
+    return std::get<Bits>(payload_);
+  }
+  if (auto* ref = std::get_if<TypeReference>(&payload_)) {
+    return ref->bits;
+  }
+
+  return std::get<EnumData>(payload_).value;
+}
+
+absl::StatusOr<const TypeAnnotation*> InterpValue::GetTypeReference() const {
+  if (std::holds_alternative<TypeReference>(payload_)) {
+    return std::get<TypeReference>(payload_).annotation;
+  }
+  return absl::InvalidArgumentError("Value does not contain a type reference.");
+}
+
+absl::StatusOr<InterpValue::ChannelReference> InterpValue::GetChannelReference()
+    const {
+  if (std::holds_alternative<ChannelReference>(payload_)) {
+    return std::get<ChannelReference>(payload_);
+  }
+  return absl::InvalidArgumentError(
+      "Value does not contain a channel reference.");
+}
+
+absl::StatusOr<const InterpValue::ChannelArray*> InterpValue::GetChannelArray()
+    const {
+  if (std::holds_alternative<std::shared_ptr<ChannelArray>>(payload_)) {
+    return std::get<std::shared_ptr<ChannelArray>>(payload_).get();
+  }
+  return absl::InvalidArgumentError("Value does not contain a channel array.");
 }
 
 // Returns the minimum of the given bits value interpreted as an unsigned
 // number and limit.
 static int64_t ClampedUnsignedValue(const Bits& bits, int64_t limit) {
-  if (limit < 0 || bits_ops::UGreaterThanOrEqual(bits, limit)) {
+  if (limit < 0) {
     return limit;
   }
-  return static_cast<int64_t>(bits.ToUint64().value());
+  std::optional<int64_t> bits_int = bits_ops::TryUnsignedBitsToInt64(bits);
+  if (bits_int.has_value() && *bits_int <= limit) {
+    return *bits_int;
+  }
+  return limit;
 }
 
 absl::StatusOr<InterpValue> InterpValue::Shl(const InterpValue& other) const {
@@ -481,6 +1114,39 @@ absl::StatusOr<InterpValue> InterpValue::ZeroExt(int64_t new_bit_count) const {
     return MakeBits(new_tag, b.Slice(0, new_bit_count));
   }
   return InterpValue(new_tag, bits_ops::ZeroExtend(b, new_bit_count));
+}
+
+absl::StatusOr<InterpValue> InterpValue::Decode(int64_t new_bit_count) const {
+  XLS_ASSIGN_OR_RETURN(Bits arg, GetBits());
+
+  absl::StatusOr<uint64_t> unsigned_index = arg.ToUint64();
+  if (!unsigned_index.ok() ||
+      *unsigned_index >
+          static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    // Index cannot be represented in a 64-bit signed integer - so it's
+    // telling us to set a bit that's definitely out of range. Return 0.
+    return InterpValue(InterpValueTag::kUBits, Bits(new_bit_count));
+  }
+
+  const int64_t index = static_cast<int64_t>(*unsigned_index);
+  InlineBitmap result(new_bit_count);
+  if (index < new_bit_count) {
+    result.Set(index);
+  }
+  return InterpValue(InterpValueTag::kUBits,
+                     Bits::FromBitmap(std::move(result)));
+}
+
+absl::StatusOr<InterpValue> InterpValue::Encode() const {
+  XLS_ASSIGN_OR_RETURN(Bits arg, GetBits());
+  int64_t result = 0;
+  for (int64_t i = 0; i < arg.bit_count(); ++i) {
+    if (arg.Get(i)) {
+      result |= i;
+    }
+  }
+  return InterpValue(InterpValueTag::kUBits,
+                     UBits(result, ::xls::CeilOfLog2(arg.bit_count())));
 }
 
 absl::StatusOr<InterpValue> InterpValue::OneHot(bool lsb_prio) const {
@@ -519,6 +1185,24 @@ absl::StatusOr<InterpValue> InterpValue::FloorDiv(
   return InterpValue(tag_, result);
 }
 
+absl::StatusOr<InterpValue> InterpValue::FloorMod(
+    const InterpValue& other) const {
+  if (tag_ != other.tag_) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat("Cannot floormod values: %s vs %s", TagToString(tag_),
+                        TagToString(other.tag_)));
+  }
+  XLS_ASSIGN_OR_RETURN(Bits lhs, GetBits());
+  XLS_ASSIGN_OR_RETURN(Bits rhs, other.GetBits());
+  Bits result;
+  if (IsSBits()) {
+    result = bits_ops::SMod(lhs, rhs);
+  } else {
+    result = bits_ops::UMod(lhs, rhs);
+  }
+  return InterpValue(tag_, result);
+}
+
 absl::StatusOr<InterpValue> InterpValue::Concat(
     const InterpValue& other) const {
   if (tag_ != other.tag_) {
@@ -532,7 +1216,11 @@ absl::StatusOr<InterpValue> InterpValue::Concat(
       for (const InterpValue& o : other.GetValuesOrDie()) {
         result.push_back(o);
       }
-      return InterpValue(InterpValueTag::kArray, std::move(result));
+      // We don't propagate is_range_ from either operand, because the resulting
+      // concatenated array may or may not represent a contiguous range of
+      // values anymore.
+      return InterpValue(InterpValueTag::kArray, std::move(result),
+                         /*is_range=*/false);
     }
     case InterpValueTag::kUBits:
       return InterpValue(
@@ -564,19 +1252,26 @@ absl::StatusOr<int64_t> InterpValue::GetBitCount() const {
   return b.bit_count();
 }
 
-absl::StatusOr<int64_t> InterpValue::GetBitValueCheckSign() const {
-  if (IsSBits() || (IsEnum() && type_->signedness().value())) {
-    return GetBitValueInt64();
+absl::StatusOr<int64_t> InterpValue::GetBitValueViaSign() const {
+  if (IsEnum()) {
+    EnumData enum_data = std::get<EnumData>(payload_);
+    if (enum_data.is_signed) {
+      return GetBitValueSigned();
+    }
+
+    return GetBitValueUnsigned();
   }
-  if (IsUBits() || (IsEnum() && !type_->signedness().value())) {
-    XLS_ASSIGN_OR_RETURN(uint64_t x, GetBitValueUint64());
-    return x;
+  if (IsSBits()) {
+    return GetBitValueSigned();
+  }
+  if (IsUBits()) {
+    return GetBitValueUnsigned();
   }
   return absl::InvalidArgumentError("Value cannot be converted to bits: " +
                                     ToHumanString());
 }
 
-absl::StatusOr<uint64_t> InterpValue::GetBitValueUint64() const {
+absl::StatusOr<uint64_t> InterpValue::GetBitValueUnsigned() const {
   XLS_ASSIGN_OR_RETURN(Bits b, GetBits());
   return b.ToUint64();
 }
@@ -585,13 +1280,17 @@ bool InterpValue::FitsInUint64() const {
   return HasBits() && GetBitsOrDie().FitsInUint64();
 }
 
-absl::StatusOr<int64_t> InterpValue::GetBitValueInt64() const {
+bool InterpValue::FitsInNBitsUnsigned(int64_t n) const {
+  return HasBits() && GetBitsOrDie().FitsInNBitsUnsigned(n);
+}
+
+absl::StatusOr<int64_t> InterpValue::GetBitValueSigned() const {
   XLS_ASSIGN_OR_RETURN(Bits b, GetBits());
   return b.ToInt64();
 }
 
-bool InterpValue::FitsInInt64() const {
-  return HasBits() && GetBitsOrDie().FitsInInt64();
+bool InterpValue::FitsInNBitsSigned(int64_t n) const {
+  return HasBits() && GetBitsOrDie().FitsInNBitsSigned(n);
 }
 
 /* static */ absl::StatusOr<std::vector<xls::Value>>
@@ -606,12 +1305,10 @@ InterpValue::ConvertValuesToIr(absl::Span<InterpValue const> values) {
 
 absl::StatusOr<xls::Value> InterpValue::ConvertToIr() const {
   switch (tag_) {
-    case InterpValueTag::kUBits: {
+    case InterpValueTag::kUBits:
+    case InterpValueTag::kSBits:
+    case InterpValueTag::kEnum:
       return xls::Value(GetBitsOrDie());
-    }
-    case InterpValueTag::kSBits: {
-      return xls::Value(GetBitsOrDie());
-    }
     case InterpValueTag::kArray: {
       XLS_ASSIGN_OR_RETURN(std::vector<xls::Value> converted,
                            ConvertValuesToIr(GetValuesOrDie()));
@@ -622,18 +1319,34 @@ absl::StatusOr<xls::Value> InterpValue::ConvertToIr() const {
                            ConvertValuesToIr(GetValuesOrDie()));
       return xls::Value::Tuple(converted);
     }
-    case InterpValueTag::kEnum: {
-      return xls::Value(GetBitsOrDie());
-    }
-    case InterpValueTag::kToken: {
+    case InterpValueTag::kToken:
       return xls::Value::Token();
-    }
-    case InterpValueTag::kFunction: {
+    case InterpValueTag::kFunction:
       return absl::InvalidArgumentError(absl::StrFormat(
           "Cannot convert functions to IR: %s", ToString(/*humanize=*/true)));
+    case InterpValueTag::kChannelReference:
+      return absl::InvalidArgumentError(
+          "Cannot convert channel-reference-typed values to IR.");
+    case InterpValueTag::kStateElementReference:
+      return absl::InvalidArgumentError(
+          "Cannot convert state-element-reference-typed values to IR.");
+    case InterpValueTag::kTypeReference:
+      return absl::InvalidArgumentError(
+          "Cannot convert type-reference-typed values to IR.");
+    case InterpValueTag::kProcInitializer: {
+      return absl::InvalidArgumentError(
+          "Cannot convert proc-initializer-typed values to IR.");
     }
+    case InterpValueTag::kChannelArray:
+      return absl::InvalidArgumentError(
+          "Cannot convert channel-array-typed values to IR.");
   }
-  XLS_LOG(FATAL) << "Unhandled tag: " << tag_;
+  LOG(FATAL) << "Unhandled tag: " << tag_;
+}
+
+absl::StatusOr<xls::ValueProto> InterpValue::AsProto() const {
+  XLS_ASSIGN_OR_RETURN(xls::Value v, ConvertToIr());
+  return v.AsProto();
 }
 
 bool InterpValue::operator<(const InterpValue& rhs) const {
@@ -643,10 +1356,113 @@ bool InterpValue::operator<(const InterpValue& rhs) const {
     }
 
     return Lt(rhs).value().IsTrue();
-  } else if (IsTuple()) {
+  }
+
+  if (IsStateElementReference()) {
+    if (!rhs.IsStateElementReference()) {
+      return true;
+    }
+    if (GetStateElementReferenceOrDie().name_def()->identifier() !=
+        rhs.GetStateElementReferenceOrDie().name_def()->identifier()) {
+      return GetStateElementReferenceOrDie().name_def()->identifier() <
+             rhs.GetStateElementReferenceOrDie().name_def()->identifier();
+    }
+
+    return GetStateElementReferenceOrDie().name_def() <
+           rhs.GetStateElementReferenceOrDie().name_def();
+  }
+
+  if (IsProcInitializer()) {
+    const ProcInitializer& inst =
+        *std::get<std::shared_ptr<ProcInitializer>>(payload_);
+    if (!rhs.IsProcInitializer()) {
+      return true;
+    }
+    const ProcInitializer& rhs_inst =
+        *std::get<std::shared_ptr<ProcInitializer>>(rhs.payload_);
+    if (inst.proc_def() != rhs_inst.proc_def()) {
+      if (inst.proc_def()->identifier() != rhs_inst.proc_def()->identifier()) {
+        return inst.proc_def()->identifier() <
+               rhs_inst.proc_def()->identifier();
+      }
+      return inst.proc_def()->owner()->name() <
+             rhs_inst.proc_def()->owner()->name();
+    }
+
+    if (inst.parametrics().size() != rhs_inst.parametrics().size()) {
+      return inst.parametrics().size() < rhs_inst.parametrics().size();
+    }
+    for (int i = 0; i < inst.parametrics().size(); i++) {
+      if (!inst.parametrics()[i].Eq(rhs_inst.parametrics()[i])) {
+        return inst.parametrics()[i] < rhs_inst.parametrics()[i];
+      }
+    }
+    if (inst.members().size() != rhs_inst.members().size()) {
+      return inst.members().size() < rhs_inst.members().size();
+    }
+    for (int i = 0; i < inst.members().size(); i++) {
+      if (!inst.members()[i].Eq(rhs_inst.members()[i])) {
+        return inst.members()[i] < rhs_inst.members()[i];
+      }
+    }
+
+    if (inst.forwarded_values().size() != rhs_inst.forwarded_values().size()) {
+      return inst.forwarded_values().size() <
+             rhs_inst.forwarded_values().size();
+    }
+    for (int i = 0; i < inst.forwarded_values().size(); i++) {
+      const auto& [inst_param, inst_value] = inst.forwarded_values()[i];
+      const auto& [rhs_param, rhs_value] = rhs_inst.forwarded_values()[i];
+      if (inst_param != rhs_param) {
+        return inst_param->identifier() < rhs_param->identifier();
+      }
+      if (inst_value != rhs_value) {
+        return inst_value < rhs_value;
+      }
+    }
+
+    return false;
+  }
+
+  if (IsTypeReference()) {
+    if (!rhs.IsTypeReference()) {
+      return false;
+    }
+    return Lt(rhs).value().IsTrue();
+  }
+
+  if (IsChannelReference()) {
+    if (!rhs.IsChannelReference()) {
+      return tag_ < rhs.tag_;
+    }
+    const ChannelReference& lhs_ref = GetChannelReferenceOrDie();
+    const ChannelReference& rhs_ref = rhs.GetChannelReferenceOrDie();
+    if (lhs_ref.GetDirection() != rhs_ref.GetDirection()) {
+      return lhs_ref.GetDirection() < rhs_ref.GetDirection();
+    }
+    return lhs_ref.GetChannelId() < rhs_ref.GetChannelId();
+  }
+  if (rhs.IsChannelReference()) {
+    return tag_ < rhs.tag_;
+  }
+
+  if (IsChannelArray()) {
+    if (!rhs.IsChannelArray()) {
+      return tag_ < rhs.tag_;
+    }
+    return GetChannelArrayOrDie().channel_array_id() <
+           rhs.GetChannelArrayOrDie().channel_array_id();
+  }
+  if (rhs.IsChannelArray()) {
+    return tag_ < rhs.tag_;
+  }
+
+  if (IsTuple()) {
     if (rhs.IsArray()) {
       return true;
-    } else if (rhs.IsBits()) {
+    }
+
+    if (rhs.IsBits()) {
       return false;
     }
   } else {
@@ -660,31 +1476,140 @@ bool InterpValue::operator<(const InterpValue& rhs) const {
   int64_t rhs_length = rhs.GetLength().value();
   if (lhs_length < rhs_length) {
     return true;
-  } else if (rhs_length < lhs_length) {
+  }
+
+  if (rhs_length < lhs_length) {
     return false;
   }
 
   for (int i = 0; i < lhs_length; i++) {
-    InterpValue index = MakeU64(i);
+    InterpValue index = MakeU32(i);
     InterpValue lhs_element = Index(index).value();
     InterpValue rhs_element = rhs.Index(index).value();
     if (lhs_element < rhs_element) {
       return true;
-    } else if (rhs_element < lhs_element) {
+    }
+
+    if (rhs_element < lhs_element) {
       return false;
     }
   }
   return false;
 }
 
-absl::optional<Module*> GetFunctionValueOwner(
-    const InterpValue& function_value) {
-  if (function_value.IsBuiltinFunction()) {
-    return absl::nullopt;
+bool InterpValue::operator>=(const InterpValue& rhs) const {
+  return !(*this < rhs);
+}
+
+absl::StatusOr<std::vector<InterpValue>> InterpValue::ExpandRange() const {
+  XLS_RET_CHECK(is_range());
+  const RangeData& range = *std::get<std::shared_ptr<RangeData>>(payload_);
+  std::vector<InterpValue> elements;
+  XLS_ASSIGN_OR_RETURN(int64_t len, GetLength());
+  elements.reserve(len);
+
+  XLS_ASSIGN_OR_RETURN(Bits cur, range.start.GetBits());
+  for (int64_t i = 0; i < len; ++i) {
+    elements.push_back(MakeBits(range.start.IsSigned(), cur));
+    cur = bits_ops::Increment(std::move(cur));
   }
-  const auto& fn_data =
-      absl::get<InterpValue::UserFnData>(function_value.GetFunctionOrDie());
-  return fn_data.function->owner();
+  return elements;
+}
+
+/* static */ InterpValue InterpValue::MakeSymbolicRange(InterpValue start,
+                                                        InterpValue end,
+                                                        bool inclusive) {
+  return InterpValue(InterpValueTag::kArray,
+                     std::make_shared<RangeData>(RangeData{
+                         std::move(start), std::move(end), inclusive}),
+                     /*is_range=*/true);
+}
+
+absl::StatusOr<int64_t> InterpValue::GetLength() const {
+  if (is_range() &&
+      std::holds_alternative<std::shared_ptr<RangeData>>(payload_)) {
+    const RangeData& range = *std::get<std::shared_ptr<RangeData>>(payload_);
+    XLS_ASSIGN_OR_RETURN(Bits start_bits, range.start.GetBits());
+    XLS_ASSIGN_OR_RETURN(Bits end_bits, range.end.GetBits());
+
+    bool is_empty = range.start.IsSigned()
+                        ? bits_ops::SGreaterThan(start_bits, end_bits)
+                        : bits_ops::UGreaterThan(start_bits, end_bits);
+    if (is_empty) {
+      return 0;
+    }
+
+    Bits diff = bits_ops::Sub(end_bits, start_bits);
+    if (range.inclusive) {
+      diff = bits_ops::Add(diff, UBits(1, diff.bit_count()));
+    }
+
+    if (diff.bit_count() >= 63 &&
+        bits_ops::UGreaterThan(diff, UBits(std::numeric_limits<int64_t>::max(),
+                                           diff.bit_count()))) {
+      return absl::OutOfRangeError(
+          "Range length is too large to fit in int64_t");
+    }
+
+    Bits diff_64 = diff.bit_count() > 64 ? diff.Slice(0, 64) : diff;
+    XLS_ASSIGN_OR_RETURN(uint64_t len_val, diff_64.ToUint64());
+    return absl::implicit_cast<int64_t>(len_val);
+  }
+  if (IsTuple() || IsArray() || IsChannelArray()) {
+    return GetValuesOrDie().size();
+  }
+  return absl::InvalidArgumentError(
+      absl::StrCat("Invalid tag for length query: ", TagToString(tag_)));
+}
+
+absl::StatusOr<const std::vector<InterpValue>*> InterpValue::GetValues() const {
+  if (is_range() &&
+      std::holds_alternative<std::shared_ptr<RangeData>>(payload_)) {
+    XLS_ASSIGN_OR_RETURN(std::vector<InterpValue> elements, ExpandRange());
+    payload_ = std::move(elements);
+  }
+  if (IsChannelArray()) {
+    return &GetChannelArrayOrDie().elements();
+  }
+  if (!std::holds_alternative<std::vector<InterpValue>>(payload_)) {
+    return absl::InvalidArgumentError("Value does not hold element values");
+  }
+  return &std::get<std::vector<InterpValue>>(payload_);
+}
+
+const std::vector<InterpValue>& InterpValue::GetValuesOrDie() const {
+  if (is_range() &&
+      std::holds_alternative<std::shared_ptr<RangeData>>(payload_)) {
+    payload_ = ExpandRange().value();
+  }
+  if (IsChannelArray()) {
+    return GetChannelArrayOrDie().elements();
+  }
+  return std::get<std::vector<InterpValue>>(payload_);
+}
+
+absl::StatusOr<EncodedSumView> GetEncodedSumView(const InterpValue& value) {
+  if (!value.IsTuple()) {
+    return absl::InvalidArgumentError(
+        "Expected encoded sum value to be tuple-valued.");
+  }
+  const std::vector<InterpValue>& sum_elements = value.GetValuesOrDie();
+  if (sum_elements.size() != 2) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat("Expected encoded sum value to have 2 elements; got %d",
+                        static_cast<int64_t>(sum_elements.size())));
+  }
+
+  const InterpValue& payload_slots = sum_elements[1];
+  if (!payload_slots.IsTuple()) {
+    return absl::InvalidArgumentError(
+        "Expected encoded sum payload slots to be tuple-valued.");
+  }
+
+  return EncodedSumView{
+      .tag = sum_elements[0],
+      .payload_slots = payload_slots.GetValuesOrDie(),
+  };
 }
 
 }  // namespace xls::dslx

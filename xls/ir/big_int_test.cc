@@ -14,19 +14,25 @@
 
 #include "xls/ir/big_int.h"
 
-#include <memory>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <string_view>
+#include <utility>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "absl/strings/string_view.h"
+#include "absl/status/status.h"
 #include "xls/common/status/matchers.h"
 #include "xls/ir/bits.h"
+#include "xls/ir/bits_ops.h"
+#include "xls/ir/format_preference.h"
 #include "xls/ir/number_parser.h"
 
 namespace xls {
 namespace {
 
-using status_testing::StatusIs;
+using ::absl_testing::StatusIs;
 
 class BigIntTest : public ::testing::Test {
  protected:
@@ -34,14 +40,13 @@ class BigIntTest : public ::testing::Test {
     return BigInt::MakeSigned(SBits(value, 64));
   }
 
-  BigInt MakeBigInt(absl::string_view hex_string) {
-    std::pair<bool, Bits> sign_magnitude =
-        GetSignAndMagnitude(hex_string).value();
-    if (sign_magnitude.first) {
+  BigInt MakeBigInt(std::string_view hex_string) {
+    auto [sign, magnitude] = GetSignAndMagnitude(hex_string).value();
+    if (sign == Sign::kNegative) {
       // Negative number (leading '-').
-      return BigInt::Negate(BigInt::MakeUnsigned(sign_magnitude.second));
+      return BigInt::Negate(BigInt::MakeUnsigned(magnitude));
     }
-    return BigInt::MakeUnsigned(sign_magnitude.second);
+    return BigInt::MakeUnsigned(magnitude);
   }
 };
 
@@ -78,6 +83,29 @@ TEST_F(BigIntTest, CopyAssignment) {
   EXPECT_EQ(original, copy);
 }
 
+// This is a regression test for https://github.com/google/xls/issues/759
+// `operator=(BigInt&& other)` used to leak memory
+TEST_F(BigIntTest, CopyAssignNoLeak) {
+  {
+    BigInt x = BigInt::Exp2(1);
+
+    // tests operator=(BigInt&& other)
+    x = x / x;
+
+    EXPECT_EQ(x, BigInt::One());
+  }
+  {
+    BigInt x = BigInt::Exp2(1);
+    BigInt one = x / x;
+
+    // tests operator=(const BigInt& other)
+    x = one;
+
+    EXPECT_EQ(x, BigInt::One());
+    EXPECT_EQ(one, BigInt::One());
+  }
+}
+
 TEST_F(BigIntTest, MoveAssignment) {
   auto original = BigInt::MakeUnsigned(UBits(1, 64));
   auto moved = BigInt();
@@ -107,8 +135,8 @@ TEST_F(BigIntTest, MakeUnsigned) {
 
   std::string wide_input = "0xabcd_abcd_1234_1234_aaaa_bbbb_cccc_dddd";
   XLS_ASSERT_OK_AND_ASSIGN(Bits wide_bits, ParseNumber(wide_input));
-  EXPECT_EQ(BigInt::MakeUnsigned(wide_bits).ToUnsignedBits().ToString(
-                FormatPreference::kHex),
+  EXPECT_EQ(BitsToString(BigInt::MakeUnsigned(wide_bits).ToUnsignedBits(),
+                         FormatPreference::kHex),
             wide_input);
 }
 
@@ -161,9 +189,21 @@ TEST_F(BigIntTest, MakeSigned) {
 
   std::string wide_input = "0xabcd_abcd_1234_1234_aaaa_bbbb_cccc_dddd";
   XLS_ASSERT_OK_AND_ASSIGN(Bits wide_bits, ParseNumber(wide_input));
-  EXPECT_EQ(BigInt::MakeSigned(wide_bits).ToSignedBits().ToString(
-                FormatPreference::kHex),
+  EXPECT_EQ(BitsToString(BigInt::MakeSigned(wide_bits).ToSignedBits(),
+                         FormatPreference::kHex),
             wide_input);
+}
+
+TEST_F(BigIntTest, Zero) {
+  BigInt zero = BigInt::Zero();
+  EXPECT_EQ(zero.UnsignedBitCount(), 0);
+  EXPECT_EQ(zero.ToUnsignedBits(), UBits(0, 0));
+}
+
+TEST_F(BigIntTest, One) {
+  BigInt one = BigInt::One();
+  EXPECT_EQ(one.UnsignedBitCount(), 1);
+  EXPECT_EQ(one.ToUnsignedBits(), UBits(1, 1));
 }
 
 TEST_F(BigIntTest, ToSignedBitsWithBitCount) {
@@ -239,12 +279,36 @@ TEST_F(BigIntTest, Sub) {
       MakeBigInt("-0x5431_1235_9875_5657_3232_1110_cee4_98a4_5474_fff1"));
 }
 
+TEST_F(BigIntTest, Exp2) {
+  constexpr int many_bits = 33;
+  EXPECT_EQ(BigInt::Exp2(0), BigInt::One());
+  EXPECT_EQ(BigInt::Exp2(1), BigInt::MakeUnsigned(UBits(2, many_bits)));
+  EXPECT_EQ(BigInt::Exp2(2), BigInt::MakeUnsigned(UBits(4, many_bits)));
+  EXPECT_EQ(BigInt::Exp2(32),
+            BigInt::MakeUnsigned(UBits(4294967296ul, many_bits)));
+}
+
 TEST_F(BigIntTest, Negate) {
   EXPECT_EQ(BigInt::Negate(MakeBigInt(0)), MakeBigInt(0));
   EXPECT_EQ(BigInt::Negate(MakeBigInt(123456)), MakeBigInt(-123456));
   EXPECT_EQ(BigInt::Negate(
                 MakeBigInt("0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff")),
             MakeBigInt("-0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff"));
+}
+
+TEST_F(BigIntTest, Absolute) {
+  EXPECT_EQ(BigInt::Absolute(MakeBigInt(0)), MakeBigInt(0));
+
+  EXPECT_EQ(BigInt::Absolute(MakeBigInt(-1)), MakeBigInt(1));
+  EXPECT_EQ(BigInt::Absolute(MakeBigInt(1)), MakeBigInt(1));
+
+  EXPECT_EQ(BigInt::Absolute(MakeBigInt(-37)), MakeBigInt(37));
+  EXPECT_EQ(BigInt::Absolute(MakeBigInt(37)), MakeBigInt(37));
+
+  EXPECT_EQ(BigInt::Absolute(MakeBigInt(-9223372036854775807ll)),
+            MakeBigInt(9223372036854775807ll));
+  EXPECT_EQ(BigInt::Absolute(MakeBigInt(9223372036854775807ll)),
+            MakeBigInt(9223372036854775807ll));
 }
 
 TEST_F(BigIntTest, Multiply) {
@@ -333,6 +397,154 @@ TEST_F(BigIntTest, LessThan) {
   EXPECT_TRUE(BigInt::LessThan(MakeBigInt(2), MakeBigInt(10)));
   EXPECT_FALSE(BigInt::LessThan(MakeBigInt(10), MakeBigInt(10)));
   EXPECT_FALSE(BigInt::LessThan(MakeBigInt(12), MakeBigInt(10)));
+
+  EXPECT_TRUE(MakeBigInt(2) < MakeBigInt(10));
+  EXPECT_FALSE(MakeBigInt(10) < MakeBigInt(10));
+  EXPECT_FALSE(MakeBigInt(12) < MakeBigInt(10));
 }
+
+TEST_F(BigIntTest, GreaterThan) {
+  EXPECT_FALSE(BigInt::GreaterThan(MakeBigInt(2), MakeBigInt(10)));
+  EXPECT_FALSE(BigInt::GreaterThan(MakeBigInt(10), MakeBigInt(10)));
+  EXPECT_TRUE(BigInt::GreaterThan(MakeBigInt(12), MakeBigInt(10)));
+
+  EXPECT_FALSE(MakeBigInt(2) > MakeBigInt(10));
+  EXPECT_FALSE(MakeBigInt(10) > MakeBigInt(10));
+  EXPECT_TRUE(MakeBigInt(12) > MakeBigInt(10));
+}
+
+TEST_F(BigIntTest, LessThanEqual) {
+  EXPECT_TRUE(MakeBigInt(2) <= MakeBigInt(10));
+  EXPECT_TRUE(MakeBigInt(10) <= MakeBigInt(10));
+  EXPECT_FALSE(MakeBigInt(12) <= MakeBigInt(10));
+}
+
+TEST_F(BigIntTest, GreaterThanEqual) {
+  EXPECT_FALSE(MakeBigInt(2) >= MakeBigInt(10));
+  EXPECT_TRUE(MakeBigInt(10) >= MakeBigInt(10));
+  EXPECT_TRUE(MakeBigInt(12) >= MakeBigInt(10));
+}
+
+TEST_F(BigIntTest, IsEven) {
+  EXPECT_TRUE(BigInt::IsEven(MakeBigInt(-4)));
+  EXPECT_FALSE(BigInt::IsEven(MakeBigInt(-3)));
+  EXPECT_TRUE(BigInt::IsEven(MakeBigInt(-2)));
+  EXPECT_FALSE(BigInt::IsEven(MakeBigInt(-1)));
+  EXPECT_TRUE(BigInt::IsEven(MakeBigInt(0)));
+  EXPECT_FALSE(BigInt::IsEven(MakeBigInt(1)));
+  EXPECT_TRUE(BigInt::IsEven(MakeBigInt(2)));
+  EXPECT_FALSE(BigInt::IsEven(MakeBigInt(3)));
+  EXPECT_TRUE(BigInt::IsEven(MakeBigInt(4)));
+}
+
+TEST_F(BigIntTest, IsPowerOfTwo) {
+  EXPECT_FALSE(BigInt::IsPowerOfTwo(MakeBigInt(-2)));
+  EXPECT_FALSE(BigInt::IsPowerOfTwo(MakeBigInt(-1)));
+  EXPECT_FALSE(BigInt::IsPowerOfTwo(MakeBigInt(0)));
+
+  EXPECT_FALSE(BigInt::IsPowerOfTwo(BigInt::Exp2(129) - BigInt::One()));
+  EXPECT_FALSE(BigInt::IsPowerOfTwo(BigInt::Exp2(129) + BigInt::One()));
+
+  EXPECT_TRUE(BigInt::IsPowerOfTwo(MakeBigInt(1)));
+  EXPECT_TRUE(BigInt::IsPowerOfTwo(MakeBigInt(2)));
+  EXPECT_TRUE(BigInt::IsPowerOfTwo(MakeBigInt(4)));
+  EXPECT_TRUE(BigInt::IsPowerOfTwo(BigInt::Exp2(129)));
+}
+
+TEST_F(BigIntTest, CeilingLog2) {
+  EXPECT_EQ(BigInt::CeilingLog2(MakeBigInt(0)),
+            std::numeric_limits<int64_t>::min());
+
+  EXPECT_EQ(BigInt::CeilingLog2(MakeBigInt(1)), 0);
+
+  EXPECT_EQ(BigInt::CeilingLog2(MakeBigInt(2)), 1);
+
+  EXPECT_EQ(BigInt::CeilingLog2(MakeBigInt(3)), 2);
+  EXPECT_EQ(BigInt::CeilingLog2(MakeBigInt(4)), 2);
+
+  EXPECT_EQ(BigInt::CeilingLog2(MakeBigInt(5)), 3);
+  EXPECT_EQ(BigInt::CeilingLog2(MakeBigInt(6)), 3);
+  EXPECT_EQ(BigInt::CeilingLog2(MakeBigInt(7)), 3);
+  EXPECT_EQ(BigInt::CeilingLog2(MakeBigInt(8)), 3);
+
+  EXPECT_EQ(BigInt::CeilingLog2(MakeBigInt(9)), 4);
+  EXPECT_EQ(BigInt::CeilingLog2(MakeBigInt(15)), 4);
+
+  EXPECT_EQ(BigInt::CeilingLog2(MakeBigInt(4611686018427387903ul)), 62);
+  EXPECT_EQ(BigInt::CeilingLog2(BigInt::Exp2(62) - BigInt::One()), 62);
+
+  EXPECT_EQ(BigInt::CeilingLog2(BigInt::Exp2(128)), 128);
+  EXPECT_EQ(BigInt::CeilingLog2(BigInt::Exp2(128) - BigInt::One()), 128);
+
+  EXPECT_EQ(BigInt::CeilingLog2(BigInt::Exp2(128) + BigInt::One()), 129);
+  EXPECT_EQ(BigInt::CeilingLog2(BigInt::Exp2(129)), 129);
+}
+
+TEST_F(BigIntTest, FactorizePowerOfTwo) {
+  {
+    auto [odd, exponent] = BigInt::FactorizePowerOfTwo(MakeBigInt(0));
+    EXPECT_EQ(odd, MakeBigInt(0));
+    EXPECT_EQ(exponent, 0);
+  }
+  {
+    auto [odd, exponent] = BigInt::FactorizePowerOfTwo(MakeBigInt(1));
+    EXPECT_EQ(odd, MakeBigInt(1));
+    EXPECT_EQ(exponent, 0);
+  }
+  {
+    auto [odd, exponent] = BigInt::FactorizePowerOfTwo(MakeBigInt(2));
+    EXPECT_EQ(odd, MakeBigInt(1));
+    EXPECT_EQ(exponent, 1);
+  }
+  {
+    auto [odd, exponent] = BigInt::FactorizePowerOfTwo(MakeBigInt(3));
+    EXPECT_EQ(odd, MakeBigInt(3));
+    EXPECT_EQ(exponent, 0);
+  }
+  {
+    auto [odd, exponent] = BigInt::FactorizePowerOfTwo(MakeBigInt(4));
+    EXPECT_EQ(odd, MakeBigInt(1));
+    EXPECT_EQ(exponent, 2);
+  }
+  {
+    auto [odd, exponent] = BigInt::FactorizePowerOfTwo(MakeBigInt(6));
+    EXPECT_EQ(odd, MakeBigInt(3));
+    EXPECT_EQ(exponent, 1);
+  }
+  {
+    auto [odd, exponent] = BigInt::FactorizePowerOfTwo(MakeBigInt(40));
+    EXPECT_EQ(odd, MakeBigInt(5));
+    EXPECT_EQ(exponent, 3);
+  }
+  {
+    auto [odd, exponent] =
+        BigInt::FactorizePowerOfTwo(MakeBigInt(7) * BigInt::Exp2(129));
+    EXPECT_EQ(odd, MakeBigInt(7));
+    EXPECT_EQ(exponent, 129);
+  }
+
+  // negative
+  {
+    auto [odd, exponent] = BigInt::FactorizePowerOfTwo(MakeBigInt(-1));
+    EXPECT_EQ(odd, MakeBigInt(-1));
+    EXPECT_EQ(exponent, 0);
+  }
+  {
+    auto [odd, exponent] = BigInt::FactorizePowerOfTwo(MakeBigInt(-2));
+    EXPECT_EQ(odd, MakeBigInt(-1));
+    EXPECT_EQ(exponent, 1);
+  }
+  {
+    auto [odd, exponent] = BigInt::FactorizePowerOfTwo(MakeBigInt(-3));
+    EXPECT_EQ(odd, MakeBigInt(-3));
+    EXPECT_EQ(exponent, 0);
+  }
+  {
+    auto [odd, exponent] = BigInt::FactorizePowerOfTwo(MakeBigInt(-4));
+    EXPECT_EQ(odd, MakeBigInt(-1));
+    EXPECT_EQ(exponent, 2);
+  }
+}
+
 }  // namespace
 }  // namespace xls

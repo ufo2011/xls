@@ -15,89 +15,49 @@
 #ifndef XLS_INTERPRETER_PROC_INTERPRETER_H_
 #define XLS_INTERPRETER_PROC_INTERPRETER_H_
 
-#include <deque>
-#include <limits>
 #include <memory>
 #include <vector>
 
-#include "absl/container/flat_hash_map.h"
-#include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/string_view.h"
 #include "xls/interpreter/channel_queue.h"
-#include "xls/interpreter/ir_interpreter.h"
-#include "xls/ir/channel.h"
-#include "xls/ir/node_iterator.h"
-#include "xls/ir/package.h"
-#include "xls/ir/value.h"
+#include "xls/interpreter/evaluator_options.h"
+#include "xls/interpreter/proc_evaluator.h"
+#include "xls/ir/node.h"
+#include "xls/ir/proc.h"
+#include "xls/ir/proc_elaboration.h"
 
 namespace xls {
 
-// A stateful interpreter for an individual proc. Incrementally executes Procs a
-// single iteration at a time. Data is fed to the proc via
-// ChannelQueues. ProcInterpreters are thread-compatible, but not thread-safe.
-class ProcInterpreter {
+// A interpreter for an individual proc. Incrementally executes Procs a single
+// tick at a time. Data is fed to the proc via ChannelQueues.  ProcInterpreters
+// are thread-safe if called with different continuations.
+class ProcInterpreter : public ProcEvaluator {
  public:
-  ProcInterpreter(Proc* proc, ChannelQueueManager* queue_manager);
+  static absl::StatusOr<std::unique_ptr<ProcInterpreter>> Create(
+      Proc* proc, ChannelQueueManager* queue_manager,
+      const EvaluatorOptions& options = EvaluatorOptions());
+
+  explicit ProcInterpreter(Proc* proc, ChannelQueueManager* queue_manager,
+                           std::vector<Node*> execution_order,
+                           const EvaluatorOptions& options);
 
   ProcInterpreter(const ProcInterpreter&) = delete;
   ProcInterpreter operator=(const ProcInterpreter&) = delete;
 
-  // Advances the proc interpreter to the next iteration. This method must be
-  // called prior to calling RunIterationUntilCompleteOrBlocked() for the first
-  // time. An error is returned if the the interpreter has not completed the
-  // previous iteration.
-  //  absl::Status NextIteration();
+  ~ProcInterpreter() override = default;
 
-  // Data structure holding the result of a single call to
-  // RunIterationUntilCompleteOrBlocked.
-  struct RunResult {
-    // Whether the proc completed executing for this iteration. Execution is not
-    // completed if (and only if) a receive operation is blocked.
-    bool iteration_complete;
-
-    // Whether any progress was made (at least one instruction was executed).
-    bool progress_made;
-
-    // If the proc is blocked on receive (iteration complete is false), this
-    // vector includes the channels which have blocked operations.
-    std::vector<Channel*> blocked_channels;
-
-    bool operator==(const RunResult& other) const;
-    bool operator!=(const RunResult& other) const;
-
-    std::string ToString() const;
-  };
-
-  // Runs the proc until the iteration is complete or execution is blocked on a
-  // receive operation. If the previous call to this method completed the
-  // iteration (the returned RunResult field iteration_complete was true), a new
-  // iteration of the proc will be initiated.
-  absl::StatusOr<RunResult> RunIterationUntilCompleteOrBlocked();
-
-  // Whether the previous call to RunUntilIterationCompleteOrBlocked completed
-  // an iteration of the proc (the returned RunResult field iteration_complete
-  // was true).
-  bool IsIterationComplete() const;
+  std::unique_ptr<ProcContinuation> NewContinuation(
+      ProcInstance* proc_instance) const override;
+  absl::StatusOr<TickResult> Tick(
+      ProcContinuation& continuation) const override;
 
  private:
-  Proc* proc_;
-  Value state_;
   ChannelQueueManager* queue_manager_;
 
-  // A topological sort of the nodes of the proc.
-  NodeIterator topo_sort_;
-
-  // A monotonically increasing value holding the number of complete iterations
-  // that the proc has executed.
-  int64_t current_iteration_;
-
-  // The interpreter used for evaluating nodes in the proc.
-  std::unique_ptr<IrInterpreter> visitor_;
+  // A topological sort of the nodes of the proc which determines the execution
+  // order of the proc.
+  std::vector<Node*> execution_order_;
 };
-
-std::ostream& operator<<(std::ostream& os,
-                         const ProcInterpreter::RunResult& result);
 
 }  // namespace xls
 

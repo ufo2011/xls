@@ -28,39 +28,39 @@ MK_MAKE_HDRS = [
 ]
 
 PARAMS_HDRS = [
-    "src/ackermannization/ackermannization_params.hpp",
-    "src/ackermannization/ackermannize_bv_tactic_params.hpp",
-    "src/ast/fpa/fpa2bv_rewriter_params.hpp",
-    "src/ast/normal_forms/nnf_params.hpp",
-    "src/ast/pattern/pattern_inference_params_helper.hpp",
-    "src/ast/pp_params.hpp",
-    "src/ast/rewriter/arith_rewriter_params.hpp",
-    "src/ast/rewriter/array_rewriter_params.hpp",
-    "src/ast/rewriter/bool_rewriter_params.hpp",
-    "src/ast/rewriter/bv_rewriter_params.hpp",
-    "src/ast/rewriter/fpa_rewriter_params.hpp",
-    "src/ast/rewriter/poly_rewriter_params.hpp",
-    "src/ast/rewriter/rewriter_params.hpp",
-    "src/math/polynomial/algebraic_params.hpp",
-    "src/math/realclosure/rcf_params.hpp",
-    "src/model/model_params.hpp",
     "src/model/model_evaluator_params.hpp",
-    "src/muz/base/fp_params.hpp",
-    "src/nlsat/nlsat_params.hpp",
+    "src/model/model_params.hpp",
+    "src/ast/normal_forms/nnf_params.hpp",
+    "src/ast/pp_params.hpp",
+    "src/ackermannization/ackermannize_bv_tactic_params.hpp",
+    "src/ackermannization/ackermannization_params.hpp",
+    "src/math/realclosure/rcf_params.hpp",
+    "src/math/polynomial/algebraic_params.hpp",
+    "src/tactic/smtlogics/qfufbv_tactic_params.hpp",
+    "src/params/poly_rewriter_params.hpp",
+    "src/params/array_rewriter_params.hpp",
+    "src/params/seq_rewriter_params.hpp",
+    "src/params/fpa_rewriter_params.hpp",
+    "src/params/arith_rewriter_params.hpp",
+    "src/params/rewriter_params.hpp",
+    "src/params/bv_rewriter_params.hpp",
+    "src/params/tactic_params.hpp",
+    "src/params/pattern_inference_params_helper.hpp",
+    "src/params/solver_params.hpp",
+    "src/params/fpa2bv_rewriter_params.hpp",
+    "src/params/bool_rewriter_params.hpp",
+    "src/params/sat_params.hpp",
+    "src/params/sls_params.hpp",
+    "src/solver/combined_solver_params.hpp",
+    "src/solver/parallel_params.hpp",
     "src/opt/opt_params.hpp",
     "src/parsers/util/parser_params.hpp",
+    "src/muz/base/fp_params.hpp",
     "src/sat/sat_asymm_branch_params.hpp",
-    "src/sat/sat_params.hpp",
-    "src/sat/sat_scc_params.hpp",
     "src/sat/sat_simplifier_params.hpp",
+    "src/sat/sat_scc_params.hpp",
+    "src/nlsat/nlsat_params.hpp",
     "src/smt/params/smt_params_helper.hpp",
-    "src/solver/parallel_params.hpp",
-    "src/solver/solver_params.hpp",
-    "src/solver/combined_solver_params.hpp",
-    "src/tactic/smtlogics/qfufbv_tactic_params.hpp",
-    "src/tactic/sls/sls_params.hpp",
-    "src/tactic/tactic_params.hpp",
-    "src/util/lp/lp_params.hpp",
 ]
 
 DB_HDRS = [
@@ -75,23 +75,29 @@ def gen_srcs():
     """Runs provided Python scripts for source generation."""
     copy_cmds = []
     for out in MK_MAKE_SRCS + MK_MAKE_HDRS:
-        copy_cmds.append("cp external/z3/" + out + " $(@D)/$$(dirname " + out + ")")
-    copy_cmds = ";\n".join(copy_cmds) + ";\n"
+        copy_cmds.append("cp tmp_z3/" + out + " $(@D)/" + out)
+    copy_cmds = " && ".join(copy_cmds)
 
     native.genrule(
         name = "gen_srcs",
         srcs = [
             "LICENSE.txt",
             "scripts/mk_make.py",
-        ] + native.glob(["src/**", "examples/**"]),
-        tools = ["scripts/mk_make.py"],
+        ] + native.glob(["src/**", "examples/**"], exclude = GEN_HDRS + GEN_SRCS),
+        tools = native.glob(["scripts/*.py"]),
         outs = MK_MAKE_SRCS + MK_MAKE_HDRS,
-        # We can't use $(location) here, since the bundled script internally
+        # We can't use $(location) for all files here, since the bundled script internally
         # makes assumptions about where files are located.
-        cmd = "cd external/z3; " +
-              "python scripts/mk_make.py; " +
-              "cd ../..;" +
+        # We copy all sources to a temporary directory so mk_make.py can write to them.
+        cmd = "python3=$$(realpath $(PYTHON3)); " +
+              "Z3_ROOT=$$(dirname $$(dirname $$(realpath $(location scripts/mk_make.py)))); " +
+              "mkdir -p tmp_z3 && cp -R $${Z3_ROOT}/* tmp_z3/; " +
+              "CUR_DIR=$$(pwd); " +
+              "cd tmp_z3; " +
+              "$$python3 scripts/mk_make.py; " +
+              "cd $${CUR_DIR}; " +
               copy_cmds,
+        toolchains = ["@rules_python//python:current_py_toolchain"],
     )
 
     for params_hdr in PARAMS_HDRS:
@@ -99,9 +105,10 @@ def gen_srcs():
         native.genrule(
             name = "gen_" + params_hdr[0:-4],
             srcs = [src_file],
-            tools = ["scripts/pyg2hpp.py"],
+            tools = native.glob(["scripts/*.py"]),
             outs = [params_hdr],
-            cmd = "python $(location scripts/pyg2hpp.py) $< $$(dirname $@)",
+            cmd = "$(PYTHON3) $(location scripts/pyg2hpp.py) $< $$(dirname $@)",
+            toolchains = ["@rules_python//python:current_py_toolchain"],
         )
 
     for db_hdr in DB_HDRS:
@@ -109,7 +116,8 @@ def gen_srcs():
         native.genrule(
             name = "gen_" + db_hdr[0:-2],
             srcs = [src],
-            tools = ["scripts/mk_pat_db.py"],
+            tools = native.glob(["scripts/*.py"]),
             outs = [db_hdr],
-            cmd = "python $(location scripts/mk_pat_db.py) $< $@",
+            cmd = "$(PYTHON3) $(location scripts/mk_pat_db.py) $< $@",
+            toolchains = ["@rules_python//python:current_py_toolchain"],
         )

@@ -14,18 +14,137 @@
 
 #include "xls/ir/function_builder.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <ostream>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "absl/base/casts.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/memory/memory.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
-#include "xls/common/logging/logging.h"
+#include "absl/types/span.h"
 #include "xls/common/status/ret_check.h"
+#include "xls/common/status/status_macros.h"
 #include "xls/common/symbolized_stacktrace.h"
+#include "xls/common/visitor.h"
+#include "xls/data_structures/leaf_type_tree.h"
+#include "xls/ir/block.h"
+#include "xls/ir/channel.h"
+#include "xls/ir/channel_ops.h"
+#include "xls/ir/foreign_function_data.pb.h"
+#include "xls/ir/format_strings.h"
+#include "xls/ir/function.h"
+#include "xls/ir/function_base.h"
+#include "xls/ir/lsb_or_msb.h"
+#include "xls/ir/node_util.h"
 #include "xls/ir/nodes.h"
+#include "xls/ir/op.h"
 #include "xls/ir/package.h"
+#include "xls/ir/proc.h"
+#include "xls/ir/register.h"
+#include "xls/ir/source_location.h"
+#include "xls/ir/state_element.h"
+#include "xls/ir/type.h"
+#include "xls/ir/value.h"
+#include "xls/ir/value_builder.h"
 #include "xls/ir/verifier.h"
+#include "xls/ir/verify_node.h"
 
 namespace xls {
 
-using ::absl::StrFormat;
+std::ostream& operator<<(std::ostream& os, const BValue& bv) {
+  return os << bv.ToString();
+}
+
+std::string_view BChannel::name() const {
+  return channel_ == nullptr ? "" : channel_->name();
+}
+Type* BChannel::GetType() const {
+  return channel_ == nullptr ? nullptr : channel_->type();
+}
+std::string_view BReceiveChannel::name() const {
+  return channel_interface_ == nullptr ? "" : channel_interface_->name();
+}
+Type* BReceiveChannel::GetType() const {
+  return channel_interface_ == nullptr ? nullptr : channel_interface_->type();
+}
+std::string_view BSendChannel::name() const {
+  return channel_interface_ == nullptr ? "" : channel_interface_->name();
+}
+Type* BSendChannel::GetType() const {
+  return channel_interface_ == nullptr ? nullptr : channel_interface_->type();
+}
+namespace {
+ReceiveChannelRef ResolveBReceiveChannelRef(BReceiveChannelRef ref) {
+  return std::visit(
+      Visitor{
+          [](Channel* c) -> ReceiveChannelRef { return c; },
+          [](ReceiveChannelInterface* i) -> ReceiveChannelRef { return i; },
+          [](BChannel c) -> ReceiveChannelRef { return c.channel(); },
+          [](BReceiveChannel c) -> ReceiveChannelRef {
+            return c.channel_interface();
+          },
+      },
+      ref);
+}
+
+SendChannelRef ResolveBSendChannelRef(BSendChannelRef ref) {
+  return std::visit(
+      Visitor{
+          [](Channel* c) -> SendChannelRef { return c; },
+          [](SendChannelInterface* i) -> SendChannelRef { return i; },
+          [](BChannel c) -> SendChannelRef { return c.channel(); },
+          [](BSendChannel c) -> SendChannelRef {
+            return c.channel_interface();
+          },
+      },
+      ref);
+}
+}  // namespace
+Type* BValue::GetType() const {
+  CHECK(node_ != nullptr);
+  return node_->GetType();
+}
+
+int64_t BValue::BitCountOrDie() const { return node()->BitCountOrDie(); }
+
+const SourceInfo& BValue::loc() const { return node_->loc(); }
+
+std::string BValue::ToString() const {
+  return node_ == nullptr ? std::string("<null BValue>") : node_->ToString();
+}
+
+std::string BValue::SetName(std::string_view name) {
+  if (node_ != nullptr) {
+    node_->SetName(name);
+  }
+  return "";
+}
+
+std::string BValue::GetName() const {
+  if (node_ != nullptr) {
+    return node_->GetName();
+  }
+  return "";
+}
+
+bool BValue::HasAssignedName() const {
+  if (node_ != nullptr) {
+    return node_->HasAssignedName();
+  }
+  return false;
+}
 
 BValue BValue::operator>>(BValue rhs) { return builder()->Shrl(*this, rhs); }
 BValue BValue::operator<<(BValue rhs) { return builder()->Shll(*this, rhs); }
@@ -36,35 +155,97 @@ BValue BValue::operator-(BValue rhs) { return builder()->Subtract(*this, rhs); }
 BValue BValue::operator+(BValue rhs) { return builder()->Add(*this, rhs); }
 BValue BValue::operator-() { return builder()->Negate(*this); }
 
-BValue BuilderBase::SetError(absl::string_view msg,
-                             absl::optional<SourceLocation> loc) {
+BValue BuilderBase::CreateBValue(Node* node, const SourceInfo& loc) {
+  OnNodeAdded(node);
+  last_node_ = node;
+  if (should_verify_) {
+    absl::Status verify_status = VerifyNode(last_node_);
+    if (!verify_status.ok()) {
+      return SetError(verify_status.message(), loc);
+    }
+  }
+  return BValue(last_node_, this);
+}
+
+void BuilderBase::SetForeignFunctionData(
+    const std::optional<ForeignFunctionData>& ff) {
+  function_->SetForeignFunctionData(ff);
+}
+
+template <typename NodeT, typename... Args>
+BValue BuilderBase::AddNode(const SourceInfo& loc, Args&&... args) {
+  last_node_ = function_->AddNode<NodeT>(std::make_unique<NodeT>(
+      loc, std::forward<Args>(args)..., function_.get()));
+  return CreateBValue(last_node_, loc);
+}
+
+const std::string& BuilderBase::name() const { return function_->name(); }
+
+absl::Status BuilderBase::SetAsTop() {
+  if (package() == nullptr) {
+    return absl::InternalError(
+        absl::StrFormat("Package is not set for builder base: %s.", name()));
+  }
+  return package()->SetTop(function_.get());
+}
+
+absl::Status BuilderBase::GetError() const {
+  if (!ErrorPending()) {
+    return absl::OkStatus();
+  }
+
+  std::string msg = absl::StrCat(error_msg_, "\n");
+  for (const SourceLocation& loc : error_loc_.locations) {
+    absl::StrAppendFormat(&msg, "  File: %d, Line: %d, Col: %d\n",
+                          loc.fileno().value(), loc.lineno().value(),
+                          loc.colno().value());
+  }
+  absl::StrAppend(&msg, "Stack Trace:\n" + error_stacktrace_);
+  return absl::InvalidArgumentError("Could not build IR: " + msg);
+}
+
+BValue BuilderBase::SetError(std::string_view msg, const SourceInfo& loc) {
+  VLOG(3) << absl::StreamFormat("BuilderBase::SetError; msg: %s; loc: %s", msg,
+                                loc.ToString());
   error_pending_ = true;
   error_msg_ = std::string(msg);
-  if (loc.has_value()) {
-    error_loc_.emplace(loc.value());
-  }
+  error_loc_ = loc;
   error_stacktrace_ = GetSymbolizedStackTraceAsString();
   return BValue();
 }
 
-BValue BuilderBase::Literal(Value value, absl::optional<SourceLocation> loc,
-                            absl::string_view name) {
+BValue BuilderBase::Literal(Value value, const SourceInfo& loc,
+                            std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddNode<xls::Literal>(loc, value, name);
 }
 
-BValue BuilderBase::Negate(BValue x, absl::optional<SourceLocation> loc,
-                           absl::string_view name) {
+BValue BuilderBase::Literal(ValueBuilder value, const SourceInfo& loc,
+                            std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  absl::StatusOr<Value> built = value.Build();
+  if (!built.ok()) {
+    return SetError(absl::StrFormat("Unable to build literal value due to %s",
+                                    built.status().ToString()),
+                    loc);
+  }
+  return AddNode<xls::Literal>(loc, *built, name);
+}
+
+BValue BuilderBase::Negate(BValue x, const SourceInfo& loc,
+                           std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddUnOp(Op::kNeg, x, loc, name);
 }
 
-BValue BuilderBase::Not(BValue x, absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+BValue BuilderBase::Not(BValue x, const SourceInfo& loc,
+                        std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -73,18 +254,17 @@ BValue BuilderBase::Not(BValue x, absl::optional<SourceLocation> loc,
 }
 
 BValue BuilderBase::Select(BValue selector, absl::Span<const BValue> cases,
-                           absl::optional<BValue> default_value,
-                           absl::optional<SourceLocation> loc,
-                           absl::string_view name) {
+                           std::optional<BValue> default_value,
+                           const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   std::vector<Node*> cases_nodes;
   for (const BValue& bvalue : cases) {
-    XLS_CHECK_EQ(selector.builder(), bvalue.builder());
+    CHECK_EQ(selector.builder(), bvalue.builder());
     cases_nodes.push_back(bvalue.node());
   }
-  absl::optional<Node*> default_node = absl::nullopt;
+  std::optional<Node*> default_node = std::nullopt;
   if (default_value.has_value()) {
     default_node = default_value->node();
   }
@@ -93,61 +273,82 @@ BValue BuilderBase::Select(BValue selector, absl::Span<const BValue> cases,
 }
 
 BValue BuilderBase::Select(BValue selector, BValue on_true, BValue on_false,
-                           absl::optional<SourceLocation> loc,
-                           absl::string_view name) {
-  return Select(selector, {on_false, on_true}, /*default_value=*/absl::nullopt,
+                           const SourceInfo& loc, std::string_view name) {
+  return Select(selector, {on_false, on_true}, /*default_value=*/std::nullopt,
                 loc, name);
 }
 
 BValue BuilderBase::OneHot(BValue input, LsbOrMsb priority,
-                           absl::optional<SourceLocation> loc,
-                           absl::string_view name) {
+                           const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
+  }
+  if (!input.GetType()->IsBits()) {
+    return SetError(
+        absl::StrFormat("One-hot input must be of Bits type; is: %s",
+                        input.GetType()->ToString()),
+        loc);
   }
   return AddNode<xls::OneHot>(loc, input.node(), priority, name);
 }
 
 BValue BuilderBase::OneHotSelect(BValue selector,
                                  absl::Span<const BValue> cases,
-                                 absl::optional<SourceLocation> loc,
-                                 absl::string_view name) {
+                                 const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   std::vector<Node*> cases_nodes;
   for (const BValue& bvalue : cases) {
-    XLS_CHECK_EQ(selector.builder(), bvalue.builder());
+    CHECK_EQ(selector.builder(), bvalue.builder());
     cases_nodes.push_back(bvalue.node());
   }
   return AddNode<xls::OneHotSelect>(loc, selector.node(), cases_nodes, name);
 }
 
-BValue BuilderBase::Clz(BValue x, absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+BValue BuilderBase::PrioritySelect(BValue selector,
+                                   absl::Span<const BValue> cases,
+                                   BValue default_value, const SourceInfo& loc,
+                                   std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  std::vector<Node*> cases_nodes;
+  for (const BValue& bvalue : cases) {
+    CHECK_EQ(selector.builder(), bvalue.builder());
+    cases_nodes.push_back(bvalue.node());
+  }
+  return AddNode<xls::PrioritySelect>(loc, selector.node(), cases_nodes,
+                                      default_value.node(), name);
+}
+
+BValue BuilderBase::Clz(BValue x, const SourceInfo& loc,
+                        std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   if (!x.GetType()->IsBits()) {
     return SetError(
-        StrFormat("Count-leading-zeros argument must be of Bits type; is: %s",
-                  x.GetType()->ToString()),
+        absl::StrFormat(
+            "Count-leading-zeros argument must be of Bits type; is: %s",
+            x.GetType()->ToString()),
         loc);
   }
   return ZeroExtend(
-      Encode(OneHot(Reverse(x, loc), /*priority=*/LsbOrMsb::kLsb, loc)),
+      Encode(OneHot(Reverse(x, loc), /*priority=*/LsbOrMsb::kLsb, loc), loc),
       x.BitCountOrDie(), loc, name);
 }
 
-BValue BuilderBase::Ctz(BValue x, absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+BValue BuilderBase::Ctz(BValue x, const SourceInfo& loc,
+                        std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   if (!x.GetType()->IsBits()) {
     return SetError(
-        StrFormat("Count-leading-zeros argument must be of Bits type; is: %s",
-                  x.GetType()->ToString()),
+        absl::StrFormat(
+            "Count-leading-zeros argument must be of Bits type; is: %s",
+            x.GetType()->ToString()),
         loc);
   }
   return ZeroExtend(Encode(OneHot(x, /*priority=*/LsbOrMsb::kLsb, loc)),
@@ -155,9 +356,8 @@ BValue BuilderBase::Ctz(BValue x, absl::optional<SourceLocation> loc,
 }
 
 BValue BuilderBase::Match(BValue condition, absl::Span<const Case> cases,
-                          BValue default_value,
-                          absl::optional<SourceLocation> loc,
-                          absl::string_view name) {
+                          BValue default_value, const SourceInfo& loc,
+                          std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -170,17 +370,17 @@ BValue BuilderBase::Match(BValue condition, absl::Span<const Case> cases,
 
 BValue BuilderBase::MatchTrue(absl::Span<const BValue> case_clauses,
                               absl::Span<const BValue> case_values,
-                              BValue default_value,
-                              absl::optional<SourceLocation> loc,
-                              absl::string_view name) {
+                              BValue default_value, const SourceInfo& loc,
+                              std::string_view name) {
   if (case_clauses.size() != case_values.size()) {
     return SetError(
-        StrFormat(
+        absl::StrFormat(
             "Number of case clauses %d does not equal number of values (%d)",
             case_clauses.size(), case_values.size()),
         loc);
   }
   std::vector<Case> cases;
+  cases.reserve(case_clauses.size());
   for (int64_t i = 0; i < case_clauses.size(); ++i) {
     cases.push_back(Case{case_clauses[i], case_values[i]});
   }
@@ -188,27 +388,25 @@ BValue BuilderBase::MatchTrue(absl::Span<const BValue> case_clauses,
 }
 
 BValue BuilderBase::MatchTrue(absl::Span<const Case> cases,
-                              BValue default_value,
-                              absl::optional<SourceLocation> loc,
-                              absl::string_view name) {
+                              BValue default_value, const SourceInfo& loc,
+                              std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   std::vector<BValue> selector_bits;
   std::vector<BValue> case_values;
   for (int64_t i = 0; i < cases.size(); ++i) {
-    XLS_CHECK_EQ(cases[i].clause.builder(), default_value.builder());
-    XLS_CHECK_EQ(cases[i].value.builder(), default_value.builder());
+    CHECK_EQ(cases[i].clause.builder(), default_value.builder());
+    CHECK_EQ(cases[i].value.builder(), default_value.builder());
     if (GetType(cases[i].clause) != package()->GetBitsType(1)) {
       return SetError(
-          StrFormat("Selector %d must be a single-bit Bits type, is: %s", i,
-                    GetType(cases[i].clause)->ToString()),
+          absl::StrFormat("Selector %d must be a single-bit Bits type, is: %s",
+                          i, GetType(cases[i].clause)->ToString()),
           loc);
     }
     selector_bits.push_back(cases[i].clause);
     case_values.push_back(cases[i].value);
   }
-  case_values.push_back(default_value);
 
   // Reverse the order of the bits because bit index and indexing of concat
   // elements are reversed. That is, the zero-th operand of concat becomes the
@@ -216,14 +414,11 @@ BValue BuilderBase::MatchTrue(absl::Span<const Case> cases,
   std::reverse(selector_bits.begin(), selector_bits.end());
 
   BValue concat = Concat(selector_bits, loc);
-  BValue one_hot = OneHot(concat, /*priority=*/LsbOrMsb::kLsb, loc);
-
-  return OneHotSelect(one_hot, case_values, loc, name);
+  return PrioritySelect(concat, case_values, default_value, loc, name);
 }
 
 BValue BuilderBase::AfterAll(absl::Span<const BValue> dependencies,
-                             absl::optional<SourceLocation> loc,
-                             absl::string_view name) {
+                             const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -232,17 +427,29 @@ BValue BuilderBase::AfterAll(absl::Span<const BValue> dependencies,
   for (const BValue& value : dependencies) {
     nodes.push_back(value.node());
     if (!GetType(value)->IsToken()) {
-      return SetError(StrFormat("Dependency type %s is not a token.",
-                                GetType(value)->ToString()),
+      return SetError(absl::StrFormat("Dependency type %s is not a token.",
+                                      GetType(value)->ToString()),
                       loc);
     }
   }
   return AddNode<xls::AfterAll>(loc, nodes, name);
 }
 
+BValue BuilderBase::MinDelay(BValue token, int64_t delay, const SourceInfo& loc,
+                             std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!GetType(token)->IsToken()) {
+    return SetError(absl::StrFormat("Input type %s is not a token.",
+                                    GetType(token)->ToString()),
+                    loc);
+  }
+  return AddNode<xls::MinDelay>(loc, token.node(), delay, name);
+}
+
 BValue BuilderBase::Tuple(absl::Span<const BValue> elements,
-                          absl::optional<SourceLocation> loc,
-                          absl::string_view name) {
+                          const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -255,8 +462,7 @@ BValue BuilderBase::Tuple(absl::Span<const BValue> elements,
 }
 
 BValue BuilderBase::Array(absl::Span<const BValue> elements, Type* element_type,
-                          absl::optional<SourceLocation> loc,
-                          absl::string_view name) {
+                          const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -266,8 +472,8 @@ BValue BuilderBase::Array(absl::Span<const BValue> elements, Type* element_type,
     nodes.push_back(value.node());
     if (GetType(value) != element_type) {
       return SetError(
-          StrFormat("Element type %s does not match expected type: %s",
-                    GetType(value)->ToString(), element_type->ToString()),
+          absl::StrFormat("Element type %s does not match expected type: %s",
+                          GetType(value)->ToString(), element_type->ToString()),
           loc);
     }
   }
@@ -275,26 +481,35 @@ BValue BuilderBase::Array(absl::Span<const BValue> elements, Type* element_type,
   return AddNode<xls::Array>(loc, nodes, element_type, name);
 }
 
-BValue BuilderBase::TupleIndex(BValue arg, int64_t idx,
-                               absl::optional<SourceLocation> loc,
-                               absl::string_view name) {
+BValue BuilderBase::TupleIndex(BValue arg, int64_t idx, const SourceInfo& loc,
+                               std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
-  if (!GetType(arg)->IsTuple()) {
+  const Type* arg_type = GetType(arg);
+  if (!arg_type->IsTuple()) {
     return SetError(
-        StrFormat("Operand of tuple-index must be tuple-typed, is type: %s",
-                  GetType(arg)->ToString()),
+        absl::StrFormat(
+            "Operand of tuple-index must be tuple-typed, is type: %s",
+            arg_type->ToString()),
         loc);
   }
+
+  const TupleType* tuple_type = arg_type->AsTupleOrDie();
+  if (idx >= tuple_type->size()) {
+    return SetError(
+        absl::StrFormat("Tuple index %d out of range for tuple type %s", idx,
+                        tuple_type->ToString()),
+        loc);
+  }
+
   return AddNode<xls::TupleIndex>(loc, arg.node(), idx, name);
 }
 
 BValue BuilderBase::CountedFor(BValue init_value, int64_t trip_count,
                                int64_t stride, Function* body,
                                absl::Span<const BValue> invariant_args,
-                               absl::optional<SourceLocation> loc,
-                               absl::string_view name) {
+                               const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -306,26 +521,8 @@ BValue BuilderBase::CountedFor(BValue init_value, int64_t trip_count,
                                   trip_count, stride, body, name);
 }
 
-BValue BuilderBase::DynamicCountedFor(BValue init_value, BValue trip_count,
-                                      BValue stride, Function* body,
-                                      absl::Span<const BValue> invariant_args,
-                                      absl::optional<SourceLocation> loc,
-                                      absl::string_view name) {
-  if (ErrorPending()) {
-    return BValue();
-  }
-  std::vector<Node*> invariant_arg_nodes;
-  for (const BValue& arg : invariant_args) {
-    invariant_arg_nodes.push_back(arg.node());
-  }
-  return AddNode<xls::DynamicCountedFor>(loc, init_value.node(),
-                                         trip_count.node(), stride.node(),
-                                         invariant_arg_nodes, body, name);
-}
-
 BValue BuilderBase::Map(BValue operand, Function* to_apply,
-                        absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+                        const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -333,8 +530,7 @@ BValue BuilderBase::Map(BValue operand, Function* to_apply,
 }
 
 BValue BuilderBase::Invoke(absl::Span<const BValue> args, Function* to_apply,
-                           absl::optional<SourceLocation> loc,
-                           absl::string_view name) {
+                           const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -347,8 +543,8 @@ BValue BuilderBase::Invoke(absl::Span<const BValue> args, Function* to_apply,
 }
 
 BValue BuilderBase::ArrayIndex(BValue arg, absl::Span<const BValue> indices,
-                               absl::optional<SourceLocation> loc,
-                               absl::string_view name) {
+                               bool assumed_in_bounds, const SourceInfo& loc,
+                               std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -372,12 +568,12 @@ BValue BuilderBase::ArrayIndex(BValue arg, absl::Span<const BValue> indices,
   for (const BValue& index : indices) {
     index_operands.push_back(index.node());
   }
-  return AddNode<xls::ArrayIndex>(loc, arg.node(), index_operands, name);
+  return AddNode<xls::ArrayIndex>(loc, arg.node(), index_operands,
+                                  assumed_in_bounds, name);
 }
 
 BValue BuilderBase::ArraySlice(BValue array, BValue start, int64_t width,
-                               absl::optional<SourceLocation> loc,
-                               absl::string_view name) {
+                               const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -402,8 +598,8 @@ BValue BuilderBase::ArraySlice(BValue array, BValue start, int64_t width,
 
 BValue BuilderBase::ArrayUpdate(BValue arg, BValue update_value,
                                 absl::Span<const BValue> indices,
-                                absl::optional<SourceLocation> loc,
-                                absl::string_view name) {
+                                bool assumed_in_bounds, const SourceInfo& loc,
+                                std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -446,12 +642,11 @@ BValue BuilderBase::ArrayUpdate(BValue arg, BValue update_value,
     index_operands.push_back(index.node());
   }
   return AddNode<xls::ArrayUpdate>(loc, arg.node(), update_value.node(),
-                                   index_operands, name);
+                                   index_operands, assumed_in_bounds, name);
 }
 
 BValue BuilderBase::ArrayConcat(absl::Span<const BValue> operands,
-                                absl::optional<SourceLocation> loc,
-                                absl::string_view name) {
+                                const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -488,25 +683,24 @@ BValue BuilderBase::ArrayConcat(absl::Span<const BValue> operands,
   return AddNode<xls::ArrayConcat>(loc, node_operands, name);
 }
 
-BValue BuilderBase::Reverse(BValue arg, absl::optional<SourceLocation> loc,
-                            absl::string_view name) {
+BValue BuilderBase::Reverse(BValue arg, const SourceInfo& loc,
+                            std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
-  return AddUnOp(Op::kReverse, arg, loc);
+  return AddUnOp(Op::kReverse, arg, loc, name);
 }
 
-BValue BuilderBase::Identity(BValue var, absl::optional<SourceLocation> loc,
-                             absl::string_view name) {
+BValue BuilderBase::Identity(BValue var, const SourceInfo& loc,
+                             std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
-  return AddUnOp(Op::kIdentity, var, loc);
+  return AddUnOp(Op::kIdentity, var, loc, name);
 }
 
 BValue BuilderBase::SignExtend(BValue arg, int64_t new_bit_count,
-                               absl::optional<SourceLocation> loc,
-                               absl::string_view name) {
+                               const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -515,8 +709,7 @@ BValue BuilderBase::SignExtend(BValue arg, int64_t new_bit_count,
 }
 
 BValue BuilderBase::ZeroExtend(BValue arg, int64_t new_bit_count,
-                               absl::optional<SourceLocation> loc,
-                               absl::string_view name) {
+                               const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -525,8 +718,7 @@ BValue BuilderBase::ZeroExtend(BValue arg, int64_t new_bit_count,
 }
 
 BValue BuilderBase::BitSlice(BValue arg, int64_t start, int64_t width,
-                             absl::optional<SourceLocation> loc,
-                             absl::string_view name) {
+                             const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -534,9 +726,8 @@ BValue BuilderBase::BitSlice(BValue arg, int64_t start, int64_t width,
 }
 
 BValue BuilderBase::BitSliceUpdate(BValue arg, BValue start,
-                                   BValue update_value,
-                                   absl::optional<SourceLocation> loc,
-                                   absl::string_view name) {
+                                   BValue update_value, const SourceInfo& loc,
+                                   std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -545,8 +736,8 @@ BValue BuilderBase::BitSliceUpdate(BValue arg, BValue start,
 }
 
 BValue BuilderBase::DynamicBitSlice(BValue arg, BValue start, int64_t width,
-                                    absl::optional<SourceLocation> loc,
-                                    absl::string_view name) {
+                                    const SourceInfo& loc,
+                                    std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -554,271 +745,314 @@ BValue BuilderBase::DynamicBitSlice(BValue arg, BValue start, int64_t width,
                                        name);
 }
 
-BValue BuilderBase::Encode(BValue arg, absl::optional<SourceLocation> loc,
-                           absl::string_view name) {
-  if (ErrorPending()) {
-    return BValue();
-  }
-  return AddNode<xls::Encode>(loc, arg.node(), name);
-}
-
-BValue BuilderBase::Decode(BValue arg, absl::optional<int64_t> width,
-                           absl::optional<SourceLocation> loc,
-                           absl::string_view name) {
+BValue BuilderBase::Encode(BValue arg, const SourceInfo& loc,
+                           std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   if (!arg.GetType()->IsBits()) {
-    return SetError(StrFormat("Decode argument must be of Bits type; is: %s",
-                              arg.GetType()->ToString()),
-                    loc);
+    return SetError(
+        absl::StrFormat("Encode argument must be of Bits type; is: %s",
+                        arg.GetType()->ToString()),
+        loc);
+  }
+  return AddNode<xls::Encode>(loc, arg.node(), name);
+}
+
+BValue BuilderBase::Decode(BValue arg, std::optional<int64_t> width,
+                           const SourceInfo& loc, std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!arg.GetType()->IsBits()) {
+    return SetError(
+        absl::StrFormat("Decode argument must be of Bits type; is: %s",
+                        arg.GetType()->ToString()),
+        loc);
   }
   // The full output width ('width' not given) is an exponential function of the
   // argument width. Set a limit of 16 bits on the argument width.
   const int64_t arg_width = arg.GetType()->AsBitsOrDie()->bit_count();
   if (!width.has_value() && arg_width > 16) {
     return SetError(
-        StrFormat(
-            "Decode argument width be no greater than 32-bits; is %d bits",
+        absl::StrFormat(
+            "Decode argument width be no greater than 16-bits; is %d bits",
             arg_width),
         loc);
   }
   return AddNode<xls::Decode>(
       loc, arg.node(),
-      /*width=*/width.has_value() ? *width : (1LL << arg_width), name);
+      /*width=*/width.has_value() ? *width : (int64_t{1} << arg_width), name);
 }
 
-BValue BuilderBase::Shra(BValue operand, BValue amount,
-                         absl::optional<SourceLocation> loc,
-                         absl::string_view name) {
+BValue BuilderBase::Shra(BValue operand, BValue amount, const SourceInfo& loc,
+                         std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddBinOp(Op::kShra, operand, amount, loc, name);
 }
-BValue BuilderBase::Shrl(BValue operand, BValue amount,
-                         absl::optional<SourceLocation> loc,
-                         absl::string_view name) {
+BValue BuilderBase::Shrl(BValue operand, BValue amount, const SourceInfo& loc,
+                         std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddBinOp(Op::kShrl, operand, amount, loc, name);
 }
-BValue BuilderBase::Shll(BValue operand, BValue amount,
-                         absl::optional<SourceLocation> loc,
-                         absl::string_view name) {
+BValue BuilderBase::Shll(BValue operand, BValue amount, const SourceInfo& loc,
+                         std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddBinOp(Op::kShll, operand, amount, loc, name);
 }
-BValue BuilderBase::Subtract(BValue lhs, BValue rhs,
-                             absl::optional<SourceLocation> loc,
-                             absl::string_view name) {
+BValue BuilderBase::Subtract(BValue lhs, BValue rhs, const SourceInfo& loc,
+                             std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddBinOp(Op::kSub, lhs, rhs, loc, name);
 }
-BValue BuilderBase::Add(BValue lhs, BValue rhs,
-                        absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+BValue BuilderBase::Add(BValue lhs, BValue rhs, const SourceInfo& loc,
+                        std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddBinOp(Op::kAdd, lhs, rhs, loc, name);
 }
-BValue BuilderBase::Or(absl::Span<const BValue> operands,
-                       absl::optional<SourceLocation> loc,
-                       absl::string_view name) {
+BValue BuilderBase::Or(absl::Span<const BValue> operands, const SourceInfo& loc,
+                       std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddNaryOp(Op::kOr, operands, loc, name);
 }
-BValue BuilderBase::Or(BValue lhs, BValue rhs,
-                       absl::optional<SourceLocation> loc,
-                       absl::string_view name) {
+BValue BuilderBase::Or(BValue lhs, BValue rhs, const SourceInfo& loc,
+                       std::string_view name) {
   return Or({lhs, rhs}, loc, name);
 }
+BValue BuilderBase::Nor(absl::Span<const BValue> operands,
+                        const SourceInfo& loc, std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  return AddNaryOp(Op::kNor, operands, loc, name);
+}
+BValue BuilderBase::Nor(BValue lhs, BValue rhs, const SourceInfo& loc,
+                        std::string_view name) {
+  return Nor({lhs, rhs}, loc, name);
+}
 BValue BuilderBase::Xor(absl::Span<const BValue> operands,
-                        absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+                        const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddNaryOp(Op::kXor, operands, loc, name);
 }
-BValue BuilderBase::Xor(BValue lhs, BValue rhs,
-                        absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+BValue BuilderBase::Xor(BValue lhs, BValue rhs, const SourceInfo& loc,
+                        std::string_view name) {
   return Xor({lhs, rhs}, loc, name);
 }
 BValue BuilderBase::And(absl::Span<const BValue> operands,
-                        absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+                        const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddNaryOp(Op::kAnd, operands, loc, name);
 }
-BValue BuilderBase::And(BValue lhs, BValue rhs,
-                        absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+BValue BuilderBase::And(BValue lhs, BValue rhs, const SourceInfo& loc,
+                        std::string_view name) {
   return And({lhs, rhs}, loc, name);
 }
-
-BValue BuilderBase::AndReduce(BValue operand,
-                              absl::optional<SourceLocation> loc,
-                              absl::string_view name) {
+BValue BuilderBase::Nand(absl::Span<const BValue> operands,
+                         const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
-  return AddBitwiseReductionOp(Op::kAndReduce, operand);
+  return AddNaryOp(Op::kNand, operands, loc, name);
+}
+BValue BuilderBase::Nand(BValue lhs, BValue rhs, const SourceInfo& loc,
+                         std::string_view name) {
+  return Nand({lhs, rhs}, loc, name);
 }
 
-BValue BuilderBase::OrReduce(BValue operand, absl::optional<SourceLocation> loc,
-                             absl::string_view name) {
+BValue BuilderBase::AndReduce(BValue operand, const SourceInfo& loc,
+                              std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
-  return AddBitwiseReductionOp(Op::kOrReduce, operand);
+  return AddBitwiseReductionOp(Op::kAndReduce, operand, loc, name);
 }
 
-BValue BuilderBase::XorReduce(BValue operand,
-                              absl::optional<SourceLocation> loc,
-                              absl::string_view name) {
+BValue BuilderBase::OrReduce(BValue operand, const SourceInfo& loc,
+                             std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
-  return AddBitwiseReductionOp(Op::kXorReduce, operand);
+  return AddBitwiseReductionOp(Op::kOrReduce, operand, loc, name);
 }
 
-BValue BuilderBase::SMul(BValue lhs, BValue rhs,
-                         absl::optional<SourceLocation> loc,
-                         absl::string_view name) {
+BValue BuilderBase::XorReduce(BValue operand, const SourceInfo& loc,
+                              std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
-  return AddArithOp(Op::kSMul, lhs, rhs, /*result_width=*/absl::nullopt, loc,
+  return AddBitwiseReductionOp(Op::kXorReduce, operand, loc, name);
+}
+
+BValue BuilderBase::SMul(BValue lhs, BValue rhs, const SourceInfo& loc,
+                         std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  return AddArithOp(Op::kSMul, lhs, rhs, /*result_width=*/std::nullopt, loc,
                     name);
 }
-BValue BuilderBase::UMul(BValue lhs, BValue rhs,
-                         absl::optional<SourceLocation> loc,
-                         absl::string_view name) {
+BValue BuilderBase::UMul(BValue lhs, BValue rhs, const SourceInfo& loc,
+                         std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
-  return AddArithOp(Op::kUMul, lhs, rhs, /*result_width=*/absl::nullopt, loc,
+  return AddArithOp(Op::kUMul, lhs, rhs, /*result_width=*/std::nullopt, loc,
                     name);
 }
 BValue BuilderBase::SMul(BValue lhs, BValue rhs, int64_t result_width,
-                         absl::optional<SourceLocation> loc,
-                         absl::string_view name) {
+                         const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddArithOp(Op::kSMul, lhs, rhs, result_width, loc, name);
 }
 BValue BuilderBase::UMul(BValue lhs, BValue rhs, int64_t result_width,
-                         absl::optional<SourceLocation> loc,
-                         absl::string_view name) {
+                         const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddArithOp(Op::kUMul, lhs, rhs, result_width, loc, name);
 }
-BValue BuilderBase::UDiv(BValue lhs, BValue rhs,
-                         absl::optional<SourceLocation> loc,
-                         absl::string_view name) {
+BValue BuilderBase::SMulp(BValue lhs, BValue rhs, const SourceInfo& loc,
+                          std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  return AddPartialProductOp(Op::kSMulp, lhs, rhs,
+                             /*result_width=*/std::nullopt, loc, name);
+}
+BValue BuilderBase::UMulp(BValue lhs, BValue rhs, const SourceInfo& loc,
+                          std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  return AddPartialProductOp(Op::kUMulp, lhs, rhs,
+                             /*result_width=*/std::nullopt, loc, name);
+}
+BValue BuilderBase::SMulp(BValue lhs, BValue rhs, int64_t result_width,
+                          const SourceInfo& loc, std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  return AddPartialProductOp(Op::kSMulp, lhs, rhs, result_width, loc, name);
+}
+BValue BuilderBase::UMulp(BValue lhs, BValue rhs, int64_t result_width,
+                          const SourceInfo& loc, std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  return AddPartialProductOp(Op::kUMulp, lhs, rhs, result_width, loc, name);
+}
+BValue BuilderBase::UDiv(BValue lhs, BValue rhs, const SourceInfo& loc,
+                         std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddBinOp(Op::kUDiv, lhs, rhs, loc, name);
 }
-BValue BuilderBase::SDiv(BValue lhs, BValue rhs,
-                         absl::optional<SourceLocation> loc,
-                         absl::string_view name) {
+BValue BuilderBase::SDiv(BValue lhs, BValue rhs, const SourceInfo& loc,
+                         std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddBinOp(Op::kSDiv, lhs, rhs, loc, name);
 }
-BValue BuilderBase::Eq(BValue lhs, BValue rhs,
-                       absl::optional<SourceLocation> loc,
-                       absl::string_view name) {
+BValue BuilderBase::UMod(BValue lhs, BValue rhs, const SourceInfo& loc,
+                         std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  return AddBinOp(Op::kUMod, lhs, rhs, loc, name);
+}
+BValue BuilderBase::SMod(BValue lhs, BValue rhs, const SourceInfo& loc,
+                         std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  return AddBinOp(Op::kSMod, lhs, rhs, loc, name);
+}
+BValue BuilderBase::Eq(BValue lhs, BValue rhs, const SourceInfo& loc,
+                       std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddCompareOp(Op::kEq, lhs, rhs, loc, name);
 }
-BValue BuilderBase::Ne(BValue lhs, BValue rhs,
-                       absl::optional<SourceLocation> loc,
-                       absl::string_view name) {
+BValue BuilderBase::Ne(BValue lhs, BValue rhs, const SourceInfo& loc,
+                       std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddCompareOp(Op::kNe, lhs, rhs, loc, name);
 }
-BValue BuilderBase::UGe(BValue lhs, BValue rhs,
-                        absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+BValue BuilderBase::UGe(BValue lhs, BValue rhs, const SourceInfo& loc,
+                        std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddCompareOp(Op::kUGe, lhs, rhs, loc, name);
 }
-BValue BuilderBase::UGt(BValue lhs, BValue rhs,
-                        absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+BValue BuilderBase::UGt(BValue lhs, BValue rhs, const SourceInfo& loc,
+                        std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddCompareOp(Op::kUGt, lhs, rhs, loc, name);
 }
-BValue BuilderBase::ULe(BValue lhs, BValue rhs,
-                        absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+BValue BuilderBase::ULe(BValue lhs, BValue rhs, const SourceInfo& loc,
+                        std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddCompareOp(Op::kULe, lhs, rhs, loc, name);
 }
-BValue BuilderBase::ULt(BValue lhs, BValue rhs,
-                        absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+BValue BuilderBase::ULt(BValue lhs, BValue rhs, const SourceInfo& loc,
+                        std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddCompareOp(Op::kULt, lhs, rhs, loc, name);
 }
-BValue BuilderBase::SLt(BValue lhs, BValue rhs,
-                        absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+BValue BuilderBase::SLt(BValue lhs, BValue rhs, const SourceInfo& loc,
+                        std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddCompareOp(Op::kSLt, lhs, rhs, loc, name);
 }
-BValue BuilderBase::SLe(BValue lhs, BValue rhs,
-                        absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+BValue BuilderBase::SLe(BValue lhs, BValue rhs, const SourceInfo& loc,
+                        std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddCompareOp(Op::kSLe, lhs, rhs, loc, name);
 }
-BValue BuilderBase::SGe(BValue lhs, BValue rhs,
-                        absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+BValue BuilderBase::SGe(BValue lhs, BValue rhs, const SourceInfo& loc,
+                        std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   return AddCompareOp(Op::kSGe, lhs, rhs, loc, name);
 }
-BValue BuilderBase::SGt(BValue lhs, BValue rhs,
-                        absl::optional<SourceLocation> loc,
-                        absl::string_view name) {
+BValue BuilderBase::SGt(BValue lhs, BValue rhs, const SourceInfo& loc,
+                        std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -826,8 +1060,7 @@ BValue BuilderBase::SGt(BValue lhs, BValue rhs,
 }
 
 BValue BuilderBase::Concat(absl::Span<const BValue> operands,
-                           absl::optional<SourceLocation> loc,
-                           absl::string_view name) {
+                           const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
@@ -846,54 +1079,274 @@ BValue BuilderBase::Concat(absl::Span<const BValue> operands,
   return AddNode<xls::Concat>(loc, node_operands, name);
 }
 
-BValue FunctionBuilder::Param(absl::string_view name, Type* type,
-                              absl::optional<SourceLocation> loc) {
+BValue BuilderBase::Receive(BReceiveChannelRef channel, BValue token,
+                            const SourceInfo& loc, std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!token.GetType()->IsToken()) {
+    return SetError(
+        absl::StrFormat(
+            "Token operand of receive must be of token type; is: %s",
+            token.GetType()->ToString()),
+        loc);
+  }
+  ReceiveChannelRef raw_channel = ResolveBReceiveChannelRef(channel);
+  return AddNode<xls::Receive>(loc, token.node(), /*predicate=*/std::nullopt,
+                               ChannelRefName(raw_channel),
+                               /*is_blocking=*/true,
+                               ChannelRefType(raw_channel), name);
+}
+
+BValue BuilderBase::ReceiveNonBlocking(BReceiveChannelRef channel, BValue token,
+                                       const SourceInfo& loc,
+                                       std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!token.GetType()->IsToken()) {
+    return SetError(
+        absl::StrFormat(
+            "Token operand of receive must be of token type; is: %s",
+            token.GetType()->ToString()),
+        loc);
+  }
+  ReceiveChannelRef raw_channel = ResolveBReceiveChannelRef(channel);
+  return AddNode<xls::Receive>(loc, token.node(), /*predicate=*/std::nullopt,
+                               ChannelRefName(raw_channel),
+                               /*is_blocking=*/false,
+                               ChannelRefType(raw_channel), name);
+}
+
+BValue BuilderBase::ReceiveIf(BReceiveChannelRef channel, BValue token,
+                              BValue pred, const SourceInfo& loc,
+                              std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!token.GetType()->IsToken()) {
+    return SetError(
+        absl::StrFormat(
+            "Token operand of receive must be of token type; is: %s",
+            token.GetType()->ToString()),
+        loc);
+  }
+  if (!pred.GetType()->IsBits() ||
+      pred.GetType()->AsBitsOrDie()->bit_count() != 1) {
+    return SetError(
+        absl::StrFormat("Predicate operand of receive_if must be of bits "
+                        "type of width 1; is: %s",
+                        pred.GetType()->ToString()),
+        loc);
+  }
+  ReceiveChannelRef raw_channel = ResolveBReceiveChannelRef(channel);
+  return AddNode<xls::Receive>(
+      loc, token.node(), pred.node(), ChannelRefName(raw_channel),
+      /*is_blocking=*/true, ChannelRefType(raw_channel), name);
+}
+
+BValue BuilderBase::ReceiveIfNonBlocking(BReceiveChannelRef channel,
+                                         BValue token, BValue pred,
+                                         const SourceInfo& loc,
+                                         std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!token.GetType()->IsToken()) {
+    return SetError(
+        absl::StrFormat(
+            "Token operand of receive must be of token type; is: %s",
+            token.GetType()->ToString()),
+        loc);
+  }
+  if (!pred.GetType()->IsBits() ||
+      pred.GetType()->AsBitsOrDie()->bit_count() != 1) {
+    return SetError(
+        absl::StrFormat("Predicate operand of receive_if must be of bits "
+                        "type of width 1; is: %s",
+                        pred.GetType()->ToString()),
+        loc);
+  }
+  ReceiveChannelRef raw_channel = ResolveBReceiveChannelRef(channel);
+  return AddNode<xls::Receive>(
+      loc, token.node(), pred.node(), ChannelRefName(raw_channel),
+      /*is_blocking=*/false, ChannelRefType(raw_channel), name);
+}
+
+BValue BuilderBase::Send(BSendChannelRef channel, BValue token, BValue data,
+                         const SourceInfo& loc, std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!token.GetType()->IsToken()) {
+    return SetError(
+        absl::StrFormat("Token operand of send must be of token type; is: %s",
+                        token.GetType()->ToString()),
+        loc);
+  }
+  SendChannelRef raw_channel = ResolveBSendChannelRef(channel);
+  return AddNode<xls::Send>(loc, token.node(), data.node(),
+                            /*predicate=*/std::nullopt,
+                            ChannelRefName(raw_channel), name);
+}
+
+BValue BuilderBase::SendIf(BSendChannelRef channel, BValue token, BValue pred,
+                           BValue data, const SourceInfo& loc,
+                           std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!token.GetType()->IsToken()) {
+    return SetError(
+        absl::StrFormat("Token operand of send must be of token type; is: %s",
+                        token.GetType()->ToString()),
+        loc);
+  }
+  if (!pred.GetType()->IsBits() ||
+      pred.GetType()->AsBitsOrDie()->bit_count() != 1) {
+    return SetError(absl::StrFormat("Predicate operand of send must be of bits "
+                                    "type of width 1; is: %s",
+                                    pred.GetType()->ToString()),
+                    loc);
+  }
+  SendChannelRef raw_channel = ResolveBSendChannelRef(channel);
+  return AddNode<xls::Send>(loc, token.node(), data.node(), pred.node(),
+                            ChannelRefName(raw_channel), name);
+}
+
+BValue BuilderBase::Next(BValue state_read, BValue value,
+                         std::optional<BValue> pred,
+                         std::optional<std::string> label,
+                         const SourceInfo& loc, std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!state_read.node()->Is<xls::StateRead>()) {
+    return SetError(absl::StrFormat("next node only applies to state reads; "
+                                    "state read was given as: %v",
+                                    *state_read.node()),
+                    loc);
+  }
+  class StateElement* state_element =
+      state_read.node()->As<xls::StateRead>()->state_element();
+  if (!value.GetType()->IsEqualTo(state_element->type())) {
+    return SetError(
+        absl::StrFormat(
+            "next value for state element '%s' must be of type %s; is: %s",
+            state_read.node()->As<xls::StateRead>()->state_element()->name(),
+            state_read.GetType()->ToString(), value.GetType()->ToString()),
+        loc);
+  }
+  if (pred.has_value() && (!pred->GetType()->IsBits() ||
+                           pred->GetType()->AsBitsOrDie()->bit_count() != 1)) {
+    return SetError(absl::StrFormat("Predicate operand of next must be of bits "
+                                    "type of width 1; is: %s",
+                                    pred->GetType()->ToString()),
+                    loc);
+  }
+  return AddNode<xls::Next>(
+      loc, /*state_element=*/state_element, /*value=*/value.node(),
+      /*predicate=*/pred.has_value() ? std::make_optional(pred->node())
+                                     : std::nullopt,
+      /*label=*/label, name);
+}
+
+LeafTypeTree<BValue> BuilderBase::MakeLeafTypeTree(BValue v) {
+  if (!v.valid() || ErrorPending()) {
+    return LeafTypeTree<BValue>(v.GetType(), BValue());
+  }
+  auto res = ToTreeOfNodes(v.node());
+  if (!res.ok()) {
+    SetError(absl::StrFormat("Failed to convert value %s to LeafTypeTree",
+                             v.ToString()),
+             v.loc());
+    return LeafTypeTree<BValue>(v.GetType(), BValue());
+  }
+  return leaf_type_tree::Map<BValue, Node*>(
+      res->AsView(), [&](Node* n) -> BValue { return BValue(n, this); });
+}
+
+BValue BuilderBase::Next(BStateElement state_element, BValue value,
+                         std::optional<BValue> pred,
+                         std::optional<std::string> label,
+                         const SourceInfo& loc, std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!state_element.valid()) {
+    return BValue();
+  }
+  if (!value.GetType()->IsEqualTo(state_element.state_element()->type())) {
+    return SetError(
+        absl::StrFormat(
+            "next value for state element '%s' must be of type %s; is: %s",
+            state_element.state_element()->name(),
+            state_element.state_element()->type()->ToString(),
+            value.GetType()->ToString()),
+        loc);
+  }
+  if (pred.has_value() && (!pred->GetType()->IsBits() ||
+                           pred->GetType()->AsBitsOrDie()->bit_count() != 1)) {
+    return SetError(absl::StrFormat("Predicate operand of next must be of bits "
+                                    "type of width 1; is: %s",
+                                    pred->GetType()->ToString()),
+                    loc);
+  }
+  if (state_element.builder() != nullptr && state_element.builder() != this) {
+    return SetError(
+        absl::StrFormat("State element '%s' belongs to a different builder.",
+                        state_element.state_element()->name()),
+        loc);
+  }
+  return AddNode<xls::Next>(
+      loc, /*state_element=*/state_element.state_element(),
+      /*value=*/value.node(),
+      /*predicate=*/pred.has_value() ? std::make_optional(pred->node())
+                                     : std::nullopt,
+      /*label=*/label, name);
+}
+
+FunctionBuilder::FunctionBuilder(std::string_view name, Package* package,
+                                 bool should_verify)
+    : BuilderBase(std::make_unique<Function>(std::string(name), package),
+                  should_verify) {}
+
+FunctionBuilder::FunctionBuilder(std::string_view function_name,
+                                 Package* package, ScheduledFunctionTag tag,
+                                 bool should_verify)
+    : BuilderBase(std::make_unique<ScheduledFunction>(function_name, package),
+                  should_verify) {}
+
+void FunctionBuilder::SetParamOrder(absl::Span<BValue const> new_order) {
+  std::vector<xls::Param*> new_order_params;
+  new_order_params.reserve(new_order.size());
+  for (BValue bv : new_order) {
+    if (!bv.node()->Is<xls::Param>()) {
+      SetError(absl::StrFormat("Param order must be params, got %s",
+                               bv.node()->ToString()),
+               {});
+      return;
+    }
+    new_order_params.push_back(bv.node()->As<xls::Param>());
+  }
+  absl::Status reorder = function_->ReorderParams(new_order_params);
+  if (!reorder.ok()) {
+    SetError(absl::StrFormat("Failed to reorder params: %v", reorder), {});
+  }
+}
+
+BValue FunctionBuilder::Param(std::string_view name, Type* type,
+                              const SourceInfo& loc) {
   if (ErrorPending()) {
     return BValue();
   }
   for (xls::Param* param : function()->params()) {
     if (name == param->GetName()) {
-      return SetError(StrFormat("Parameter named \"%s\" already exists", name),
-                      loc);
+      return SetError(
+          absl::StrFormat("Parameter named \"%s\" already exists", name), loc);
     }
   }
-  return AddNode<xls::Param>(loc, name, type);
-}
-
-BValue FunctionBuilder::Receive(Channel* channel, BValue token,
-                                absl::optional<SourceLocation> loc,
-                                absl::string_view name) {
-  if (ErrorPending()) {
-    return BValue();
-  }
-  return SetError("Receive operations not supported in functions", loc);
-}
-
-BValue FunctionBuilder::ReceiveIf(Channel* channel, BValue token, BValue pred,
-                                  absl::optional<SourceLocation> loc,
-                                  absl::string_view name) {
-  if (ErrorPending()) {
-    return BValue();
-  }
-  return SetError("ReceiveIf operations not supported in functions", loc);
-}
-
-BValue FunctionBuilder::Send(Channel* channel, BValue token, BValue data,
-                             absl::optional<SourceLocation> loc,
-                             absl::string_view name) {
-  if (ErrorPending()) {
-    return BValue();
-  }
-  return SetError("Send operations not supported in functions", loc);
-}
-
-BValue FunctionBuilder::SendIf(Channel* channel, BValue token, BValue pred,
-                               BValue data, absl::optional<SourceLocation> loc,
-                               absl::string_view name) {
-  if (ErrorPending()) {
-    return BValue();
-  }
-  return SetError("SendIf operations not supported in functions", loc);
+  return AddNode<xls::Param>(loc, type, name);
 }
 
 absl::StatusOr<Function*> FunctionBuilder::Build() {
@@ -904,28 +1357,29 @@ absl::StatusOr<Function*> FunctionBuilder::Build() {
   if (function_->node_count() == 0) {
     return absl::InvalidArgumentError("Function cannot be empty");
   }
-  XLS_RET_CHECK(last_node_ != nullptr);
-  return BuildWithReturnValue(BValue(last_node_, this));
+  XLS_ASSIGN_OR_RETURN(BValue last_value, GetLastValue());
+  return BuildWithReturnValue(last_value);
 }
 
 absl::StatusOr<Function*> FunctionBuilder::BuildWithReturnValue(
     BValue return_value) {
   if (ErrorPending()) {
-    std::string msg = error_msg_ + " ";
-    if (error_loc_.has_value()) {
-      absl::StrAppendFormat(
-          &msg, "File: %d, Line: %d, Col: %d", error_loc_->fileno().value(),
-          error_loc_->lineno().value(), error_loc_->colno().value());
-    }
-    absl::StrAppend(&msg, "\nStack Trace:\n" + error_stacktrace_);
-    return absl::InvalidArgumentError("Could not build IR: " + msg);
+    return GetError();
   }
   XLS_RET_CHECK_EQ(return_value.builder(), this);
-  // down_cast the std::unique_ptr<FunctionBase> to std::unique_ptr<Function>.
-  // We know this is safe because FunctionBuilder constructs and passes a
-  // Function to BuilderBase constructor so function_ is always a Function.
-  Function* f = package()->AddFunction(
-      absl::WrapUnique(down_cast<Function*>(function_.release())));
+
+  // down_cast the FunctionBase* to Function*. We know this is safe because
+  // FunctionBuilder constructs and passes a Function to BuilderBase
+  // constructor so function_ is always a Function.
+  Function* f;
+  if (overridden_dest_ != nullptr) {
+    *overridden_dest_ = absl::WrapUnique(function_.release());
+    f = absl::down_cast<Function*>(overridden_dest_->get());
+  } else {
+    f = package()->AddFunction(
+        absl::WrapUnique(absl::down_cast<Function*>(function_.release())));
+  }
+
   XLS_RETURN_IF_ERROR(f->set_return_value(return_value.node()));
   if (should_verify_) {
     XLS_RETURN_IF_ERROR(VerifyFunction(f));
@@ -933,62 +1387,390 @@ absl::StatusOr<Function*> FunctionBuilder::BuildWithReturnValue(
   return f;
 }
 
-absl::StatusOr<Proc*> ProcBuilder::Build(BValue token, BValue next_state) {
+absl::StatusOr<Function*> FunctionBuilder::BuildWithNoReturnValue() {
   if (ErrorPending()) {
-    std::string msg = error_msg_ + " ";
-    if (error_loc_.has_value()) {
-      absl::StrAppendFormat(
-          &msg, "File: %d, Line: %d, Col: %d", error_loc_->fileno().value(),
-          error_loc_->lineno().value(), error_loc_->colno().value());
+    return GetError();
+  }
+  // down_cast the FunctionBase* to Function*. We know this is safe because
+  // FunctionBuilder constructs and passes a Function to BuilderBase
+  // constructor so function_ is always a Function.
+  Function* f;
+  if (overridden_dest_ != nullptr) {
+    *overridden_dest_ = absl::WrapUnique(function_.release());
+    f = absl::down_cast<Function*>(overridden_dest_->get());
+  } else {
+    f = package()->AddFunction(
+        absl::WrapUnique(absl::down_cast<Function*>(function_.release())));
+  }
+  if (should_verify_) {
+    XLS_RETURN_IF_ERROR(VerifyFunction(f));
+  }
+  return f;
+}
+
+ProcBuilder::ProcBuilder(std::string_view name, Package* package,
+                         bool should_verify)
+    : BuilderBase(std::make_unique<Proc>(name, package), should_verify) {}
+ProcBuilder::ProcBuilder(std::string_view proc_name, Package* package,
+                         ScheduledProcTag tag, bool should_verify)
+    : BuilderBase(std::make_unique<ScheduledProc>(proc_name, package),
+                  should_verify) {}
+
+ProcBuilder::ProcBuilder(NewStyleProc tag, std::string_view name,
+                         Package* package, bool should_verify)
+    : BuilderBase(std::make_unique<Proc>(
+                      name,
+                      /*interface_channels=*/
+                      absl::Span<std::unique_ptr<ChannelInterface>>(), package),
+                  should_verify) {}
+ProcBuilder::ProcBuilder(NewStyleProc tag, std::string_view proc_name,
+                         Package* package, ScheduledProcTag stag,
+                         bool should_verify)
+    : BuilderBase(std::make_unique<ScheduledProc>(
+                      proc_name, /*interface_channels=*/
+                      absl::Span<std::unique_ptr<ChannelInterface>>(), package),
+                  should_verify) {
+  if (!proc()->is_new_style_proc()) {
+    CHECK_OK(proc()->ConvertToNewStyle());
+  }
+}
+
+Proc* ProcBuilder::proc() const { return absl::down_cast<Proc*>(function()); }
+
+BChannelWithInterfaces ProcBuilder::AddChannel(
+    std::string_view name, Type* type, ChannelKind kind,
+    absl::Span<const Value> initial_values,
+    std::optional<ChannelConfig> channel_config) {
+  if (ErrorPending()) {
+    return BChannelWithInterfaces{};
+  }
+  if (!proc()->is_new_style_proc()) {
+    SetError("AddChannel can only be called on new style procs", SourceInfo());
+    return BChannelWithInterfaces{};
+  }
+  Channel* channel;
+  if (kind == ChannelKind::kStreaming) {
+    auto statusor = proc()->package()->CreateStreamingChannelInProc(
+        name, ChannelOps::kSendReceive, type, proc(), initial_values,
+        channel_config.value_or(ChannelConfig()));
+    if (!statusor.ok()) {
+      SetError(statusor.status().message(), SourceInfo());
+      return BChannelWithInterfaces{};
     }
-    absl::StrAppend(&msg, "\nStack Trace:\n" + error_stacktrace_);
-    return absl::InvalidArgumentError("Could not build IR: " + msg);
+    channel = *statusor;
+  } else {
+    if (!initial_values.empty()) {
+      SetError("Single value channels cannot have initial values",
+               SourceInfo());
+      return BChannelWithInterfaces{};
+    }
+    if (kind != ChannelKind::kSingleValue) {
+      SetError("Invalid channel kind", SourceInfo());
+      return BChannelWithInterfaces{};
+    }
+    auto statusor = proc()->package()->CreateSingleValueChannelInProc(
+        name, ChannelOps::kSendReceive, type, proc());
+    if (!statusor.ok()) {
+      SetError(statusor.status().message(), SourceInfo());
+      return BChannelWithInterfaces{};
+    }
+    channel = *statusor;
   }
-  if (!GetType(token)->IsToken()) {
-    return absl::InvalidArgumentError(
-        StrFormat("Recurrent token of proc must be token type, is: %s.",
-                  GetType(token)->ToString()));
+  auto send_interface = proc()->GetSendChannelInterface(name);
+  if (!send_interface.ok()) {
+    SetError(send_interface.status().message(), SourceInfo());
+    return BChannelWithInterfaces{};
   }
-  if (GetType(next_state) != GetType(GetStateParam())) {
-    return absl::InvalidArgumentError(StrFormat(
-        "Recurrent state type %s does not match proc "
-        "parameter state type %s.",
-        GetType(GetStateParam())->ToString(), GetType(next_state)->ToString()));
+  auto receive_interface = proc()->GetReceiveChannelInterface(name);
+  if (!receive_interface.ok()) {
+    SetError(receive_interface.status().message(), SourceInfo());
+    return BChannelWithInterfaces{};
+  }
+  return BChannelWithInterfaces{
+      .channel = BChannel(channel, this),
+      .send_interface = BSendChannel(*send_interface, this),
+      .receive_interface = BReceiveChannel(*receive_interface, this)};
+}
+
+void SetChannelAttributes(ChannelInterface* channel_interface,
+                          std::optional<ChannelStrictness> strictness,
+                          std::optional<FlowControl> flow_control) {
+  if (flow_control.has_value()) {
+    channel_interface->SetFlowControl(*flow_control);
+  }
+  if (strictness.has_value()) {
+    channel_interface->SetStrictness(*strictness);
+  } else if (channel_interface->kind() == ChannelKind::kStreaming) {
+    channel_interface->SetStrictness(kDefaultChannelStrictness);
+    if (!flow_control.has_value()) {
+      channel_interface->SetFlowControl(FlowControl::kReadyValid);
+    }
+  }
+}
+
+BReceiveChannel ProcBuilder::AddInputChannel(
+    std::string_view name, Type* type, ChannelKind kind,
+    std::optional<ChannelStrictness> strictness,
+    std::optional<FlowControl> flow_control) {
+  if (ErrorPending()) {
+    return BReceiveChannel();
+  }
+  if (!proc()->is_new_style_proc()) {
+    SetError("AddInputChannel can only be called on new style procs",
+             SourceInfo());
+    return BReceiveChannel();
+  }
+  auto channel_interface =
+      std::make_unique<ReceiveChannelInterface>(name, type, kind);
+  SetChannelAttributes(channel_interface.get(), strictness, flow_control);
+  auto statusor =
+      proc()->AddInputChannelInterface(std::move(channel_interface));
+  if (!statusor.ok()) {
+    SetError(statusor.status().message(), SourceInfo());
+    return BReceiveChannel();
+  }
+  return BReceiveChannel(*statusor, this);
+}
+
+BSendChannel ProcBuilder::AddOutputChannel(
+    std::string_view name, Type* type, ChannelKind kind,
+    std::optional<ChannelStrictness> strictness,
+    std::optional<FlowControl> flow_control) {
+  if (ErrorPending()) {
+    return BSendChannel();
+  }
+  if (!proc()->is_new_style_proc()) {
+    SetError("AddOutputChannel can only be called on new style procs",
+             SourceInfo());
+    return BSendChannel();
+  }
+  auto channel_interface =
+      std::make_unique<SendChannelInterface>(name, type, kind);
+  SetChannelAttributes(channel_interface.get(), strictness, flow_control);
+  auto statusor =
+      proc()->AddOutputChannelInterface(std::move(channel_interface));
+  if (!statusor.ok()) {
+    SetError(statusor.status().message(), SourceInfo());
+    return BSendChannel();
+  }
+  return BSendChannel(*statusor, this);
+}
+
+BSendChannel ProcBuilder::GetSendChannelInterface(std::string_view name) {
+  if (ErrorPending()) {
+    return BSendChannel();
+  }
+  if (!proc()->is_new_style_proc()) {
+    SetError("GetSendChannelInterface can only be called on new style procs",
+             SourceInfo());
+    return BSendChannel();
+  }
+  auto statusor = proc()->GetSendChannelInterface(name);
+  if (!statusor.ok()) {
+    SetError(statusor.status().message(), SourceInfo());
+    return BSendChannel();
+  }
+  return BSendChannel(*statusor, this);
+}
+
+BReceiveChannel ProcBuilder::GetReceiveChannelInterface(std::string_view name) {
+  if (ErrorPending()) {
+    return BReceiveChannel();
+  }
+  if (!proc()->is_new_style_proc()) {
+    SetError("GetReceiveChannelInterface can only be called on new style procs",
+             SourceInfo());
+    return BReceiveChannel();
+  }
+  auto statusor = proc()->GetReceiveChannelInterface(name);
+  if (!statusor.ok()) {
+    SetError(statusor.status().message(), SourceInfo());
+    return BReceiveChannel();
+  }
+  return BReceiveChannel(*statusor, this);
+}
+
+void ProcBuilder::InstantiateProc(
+    std::string_view name, Proc* instantiated_proc,
+    absl::Span<const BChannelInterfaceRef> channel_interfaces) {
+  if (ErrorPending()) {
+    return;
+  }
+  std::vector<ChannelInterface*> unwrapped;
+  unwrapped.reserve(channel_interfaces.size());
+  for (const BChannelInterfaceRef& ref : channel_interfaces) {
+    unwrapped.push_back(ref.channel_interface());
+  }
+  auto status =
+      proc()->AddProcInstantiation(name, unwrapped, instantiated_proc);
+  if (!status.ok()) {
+    SetError(status.status().message(), SourceInfo());
+  }
+}
+
+absl::StatusOr<Proc*> ProcBuilder::Build() {
+  if (ErrorPending()) {
+    return GetError();
   }
 
-  // down_cast the std::unique_ptr<FunctionBase> to std::unique_ptr<Proc>. We
-  // know this is safe because ProcBuilder constructs and passes a Proc to
-  // BuilderBase constructor so function_ is always a Proc.
-  Proc* proc = package()->AddProc(
-      absl::WrapUnique(down_cast<Proc*>(function_.release())));
-  XLS_RETURN_IF_ERROR(proc->SetNextToken(token.node()));
-  XLS_RETURN_IF_ERROR(proc->SetNextState(next_state.node()));
+  // down_cast the FunctionBase* to Proc*. We know this is safe because
+  // ProcBuilder constructs and passes a Proc to BuilderBase constructor so
+  // function_ is always a Proc.
+  Proc* proc;
+  if (overridden_dest_ != nullptr) {
+    *overridden_dest_ = absl::WrapUnique(function_.release());
+    proc = absl::down_cast<Proc*>(overridden_dest_->get());
+  } else {
+    proc = package()->AddProc(
+        absl::WrapUnique(absl::down_cast<Proc*>(function_.release())));
+  }
+
   if (should_verify_) {
     XLS_RETURN_IF_ERROR(VerifyProc(proc));
   }
   return proc;
 }
 
-BValue ProcBuilder::Param(absl::string_view name, Type* type,
-                          absl::optional<SourceLocation> loc) {
-  if (ErrorPending()) {
-    return BValue();
+absl::StatusOr<Proc*> ProcBuilder::Build(absl::Span<const BValue> next_state) {
+  if (!next_state.empty()) {
+    if (next_state.size() != state_elements_.size()) {
+      return absl::InvalidArgumentError(
+          absl::StrFormat("Number of recurrent state elements given (%d) does "
+                          "not equal the number of state elements in the proc "
+                          "(%d)",
+                          next_state.size(), state_elements_.size()));
+    }
+    if (!proc()->next_values().empty()) {
+      return absl::InvalidArgumentError(
+          "Cannot use Build(next_state) when also using next_value nodes.");
+    }
+    for (int64_t index = 0; index < next_state.size(); ++index) {
+      if (GetType(next_state[index]) !=
+          GetStateElement(index).state_element()->type()) {
+        return absl::InvalidArgumentError(absl::StrFormat(
+            "Recurrent state type %s does not match provided "
+            "state type %s for element %d.",
+            GetStateElement(index).state_element()->type()->ToString(),
+            GetType(next_state[index])->ToString(), index));
+      }
+      Next(GetStateElement(index), next_state[index]);
+    }
   }
-  return SetError("Cannot add parameters to procs", loc);
+  return Build();
 }
 
-BValue BuilderBase::AddArithOp(Op op, BValue lhs, BValue rhs,
-                               absl::optional<int64_t> result_width,
-                               absl::optional<SourceLocation> loc,
-                               absl::string_view name) {
-  XLS_CHECK_EQ(lhs.builder(), rhs.builder());
+BValue ProcBuilder::ReadStateElement(std::string_view name,
+                                     const Value& initial_value,
+                                     std::optional<BValue> read_predicate,
+                                     bool non_synthesizable,
+                                     const SourceInfo& loc) {
+  absl::StatusOr<xls::StateRead*> state_read = proc()->AppendStateElement(
+      name, initial_value,
+      read_predicate.has_value() ? std::make_optional(read_predicate->node())
+                                 : std::nullopt,
+      /*next_state=*/std::nullopt, non_synthesizable, loc);
+  if (!state_read.ok()) {
+    return SetError(absl::StrFormat("Unable to add state element: %s",
+                                    state_read.status().message()),
+                    loc);
+  }
+  state_elements_.push_back(
+      BStateElement((*state_read)->state_element(), this));
+  state_params_.push_back(CreateBValue(*state_read, loc));
+  return state_params_.back();
+}
+
+BValue ProcBuilder::ReadStateElement(std::string_view name,
+                                     const ValueBuilder& initial_value,
+                                     std::optional<BValue> read_predicate,
+                                     bool non_synthesizable,
+                                     const SourceInfo& loc) {
+  absl::StatusOr<Value> built = initial_value.Build();
+  if (built.ok()) {
+    return ReadStateElement(name, *built, read_predicate, non_synthesizable,
+                            loc);
+  }
+  return SetError(absl::StrFormat("Unable to create initial value due to %s",
+                                  built.status().ToString()),
+                  loc);
+}
+
+BStateElement ProcBuilder::StateElement(std::string_view name,
+                                        const Value& initial_value,
+                                        bool non_synthesizable,
+                                        const SourceInfo& loc) {
+  if (ErrorPending()) {
+    return BStateElement();
+  }
+  auto statusor = proc()->AppendUnreadStateElement(name, initial_value,
+                                                   non_synthesizable, loc);
+  if (!statusor.ok()) {
+    SetError(statusor.status().message(), loc);
+    return BStateElement();
+  }
+  state_elements_.push_back(BStateElement(*statusor, this));
+  return state_elements_.back();
+}
+
+BValue ProcBuilder::StateRead(BStateElement state_element,
+                              std::optional<BValue> predicate,
+                              std::optional<std::string> label,
+                              const SourceInfo& loc) {
   if (ErrorPending()) {
     return BValue();
   }
+  if (!state_element.valid()) {
+    return BValue();
+  }
+  if (state_element.builder() != nullptr && state_element.builder() != this) {
+    return SetError(
+        absl::StrFormat("State element '%s' belongs to a different builder.",
+                        state_element.state_element()->name()),
+        loc);
+  }
+  absl::StatusOr<xls::StateRead*> state_read = proc()->AddStateRead(
+      state_element.state_element(),
+      predicate.has_value() ? std::make_optional(predicate->node())
+                            : std::nullopt,
+      label, loc);
+  if (!state_read.ok()) {
+    return SetError(absl::StrFormat("Unable to add state read: %s",
+                                    state_read.status().message()),
+                    loc);
+  }
+  return CreateBValue(*state_read, loc);
+}
+
+BValue ProcBuilder::Param(std::string_view name, Type* type,
+                          const SourceInfo& loc) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  return SetError("Use StateElement to add state parameters to procs", loc);
+}
+
+BuilderBase::BuilderBase(std::unique_ptr<FunctionBase> function,
+                         bool should_verify)
+    : function_(std::move(function)),
+      error_pending_(false),
+      should_verify_(should_verify) {}
+
+BuilderBase::~BuilderBase() = default;
+
+Package* BuilderBase::package() const { return function_->package(); }
+
+BValue BuilderBase::AddArithOp(Op op, BValue lhs, BValue rhs,
+                               std::optional<int64_t> result_width,
+                               const SourceInfo& loc, std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  CHECK_EQ(lhs.builder(), rhs.builder());
   if (!lhs.GetType()->IsBits() || !rhs.GetType()->IsBits()) {
     return SetError(
-        StrFormat("Arithmetic arguments must be of Bits type; is: %s and %s",
-                  lhs.GetType()->ToString(), rhs.GetType()->ToString()),
+        absl::StrFormat(
+            "Arithmetic arguments must be of Bits type; is: %s and %s",
+            lhs.GetType()->ToString(), rhs.GetType()->ToString()),
         loc);
   }
   int64_t width;
@@ -997,9 +1779,10 @@ BValue BuilderBase::AddArithOp(Op op, BValue lhs, BValue rhs,
   } else {
     if (lhs.BitCountOrDie() != rhs.BitCountOrDie()) {
       return SetError(
-          StrFormat("Arguments of arithmetic operation must be same width if "
-                    "result width is not specified; is: %s and %s",
-                    lhs.GetType()->ToString(), rhs.GetType()->ToString()),
+          absl::StrFormat(
+              "Arguments of arithmetic operation must be same width if "
+              "result width is not specified; is: %s and %s",
+              lhs.GetType()->ToString(), rhs.GetType()->ToString()),
           loc);
     }
     width = lhs.BitCountOrDie();
@@ -1007,60 +1790,91 @@ BValue BuilderBase::AddArithOp(Op op, BValue lhs, BValue rhs,
   return AddNode<ArithOp>(loc, lhs.node(), rhs.node(), width, op, name);
 }
 
-BValue BuilderBase::AddUnOp(Op op, BValue x, absl::optional<SourceLocation> loc,
-                            absl::string_view name) {
-  XLS_CHECK_EQ(this, x.builder());
+BValue BuilderBase::AddPartialProductOp(Op op, BValue lhs, BValue rhs,
+                                        std::optional<int64_t> result_width,
+                                        const SourceInfo& loc,
+                                        std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
-  if (!IsOpClass<UnOp>(op)) {
+  CHECK_EQ(lhs.builder(), rhs.builder());
+  if (!lhs.GetType()->IsBits() || !rhs.GetType()->IsBits()) {
     return SetError(
-        StrFormat("Op %s is not a operation of class UnOp", OpToString(op)),
+        absl::StrFormat(
+            "Arithmetic arguments must be of Bits type; is: %s and %s",
+            lhs.GetType()->ToString(), rhs.GetType()->ToString()),
         loc);
+  }
+  int64_t width;
+  if (result_width.has_value()) {
+    width = *result_width;
+  } else {
+    if (lhs.BitCountOrDie() != rhs.BitCountOrDie()) {
+      return SetError(
+          absl::StrFormat(
+              "Arguments of arithmetic operation must be same width if "
+              "result width is not specified; is: %s and %s",
+              lhs.GetType()->ToString(), rhs.GetType()->ToString()),
+          loc);
+    }
+    width = lhs.BitCountOrDie();
+  }
+  return AddNode<PartialProductOp>(loc, lhs.node(), rhs.node(), width, op,
+                                   name);
+}
+
+BValue BuilderBase::AddUnOp(Op op, BValue x, const SourceInfo& loc,
+                            std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  CHECK_EQ(this, x.builder());
+  if (!IsOpClass<UnOp>(op)) {
+    return SetError(absl::StrFormat("Op %s is not a operation of class UnOp",
+                                    OpToString(op)),
+                    loc);
   }
   return AddNode<UnOp>(loc, x.node(), op, name);
 }
 
 BValue BuilderBase::AddBinOp(Op op, BValue lhs, BValue rhs,
-                             absl::optional<SourceLocation> loc,
-                             absl::string_view name) {
-  XLS_CHECK_EQ(lhs.builder(), rhs.builder());
+                             const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
+  CHECK_EQ(lhs.builder(), rhs.builder());
   if (!IsOpClass<BinOp>(op)) {
-    return SetError(
-        StrFormat("Op %s is not a operation of class BinOp", OpToString(op)),
-        loc);
+    return SetError(absl::StrFormat("Op %s is not a operation of class BinOp",
+                                    OpToString(op)),
+                    loc);
   }
   return AddNode<BinOp>(loc, lhs.node(), rhs.node(), op, name);
 }
 
 BValue BuilderBase::AddCompareOp(Op op, BValue lhs, BValue rhs,
-                                 absl::optional<SourceLocation> loc,
-                                 absl::string_view name) {
-  XLS_CHECK_EQ(lhs.builder(), rhs.builder());
+                                 const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
+  CHECK_EQ(lhs.builder(), rhs.builder());
   if (!IsOpClass<CompareOp>(op)) {
-    return SetError(StrFormat("Op %s is not a operation of class CompareOp",
-                              OpToString(op)),
-                    loc);
+    return SetError(
+        absl::StrFormat("Op %s is not a operation of class CompareOp",
+                        OpToString(op)),
+        loc);
   }
   return AddNode<CompareOp>(loc, lhs.node(), rhs.node(), op, name);
 }
 
 BValue BuilderBase::AddNaryOp(Op op, absl::Span<const BValue> args,
-                              absl::optional<SourceLocation> loc,
-                              absl::string_view name) {
+                              const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   if (!IsOpClass<NaryOp>(op)) {
-    return SetError(
-        StrFormat("Op %s is not a operation of class NaryOp", OpToString(op)),
-        loc);
+    return SetError(absl::StrFormat("Op %s is not a operation of class NaryOp",
+                                    OpToString(op)),
+                    loc);
   }
   std::vector<Node*> nodes;
   for (const BValue& bvalue : args) {
@@ -1070,167 +1884,405 @@ BValue BuilderBase::AddNaryOp(Op op, absl::Span<const BValue> args,
 }
 
 BValue BuilderBase::AddBitwiseReductionOp(Op op, BValue arg,
-                                          absl::optional<SourceLocation> loc,
-                                          absl::string_view name) {
-  XLS_CHECK_EQ(this, arg.builder());
+                                          const SourceInfo& loc,
+                                          std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
+  CHECK_EQ(this, arg.builder());
   return AddNode<BitwiseReductionOp>(loc, arg.node(), op, name);
 }
 
 BValue BuilderBase::Assert(BValue token, BValue condition,
-                           absl::string_view message,
-                           absl::optional<std::string> label,
-                           absl::optional<SourceLocation> loc,
-                           absl::string_view name) {
+                           std::string_view message,
+                           std::optional<std::string> label,
+                           const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   if (!token.GetType()->IsToken()) {
     return SetError(
-        StrFormat("First operand of assert must be of token type; is: %s",
-                  token.GetType()->ToString()),
+        absl::StrFormat("First operand of assert must be of token type; is: %s",
+                        token.GetType()->ToString()),
         loc);
   }
   if (!condition.GetType()->IsBits() ||
       condition.GetType()->AsBitsOrDie()->bit_count() != 1) {
-    return SetError(StrFormat("Condition operand of assert must be of bits "
-                              "type of width 1; is: %s",
-                              condition.GetType()->ToString()),
-                    loc);
+    return SetError(
+        absl::StrFormat("Condition operand of assert must be of bits "
+                        "type of width 1; is: %s",
+                        condition.GetType()->ToString()),
+        loc);
   }
   return AddNode<xls::Assert>(loc, token.node(), condition.node(), message,
-                              label, name);
+                              label, /*original_label=*/std::nullopt, name);
 }
 
-BValue ProcBuilder::Receive(Channel* channel, BValue token,
-                            absl::optional<SourceLocation> loc,
-                            absl::string_view name) {
+BValue BuilderBase::Trace(BValue token, BValue condition,
+                          absl::Span<const BValue> args,
+                          absl::Span<const FormatStep> format,
+                          int64_t verbosity, const SourceInfo& loc,
+                          std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
   if (!token.GetType()->IsToken()) {
     return SetError(
-        StrFormat("Token operand of receive must be of token type; is: %s",
-                  token.GetType()->ToString()),
+        absl::StrFormat("First operand of trace must be of token type; is: %s",
+                        token.GetType()->ToString()),
         loc);
   }
-  return AddNode<xls::Receive>(loc, token.node(), channel->id(), name);
+  if (!condition.GetType()->IsBits() ||
+      condition.GetType()->AsBitsOrDie()->bit_count() != 1) {
+    return SetError(
+        absl::StrFormat("Condition operand of trace must be of bits "
+                        "type of width 1; is: %s",
+                        condition.GetType()->ToString()),
+        loc);
+  }
+
+  int64_t expected_operands = OperandsExpectedByFormat(format);
+  if (args.size() != expected_operands) {
+    return SetError(
+        absl::StrFormat(
+            "Trace node expects %d data operands, but %d were supplied",
+            expected_operands, args.size()),
+        loc);
+  }
+
+  std::vector<Node*> arg_nodes;
+  for (const BValue& arg : args) {
+    arg_nodes.push_back(arg.node());
+  }
+
+  if (verbosity < 0) {
+    return SetError(
+        absl::StrFormat("Trace verbosity must be >= 0, got %d", verbosity),
+        loc);
+  }
+
+  return AddNode<xls::Trace>(loc, token.node(), condition.node(), arg_nodes,
+                             format, verbosity, name);
 }
 
-BValue ProcBuilder::ReceiveIf(Channel* channel, BValue token, BValue pred,
-                              absl::optional<SourceLocation> loc,
-                              absl::string_view name) {
+BValue BuilderBase::Trace(BValue token, BValue condition,
+                          absl::Span<const BValue> args,
+                          std::string_view format_string, int64_t verbosity,
+                          const SourceInfo& loc, std::string_view name) {
+  auto parse_status = ParseFormatString(format_string);
+
+  if (!parse_status.ok()) {
+    return SetError(parse_status.status().message(), loc);
+  }
+
+  return Trace(token, condition, args, parse_status.value(), verbosity, loc,
+               name);
+}
+
+BValue BuilderBase::Cover(BValue condition, std::string_view label,
+                          const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
-  if (!token.GetType()->IsToken()) {
+  if (!condition.GetType()->IsBits() ||
+      condition.GetType()->AsBitsOrDie()->bit_count() != 1) {
     return SetError(
-        StrFormat("Token operand of receive must be of token type; is: %s",
-                  token.GetType()->ToString()),
+        absl::StrFormat("Condition operand of cover must be of bits "
+                        "type of width 1; is: %s",
+                        condition.GetType()->ToString()),
         loc);
   }
-  if (!pred.GetType()->IsBits() ||
-      pred.GetType()->AsBitsOrDie()->bit_count() != 1) {
-    return SetError(StrFormat("Predicate operand of receive_if must be of bits "
-                              "type of width 1; is: %s",
-                              pred.GetType()->ToString()),
-                    loc);
+  if (label.empty()) {
+    return SetError("The label of a cover node cannot be empty.", loc);
   }
-  return AddNode<xls::ReceiveIf>(loc, token.node(), pred.node(), channel->id(),
-                                 name);
+  return AddNode<xls::Cover>(loc, condition.node(), label,
+                             /*original_label=*/std::nullopt, name);
 }
 
-BValue ProcBuilder::Send(Channel* channel, BValue token, BValue data,
-                         absl::optional<SourceLocation> loc,
-                         absl::string_view name) {
+BValue BuilderBase::Gate(BValue condition, BValue data, GateType gate_type,
+                         const SourceInfo& loc, std::string_view name) {
   if (ErrorPending()) {
     return BValue();
   }
-  if (!token.GetType()->IsToken()) {
+  if (!condition.GetType()->IsBits() ||
+      condition.GetType()->AsBitsOrDie()->bit_count() != 1) {
     return SetError(
-        StrFormat("Token operand of send must be of token type; is: %s",
-                  token.GetType()->ToString()),
+        absl::StrFormat(
+            "Condition operand of gate must be of bits type of width 1; is: %s",
+            condition.GetType()->ToString()),
         loc);
   }
-  return AddNode<xls::Send>(loc, token.node(), data.node(), channel->id(),
+  return AddNode<xls::Gate>(loc, condition.node(), data.node(), gate_type,
                             name);
 }
 
-BValue ProcBuilder::SendIf(Channel* channel, BValue token, BValue pred,
-                           BValue data, absl::optional<SourceLocation> loc,
-                           absl::string_view name) {
-  if (ErrorPending()) {
-    return BValue();
-  }
-  if (!token.GetType()->IsToken()) {
-    return SetError(
-        StrFormat("Token operand of send must be of token type; is: %s",
-                  token.GetType()->ToString()),
-        loc);
-  }
-  if (!pred.GetType()->IsBits() ||
-      pred.GetType()->AsBitsOrDie()->bit_count() != 1) {
-    return SetError(StrFormat("Predicate operand of send_if must be of bits "
-                              "type of width 1; is: %s",
-                              pred.GetType()->ToString()),
-                    loc);
-  }
-  return AddNode<xls::SendIf>(loc, token.node(), pred.node(), data.node(),
-                              channel->id(), name);
+BValue TokenlessProcBuilder::MinDelay(int64_t delay, const SourceInfo& loc,
+                                      std::string_view name) {
+  last_token_ = ProcBuilder::MinDelay(last_token_, delay, loc, name);
+  return last_token_;
 }
 
-BValue TokenlessProcBuilder::Receive(Channel* channel,
-                                     absl::optional<SourceLocation> loc,
-                                     absl::string_view name) {
-  BValue rcv = ProcBuilder::Receive(channel, GetTokenParam(), loc, name);
-  tokens_.push_back(TupleIndex(rcv, 0));
+BValue TokenlessProcBuilder::Receive(BReceiveChannelRef channel,
+                                     const SourceInfo& loc,
+                                     std::string_view name) {
+  BValue rcv = ProcBuilder::Receive(channel, last_token_, loc, name);
+  last_token_ = TupleIndex(rcv, 0);
   return TupleIndex(rcv, 1);
 }
 
-BValue TokenlessProcBuilder::ReceiveIf(Channel* channel, BValue pred,
-                                       absl::optional<SourceLocation> loc,
-                                       absl::string_view name) {
-  BValue rcv_if =
-      ProcBuilder::ReceiveIf(channel, GetTokenParam(), pred, loc, name);
-  tokens_.push_back(TupleIndex(rcv_if, 0));
+std::pair<BValue, BValue> TokenlessProcBuilder::ReceiveNonBlocking(
+    BReceiveChannelRef channel, const SourceInfo& loc, std::string_view name) {
+  BValue rcv = ProcBuilder::ReceiveNonBlocking(channel, last_token_, loc, name);
+  last_token_ = TupleIndex(rcv, 0, loc);
+  return {TupleIndex(rcv, 1), TupleIndex(rcv, 2)};
+}
+
+BValue TokenlessProcBuilder::ReceiveIf(BReceiveChannelRef channel, BValue pred,
+                                       const SourceInfo& loc,
+                                       std::string_view name) {
+  BValue rcv_if = ProcBuilder::ReceiveIf(channel, last_token_, pred, loc, name);
+  last_token_ = TupleIndex(rcv_if, 0);
   return TupleIndex(rcv_if, 1);
 }
 
-BValue TokenlessProcBuilder::Send(Channel* channel, BValue data,
-                                  absl::optional<SourceLocation> loc,
-                                  absl::string_view name) {
-  BValue send = ProcBuilder::Send(channel, GetTokenParam(), data, loc, name);
-  tokens_.push_back(send);
-  return send;
+std::pair<BValue, BValue> TokenlessProcBuilder::ReceiveIfNonBlocking(
+    BReceiveChannelRef channel, BValue pred, const SourceInfo& loc,
+    std::string_view name) {
+  BValue rcv =
+      ProcBuilder::ReceiveIfNonBlocking(channel, last_token_, pred, loc, name);
+  last_token_ = TupleIndex(rcv, 0, loc);
+  return {TupleIndex(rcv, 1), TupleIndex(rcv, 2)};
 }
 
-BValue TokenlessProcBuilder::SendIf(Channel* channel, BValue pred, BValue data,
-                                    absl::optional<SourceLocation> loc,
-                                    absl::string_view name) {
-  BValue send_if =
-      ProcBuilder::SendIf(channel, GetTokenParam(), pred, data, loc, name);
-  tokens_.push_back(send_if);
-  return send_if;
+BValue TokenlessProcBuilder::Send(BSendChannelRef channel, BValue data,
+                                  const SourceInfo& loc,
+                                  std::string_view name) {
+  last_token_ = ProcBuilder::Send(channel, last_token_, data, loc, name);
+  return last_token_;
 }
 
-BValue TokenlessProcBuilder::Assert(BValue condition, absl::string_view message,
-                                    absl::optional<std::string> label,
-                                    absl::optional<SourceLocation> loc,
-                                    absl::string_view name) {
-  BValue asrt = BuilderBase::Assert(GetTokenParam(), condition, message, label,
-                                    loc, name);
-  tokens_.push_back(asrt);
-  return asrt;
+BValue TokenlessProcBuilder::SendIf(BSendChannelRef channel, BValue pred,
+                                    BValue data, const SourceInfo& loc,
+                                    std::string_view name) {
+  last_token_ =
+      ProcBuilder::SendIf(channel, last_token_, pred, data, loc, name);
+  return last_token_;
 }
 
-absl::StatusOr<Proc*> TokenlessProcBuilder::Build(BValue next_state) {
-  if (tokens_.empty()) {
-    return ProcBuilder::Build(GetTokenParam(), next_state);
-  } else {
-    return ProcBuilder::Build(AfterAll(tokens_), next_state);
+BValue TokenlessProcBuilder::Assert(BValue condition, std::string_view message,
+                                    std::optional<std::string> label,
+                                    const SourceInfo& loc,
+                                    std::string_view name) {
+  last_token_ =
+      BuilderBase::Assert(last_token_, condition, message, label, loc, name);
+  return last_token_;
+}
+
+BlockBuilder::BlockBuilder(std::string_view name, Package* package,
+                           bool should_verify)
+    : BuilderBase(std::make_unique<Block>(std::string(name), package),
+                  should_verify) {}
+BlockBuilder::BlockBuilder(std::string_view name, Package* package,
+                           ScheduledBlockTag tag, bool should_verify)
+    : BuilderBase(std::make_unique<ScheduledBlock>(name, package),
+                  should_verify) {}
+void BlockBuilder::AddClockPort(std::string_view name) {
+  if (ErrorPending()) {
+    return;
   }
+  absl::Status status = block()->AddClockPort(name);
+  if (!status.ok()) {
+    SetError(status.message(), SourceInfo());
+  }
+}
+
+BValue BlockBuilder::Param(std::string_view name, Type* type,
+                           const SourceInfo& loc) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  return SetError("Cannot add parameters to blocks", loc);
+}
+
+BValue BlockBuilder::ResetPort(std::string_view name,
+                               ResetBehavior reset_behavior,
+                               const SourceInfo& loc) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  absl::StatusOr<xls::InputPort*> port_status =
+      block()->AddResetPort(name, reset_behavior);
+  if (!port_status.ok()) {
+    return SetError(absl::StrFormat("Unable to add reset port to block: %s",
+                                    port_status.status().message()),
+                    SourceInfo());
+  }
+  return CreateBValue(port_status.value(), SourceInfo());
+}
+
+BValue BlockBuilder::InputPort(std::string_view name, Type* type,
+                               const SourceInfo& loc) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  absl::StatusOr<xls::InputPort*> port_status =
+      block()->AddInputPort(name, type, loc);
+  if (!port_status.ok()) {
+    return SetError(absl::StrFormat("Unable to add port to block: %s",
+                                    port_status.status().message()),
+                    loc);
+  }
+  return CreateBValue(port_status.value(), loc);
+}
+
+BValue BlockBuilder::OutputPort(std::string_view name, BValue operand,
+                                const SourceInfo& loc) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  absl::StatusOr<xls::OutputPort*> port_status =
+      block()->AddOutputPort(name, operand.node(), loc);
+  if (!port_status.ok()) {
+    return SetError(absl::StrFormat("Unable to add port to block: %s",
+                                    port_status.status().message()),
+                    loc);
+  }
+  return CreateBValue(port_status.value(), loc);
+}
+
+BValue BlockBuilder::FloppedOutputPort(std::string_view name, BValue operand,
+                                       BValue reset_signal, Value reset_value,
+                                       const SourceInfo& loc) {
+  return OutputPort(
+      name,
+      InsertRegister(absl::StrCat(name, "_reg"), operand, reset_signal,
+                     reset_value, std::nullopt, loc),
+      loc);
+}
+BValue BlockBuilder::FloppedOutputPort(std::string_view name, BValue operand,
+                                       const SourceInfo& loc) {
+  return OutputPort(
+      name,
+      InsertRegister(absl::StrCat(name, "_reg"), operand, std::nullopt, loc),
+      loc);
+}
+
+BValue BlockBuilder::RegisterRead(Register* reg, const SourceInfo& loc,
+                                  std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!block()->IsOwned(reg)) {
+    return SetError("Register is defined in different block", loc);
+  }
+  return AddNode<xls::RegisterRead>(loc, reg, name);
+}
+
+BValue BlockBuilder::RegisterWrite(Register* reg, BValue data,
+                                   std::optional<BValue> load_enable,
+                                   std::optional<BValue> reset,
+                                   const SourceInfo& loc,
+                                   std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!block()->IsOwned(reg)) {
+    return SetError("Register is defined in different block", loc);
+  }
+  return AddNode<xls::RegisterWrite>(
+      loc, data.node(),
+      load_enable.has_value() ? std::optional<Node*>(load_enable->node())
+                              : std::nullopt,
+      reset.has_value() ? std::optional<Node*>(reset->node()) : std::nullopt,
+      reg, name);
+}
+
+BValue BlockBuilder::InsertRegister(std::string_view name, BValue data,
+                                    std::optional<BValue> load_enable,
+                                    const SourceInfo& loc) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  absl::StatusOr<Register*> reg_status =
+      block()->AddRegister(name, data.GetType());
+  if (!reg_status.ok()) {
+    return SetError(absl::StrFormat("Cannot add register: %s",
+                                    reg_status.status().message()),
+                    loc);
+  }
+  Register* reg = reg_status.value();
+  RegisterWrite(reg, data, load_enable, /*reset=*/std::nullopt, loc,
+                absl::StrFormat("%s_write", reg->name()));
+  return RegisterRead(reg, loc, reg->name());
+}
+
+BValue BlockBuilder::InsertRegister(std::string_view name, BValue data,
+                                    BValue reset_signal, Value reset_value,
+                                    std::optional<BValue> load_enable,
+                                    const SourceInfo& loc) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  absl::StatusOr<Register*> reg_status =
+      block()->AddRegister(name, data.GetType(), std::move(reset_value));
+  if (!reg_status.ok()) {
+    return SetError(absl::StrFormat("Cannot add register: %s",
+                                    reg_status.status().message()),
+                    loc);
+  }
+  Register* reg = reg_status.value();
+  RegisterWrite(reg, data, load_enable, reset_signal, loc,
+                absl::StrFormat("%s_write", reg->name()));
+  return RegisterRead(reg, loc, reg->name());
+}
+
+absl::StatusOr<Block*> BlockBuilder::Build() {
+  if (ErrorPending()) {
+    return GetError();
+  }
+
+  // down_cast the FunctionBase* to Block*. We know this is safe because
+  // BlockBuilder constructs and passes a Block to BuilderBase constructor so
+  // function_ is always a Block.
+  Block* block = package()->AddBlock(
+      absl::WrapUnique(absl::down_cast<Block*>(function_.release())));
+  if (should_verify_) {
+    XLS_RETURN_IF_ERROR(VerifyBlock(block));
+  }
+  return block;
+}
+
+BValue BlockBuilder::InstantiationInput(Instantiation* instantiation,
+                                        std::string_view port_name, BValue data,
+                                        const SourceInfo& loc,
+                                        std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!block()->IsOwned(instantiation)) {
+    return SetError(
+        absl::StrFormat("Instantiation `%s` (%p) is defined in different block",
+                        instantiation->name(), instantiation),
+        loc);
+  }
+  return AddNode<xls::InstantiationInput>(loc, data.node(), instantiation,
+                                          port_name, name);
+}
+
+BValue BlockBuilder::InstantiationOutput(Instantiation* instantiation,
+                                         std::string_view port_name,
+                                         const SourceInfo& loc,
+                                         std::string_view name) {
+  if (ErrorPending()) {
+    return BValue();
+  }
+  if (!block()->IsOwned(instantiation)) {
+    return SetError(
+        absl::StrFormat("Instantiation `%s` (%p) is defined in different block",
+                        instantiation->name(), instantiation),
+        loc);
+  }
+  return AddNode<xls::InstantiationOutput>(loc, instantiation, port_name, name);
 }
 
 }  // namespace xls

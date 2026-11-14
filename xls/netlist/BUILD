@@ -12,10 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# cc_proto_library is used in this file
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//xls/build_rules:py_oss_defs.bzl", "pytype_strict_contrib_test")
 
 package(
+    default_applicable_licenses = ["//:license"],
     default_visibility = ["//xls:xls_internal"],
+    features = [
+        "layering_check",
+        "parse_headers",
+    ],
     licenses = ["notice"],  # Apache 2.0
 )
 
@@ -23,19 +34,22 @@ exports_files(["fake_cell_library.textproto"])
 
 cc_library(
     name = "netlist",
-    srcs = ["netlist.cc"],
-    hdrs = ["netlist.h"],
+    hdrs = [
+        "netlist.h",
+    ],
+    visibility = ["//xls:xls_users"],
     deps = [
         ":cell_library",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/container:flat_hash_set",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
         "//xls/common:bits_util",
-        "//xls/common/logging",
         "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:optional_ref",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -46,37 +60,40 @@ cc_library(
     hdrs = ["fake_cell_library.h"],
     data = [":fake_cell_library.textproto"],
     deps = [
-        ":netlist",
+        ":cell_library",
         ":netlist_cc_proto",
-        "@com_google_absl//absl/status:statusor",
         "//xls/common/file:filesystem",
         "//xls/common/file:get_runfile_path",
-        "//xls/common/logging",
         "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/status:statusor",
     ],
 )
 
 cc_library(
     name = "interpreter",
-    srcs = ["interpreter.cc"],
-    hdrs = ["interpreter.h"],
+    hdrs = [
+        "interpreter.h",
+    ],
+    visibility = ["//xls:xls_users"],
     deps = [
+        ":cell_library",
         ":function_parser",
         ":netlist",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/flags:flag",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
-        "//xls/codegen:flattening",
-        "//xls/common/logging",
+        "//xls/common:thread",
         "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
-        "//xls/ir:bits",
-        "//xls/ir:bits_ops",
-        "//xls/ir:type",
-        "//xls/ir:value",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/types:optional_ref",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -84,16 +101,20 @@ cc_test(
     name = "interpreter_test",
     srcs = ["interpreter_test.cc"],
     deps = [
+        ":cell_library",
         ":fake_cell_library",
+        ":function_extractor",
         ":interpreter",
+        ":lib_parser",
         ":netlist",
+        ":netlist_cc_proto",
         ":netlist_parser",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/types:optional",
-        "@com_google_absl//absl/types:span",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/time",
+        "@googletest//:gtest",
     ],
 )
 
@@ -101,19 +122,25 @@ cc_library(
     name = "netlist_parser",
     srcs = ["netlist_parser.cc"],
     hdrs = ["netlist_parser.h"],
+    visibility = ["//xls:xls_users"],
     deps = [
+        ":cell_library",
         ":netlist",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
-        "@com_google_absl//absl/types:variant",
         "//xls/common:string_to_int",
-        "//xls/common/logging",
         "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
+        "//xls/data_structures:inline_bitmap",
         "//xls/ir:bits",
-        "@com_github_google_re2//:re2",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:optional_ref",
+        "@re2",
     ],
 )
 
@@ -121,13 +148,18 @@ cc_test(
     name = "netlist_parser_test",
     srcs = ["netlist_parser_test.cc"],
     deps = [
+        ":cell_library",
         ":fake_cell_library",
+        ":netlist",
         ":netlist_parser",
-        "@com_google_absl//absl/memory",
-        "@com_google_absl//absl/strings",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
     ],
 )
 
@@ -145,16 +177,18 @@ cc_library(
     name = "cell_library",
     srcs = ["cell_library.cc"],
     hdrs = ["cell_library.h"],
+    visibility = ["//xls:xls_users"],
     deps = [
         ":netlist_cc_proto",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/container:flat_hash_set",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings:str_format",
         "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
-        "@com_google_protobuf//:protobuf",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -164,11 +198,13 @@ cc_test(
     deps = [
         ":cell_library",
         ":netlist_cc_proto",
-        "@com_google_absl//absl/memory",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
-        "@com_google_protobuf//:protobuf",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@googletest//:gtest",
+        "@protobuf",
+        "@protobuf//:differencer",
     ],
 )
 
@@ -176,15 +212,19 @@ cc_binary(
     name = "parse_netlist_main",
     srcs = ["parse_netlist_main.cc"],
     deps = [
+        ":cell_library",
         ":find_logic_clouds",
+        ":netlist",
+        ":netlist_cc_proto",
         ":netlist_parser",
-        "@com_google_absl//absl/flags:flag",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/strings:str_format",
+        "//xls/common:exit_status",
         "//xls/common:init_xls",
         "//xls/common/file:filesystem",
-        "//xls/common/logging",
         "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings:str_format",
     ],
 )
 
@@ -201,11 +241,14 @@ cc_library(
     srcs = ["find_logic_clouds.cc"],
     hdrs = ["find_logic_clouds.h"],
     deps = [
+        ":cell_library",
         ":netlist",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
-        "//xls/common/logging",
-        "//xls/data_structures:union_find_map",
+        "//xls/data_structures:union_find",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -213,13 +256,14 @@ cc_test(
     name = "find_logic_clouds_test",
     srcs = ["find_logic_clouds_test.cc"],
     deps = [
+        ":cell_library",
         ":fake_cell_library",
         ":find_logic_clouds",
+        ":netlist",
         ":netlist_parser",
-        "@com_google_absl//absl/memory",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -228,13 +272,16 @@ cc_library(
     srcs = ["logical_effort.cc"],
     hdrs = ["logical_effort.h"],
     deps = [
+        ":cell_library",
         ":netlist",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings:str_format",
         "//xls/common:math_util",
-        "//xls/common/logging",
         "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -242,13 +289,14 @@ cc_test(
     name = "logical_effort_test",
     srcs = ["logical_effort_test.cc"],
     deps = [
+        ":cell_library",
         ":fake_cell_library",
         ":logical_effort",
+        ":netlist",
         ":netlist_parser",
-        "@com_google_absl//absl/memory",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
     ],
 )
 
@@ -256,15 +304,18 @@ cc_library(
     name = "lib_parser",
     srcs = ["lib_parser.cc"],
     hdrs = ["lib_parser.h"],
+    visibility = ["//xls:xls_users"],
     deps = [
-        "@com_google_absl//absl/container:flat_hash_set",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
-        "@com_google_absl//absl/types:optional",
-        "//xls/common/logging",
         "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/container:inlined_vector",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:variant",
     ],
 )
 
@@ -273,10 +324,12 @@ cc_test(
     srcs = ["lib_parser_test.cc"],
     deps = [
         ":lib_parser",
-        "@com_google_absl//absl/status:statusor",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest",
     ],
 )
 
@@ -284,17 +337,18 @@ cc_library(
     name = "function_extractor",
     srcs = ["function_extractor.cc"],
     hdrs = ["function_extractor.h"],
+    visibility = ["//xls:xls_users"],
     deps = [
         ":lib_parser",
         ":netlist_cc_proto",
-        "@com_google_absl//absl/container:flat_hash_set",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/types:variant",
-        "//xls/common/logging",
         "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:variant",
     ],
 )
 
@@ -302,17 +356,18 @@ cc_binary(
     name = "function_extractor_main",
     srcs = ["function_extractor_main.cc"],
     deps = [
-        ":cell_library",
         ":function_extractor",
+        ":lib_parser",
         ":netlist_cc_proto",
-        "@com_google_absl//absl/flags:flag",
-        "@com_google_absl//absl/status",
+        "//xls/common:exit_status",
         "//xls/common:init_xls",
         "//xls/common/file:filesystem",
-        "//xls/common/logging",
         "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
-        "@com_google_protobuf//:protobuf",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@protobuf",
     ],
 )
 
@@ -323,10 +378,10 @@ cc_test(
         ":function_extractor",
         ":lib_parser",
         ":netlist_cc_proto",
-        "@com_google_absl//absl/container:flat_hash_set",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@googletest//:gtest",
     ],
 )
 
@@ -335,13 +390,13 @@ cc_library(
     srcs = ["function_parser.cc"],
     hdrs = ["function_parser.h"],
     deps = [
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
-        "@com_google_absl//absl/types:optional",
-        "//xls/common/logging",
         "//xls/common/status:ret_check",
+        "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
     ],
 )
 
@@ -352,6 +407,77 @@ cc_test(
         ":function_parser",
         "//xls/common:xls_gunit_main",
         "//xls/common/status:matchers",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_binary(
+    name = "netlist_interpreter_main",
+    srcs = ["netlist_interpreter_main.cc"],
+    deps = [
+        ":cell_library",
+        ":function_extractor",
+        ":interpreter",
+        ":lib_parser",
+        ":netlist",
+        ":netlist_cc_proto",
+        ":netlist_parser",
+        "//xls/common:exit_status",
+        "//xls/common:init_xls",
+        "//xls/common/file:filesystem",
+        "//xls/common/status:ret_check",
+        "//xls/common/status:status_macros",
+        "//xls/ir",
+        "//xls/ir:bits",
+        "//xls/ir:bits_ops",
+        "//xls/ir:format_preference",
+        "//xls/ir:ir_parser",
+        "//xls/ir:type",
+        "//xls/ir:value",
+        "//xls/ir:value_flattening",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+netlist_interpreter_main_test_data = [
+    "testdata/isqrt.v",
+    "testdata/ifte.v",
+    "testdata/simple_cell.lib",
+]
+
+pytype_strict_contrib_test(
+    name = "netlist_interpreter_main_test",
+    srcs = ["netlist_interpreter_main_test.py"],
+    data = glob(netlist_interpreter_main_test_data) + [
+        ":netlist_interpreter_main",
+    ],
+    main = "netlist_interpreter_main_test.py",
+    deps = [
+        "//xls/common:runfiles",
+        "//xls/common:test_base",
+    ],
+)
+
+cc_binary(
+    name = "cell_library_extract_formula",
+    srcs = ["cell_library_extract_formula.cc"],
+    deps = [
+        ":lib_parser",
+        "//xls/common:exit_status",
+        "//xls/common:init_xls",
+        "//xls/common/file:filesystem",
+        "//xls/common/status:status_macros",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/time",
     ],
 )

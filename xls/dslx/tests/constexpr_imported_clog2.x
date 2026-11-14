@@ -15,17 +15,13 @@
 // Applies a function in an imported module on a constant in another imported
 // module.
 
-import std
+import std;
 
-import xls.dslx.tests.constexpr
+import xls.dslx.tests.constexpr;
 
 const CONST_1_CLOG2 = std::clog2(constexpr::CONST_1);
 
-fn main() -> u32 {
-  CONST_1_CLOG2
-}
+fn main() -> u32 { CONST_1_CLOG2 }
 
-#![test]
-fn test_main() {
-  assert_eq(u32:10, CONST_1_CLOG2)
-}
+#[test]
+fn test_main() { assert_eq(u32:10, CONST_1_CLOG2) }

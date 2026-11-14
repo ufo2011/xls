@@ -14,21 +14,33 @@
 
 #include "xls/passes/constant_folding_pass.h"
 
+#include <utility>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "xls/common/fuzzing/fuzztest.h"
 #include "absl/status/statusor.h"
 #include "xls/common/status/matchers.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/fuzzer/ir_fuzzer/ir_fuzz_domain.h"
+#include "xls/fuzzer/ir_fuzzer/ir_fuzz_test_library.h"
+#include "xls/ir/bits.h"
 #include "xls/ir/function.h"
+#include "xls/ir/ir_matcher.h"
 #include "xls/ir/ir_test_base.h"
+#include "xls/ir/nodes.h"
 #include "xls/ir/package.h"
 #include "xls/ir/value.h"
 #include "xls/passes/dce_pass.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/pass_base.h"
+
+namespace m = ::xls::op_matchers;
 
 namespace xls {
 namespace {
 
-using status_testing::IsOkAndHolds;
+using ::absl_testing::IsOkAndHolds;
 
 class ConstantFoldingPassTest : public IrTestBase {
  protected:
@@ -36,12 +48,15 @@ class ConstantFoldingPassTest : public IrTestBase {
 
   absl::StatusOr<bool> Run(Function* f) {
     PassResults results;
-    XLS_ASSIGN_OR_RETURN(bool changed, ConstantFoldingPass().RunOnFunctionBase(
-                                           f, PassOptions(), &results));
+    OptimizationContext context;
+    XLS_ASSIGN_OR_RETURN(bool changed,
+                         ConstantFoldingPass().RunOnFunctionBase(
+                             f, OptimizationPassOptions(), &results, context));
     // Run dce to clean things up.
-    XLS_RETURN_IF_ERROR(DeadCodeEliminationPass()
-                            .RunOnFunctionBase(f, PassOptions(), &results)
-                            .status());
+    XLS_RETURN_IF_ERROR(
+        DeadCodeEliminationPass()
+            .RunOnFunctionBase(f, OptimizationPassOptions(), &results, context)
+            .status());
     // Return whether constant folding changed anything.
     return changed;
   }
@@ -99,13 +114,13 @@ fn body(x: bits[11], y: bits[11]) -> bits[11] {
   ret add.3: bits[11] = add(x, y)
 }
 
-fn main() -> bits[11] {
+top fn main() -> bits[11] {
   literal.1: bits[11] = literal(value=0)
   ret counted_for.2: bits[11] = counted_for(literal.1, trip_count=7, stride=1, body=body)
 }
 )"));
 
-  XLS_ASSERT_OK_AND_ASSIGN(Function * entry, p->EntryFunction());
+  XLS_ASSERT_OK_AND_ASSIGN(Function * entry, p->GetTopAsFunction());
   EXPECT_EQ(entry->node_count(), 2);
   EXPECT_THAT(Run(entry), IsOkAndHolds(true));
   EXPECT_EQ(entry->node_count(), 1);
@@ -113,6 +128,56 @@ fn main() -> bits[11] {
   EXPECT_EQ(entry->return_value()->As<Literal>()->value(),
             Value(UBits(21, 11)));
 }
+
+TEST_F(ConstantFoldingPassTest, EmptyTuple) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+     fn empty_tuple() -> () {
+        ret result: () = tuple()
+     }
+  )",
+                                                       p.get()));
+  EXPECT_THAT(f->return_value(), m::Tuple());
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(), m::Literal(Value::Tuple({})));
+}
+
+TEST_F(ConstantFoldingPassTest, GateOpFalse) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+     fn gate_op() -> bits[32] {
+        cond: bits[1] = literal(value=0)
+        data: bits[32] = literal(value=42)
+        ret result: bits[32] = gate(cond, data)
+     }
+  )",
+                                                       p.get()));
+  EXPECT_THAT(f->return_value(), m::Gate(m::Literal(), m::Literal()));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(), m::Literal(UBits(0, 32)));
+}
+
+TEST_F(ConstantFoldingPassTest, GateOpTrue) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+     fn gate_op() -> bits[32] {
+        cond: bits[1] = literal(value=1)
+        data: bits[32] = literal(value=42)
+        ret result: bits[32] = gate(cond, data)
+     }
+  )",
+                                                       p.get()));
+  EXPECT_THAT(f->return_value(), m::Gate(m::Literal(), m::Literal()));
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(), m::Literal(UBits(42, 32)));
+}
+
+void IrFuzzConstantFolding(FuzzPackageWithArgs fuzz_package_with_args) {
+  ConstantFoldingPass pass;
+  OptimizationPassChangesOutputs(std::move(fuzz_package_with_args), pass);
+}
+FUZZ_TEST(IrFuzzTest, IrFuzzConstantFolding)
+    .WithDomains(IrFuzzDomainWithArgs(/*arg_set_count=*/10));
 
 }  // namespace
 }  // namespace xls

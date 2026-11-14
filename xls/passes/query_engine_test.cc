@@ -14,27 +14,45 @@
 
 #include "xls/passes/query_engine.h"
 
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "absl/container/inlined_vector.h"
+#include "absl/log/log.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/string_view.h"
-#include "xls/common/logging/logging.h"
+#include "absl/strings/str_cat.h"
 #include "xls/common/status/matchers.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/data_structures/leaf_type_tree.h"
+#include "xls/ir/bits.h"
 #include "xls/ir/bits_ops.h"
+#include "xls/ir/format_preference.h"
 #include "xls/ir/function.h"
 #include "xls/ir/function_builder.h"
+#include "xls/ir/ir_annotator.h"
 #include "xls/ir/ir_test_base.h"
+#include "xls/ir/lsb_or_msb.h"
+#include "xls/ir/nodes.h"
 #include "xls/ir/package.h"
+#include "xls/ir/ternary.h"
 #include "xls/passes/bdd_query_engine.h"
-#include "xls/passes/ternary_evaluator.h"
+#include "xls/passes/forwarding_query_engine.h"
+#include "xls/passes/predicate_state.h"
 #include "xls/passes/ternary_query_engine.h"
 
 namespace xls {
 namespace {
 
-using status_testing::IsOkAndHolds;
+using ::absl_testing::IsOk;
+using ::absl_testing::IsOkAndHolds;
+using ::testing::Not;
 
 enum class QueryEngineType { kTernary, kBdd };
 
@@ -45,15 +63,25 @@ class QueryEngineTest : public IrTestBase,
  protected:
   absl::StatusOr<std::unique_ptr<QueryEngine>> GetEngine(Function* f) {
     if (GetParam() == QueryEngineType::kTernary) {
-      return TernaryQueryEngine::Run(f);
+      std::unique_ptr<TernaryQueryEngine> engine =
+          std::make_unique<TernaryQueryEngine>();
+      XLS_RETURN_IF_ERROR(engine->Populate(f).status());
+      return engine;
     }
-    return BddQueryEngine::Run(f);
+    if (GetParam() == QueryEngineType::kBdd) {
+      std::unique_ptr<BddQueryEngine> engine =
+          std::make_unique<BddQueryEngine>();
+      XLS_RETURN_IF_ERROR(engine->Populate(f).status());
+      return engine;
+    }
+    LOG(FATAL) << "Update QueryEngineTest::GetEngine to match QueryEngineType";
   }
 
   // Create a BValue with known bits equal to the given ternary vector. Created
   // using a param and AND/OR masks.
-  BValue MakeValueWithKnownBits(absl::string_view name,
-                                TernaryVector known_bits, FunctionBuilder* fb) {
+  BValue MakeValueWithKnownBits(std::string_view name,
+                                const TernaryVector& known_bits,
+                                FunctionBuilder* fb) {
     absl::InlinedVector<bool, 1> known_zeros;
     absl::InlinedVector<bool, 1> known_ones;
     for (TernaryValue value : known_bits) {
@@ -71,7 +99,7 @@ class QueryEngineTest : public IrTestBase,
   // input to the op is crafted to have known bits equal to the given
   // TernaryVector.
   absl::StatusOr<std::string> RunOnUnaryOp(
-      absl::string_view operand_known_bits,
+      std::string_view operand_known_bits,
       std::function<void(BValue, FunctionBuilder*)> make_op) {
     Package p("test_package");
     FunctionBuilder fb("f", &p);
@@ -79,7 +107,7 @@ class QueryEngineTest : public IrTestBase,
         "input", StringToTernaryVector(operand_known_bits).value(), &fb);
     make_op(operand, &fb);
     XLS_ASSIGN_OR_RETURN(Function * f, fb.Build());
-    XLS_VLOG(3) << f->DumpIr();
+    VLOG(3) << f->DumpIr();
     XLS_ASSIGN_OR_RETURN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
     return engine->ToString(f->return_value());
   }
@@ -88,7 +116,7 @@ class QueryEngineTest : public IrTestBase,
   // inputs to the op is crafted to have known bits equal to the given
   // TernaryVectors.
   absl::StatusOr<std::string> RunOnBinaryOp(
-      absl::string_view lhs_known_bits, absl::string_view rhs_known_bits,
+      std::string_view lhs_known_bits, std::string_view rhs_known_bits,
       std::function<void(BValue, BValue, FunctionBuilder*)> make_op) {
     Package p("test_package");
     FunctionBuilder fb("f", &p);
@@ -98,41 +126,52 @@ class QueryEngineTest : public IrTestBase,
         "rhs", StringToTernaryVector(rhs_known_bits).value(), &fb);
     make_op(lhs, rhs, &fb);
     XLS_ASSIGN_OR_RETURN(Function * f, fb.Build());
-    XLS_VLOG(3) << f->DumpIr();
+    VLOG(3) << f->DumpIr();
     XLS_ASSIGN_OR_RETURN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
     return engine->ToString(f->return_value());
   }
 
-  absl::StatusOr<std::string> GetMaxUnsignedValue(
-      absl::string_view known_bits) {
+  absl::StatusOr<bool> GetCovers(std::string_view known_bits, Bits target) {
     Package p("test_package");
     FunctionBuilder fb("f", &p);
     BValue n = MakeValueWithKnownBits(
         "value", StringToTernaryVector(known_bits).value(), &fb);
     XLS_ASSIGN_OR_RETURN(Function * f, fb.Build());
-    XLS_VLOG(3) << f->DumpIr();
+    VLOG(3) << f->DumpIr();
     XLS_ASSIGN_OR_RETURN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
-    return absl::StrCat(
-        "0b", engine->MaxUnsignedValue(n.node()).ToRawDigits(
-                  FormatPreference::kBinary, /*emit_leading_zeros=*/true));
+    return engine->Covers(n.node(), target);
   }
 
-  absl::StatusOr<std::string> GetMinUnsignedValue(
-      absl::string_view known_bits) {
+  absl::StatusOr<std::string> GetMaxUnsignedValue(std::string_view known_bits) {
     Package p("test_package");
     FunctionBuilder fb("f", &p);
     BValue n = MakeValueWithKnownBits(
         "value", StringToTernaryVector(known_bits).value(), &fb);
     XLS_ASSIGN_OR_RETURN(Function * f, fb.Build());
-    XLS_VLOG(3) << f->DumpIr();
+    VLOG(3) << f->DumpIr();
     XLS_ASSIGN_OR_RETURN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
-    return absl::StrCat(
-        "0b", engine->MinUnsignedValue(n.node()).ToRawDigits(
-                  FormatPreference::kBinary, /*emit_leading_zeros=*/true));
+    return absl::StrCat("0b",
+                        BitsToRawDigits(engine->MaxUnsignedValue(n.node()),
+                                        FormatPreference::kBinary,
+                                        /*emit_leading_zeros=*/true));
+  }
+
+  absl::StatusOr<std::string> GetMinUnsignedValue(std::string_view known_bits) {
+    Package p("test_package");
+    FunctionBuilder fb("f", &p);
+    BValue n = MakeValueWithKnownBits(
+        "value", StringToTernaryVector(known_bits).value(), &fb);
+    XLS_ASSIGN_OR_RETURN(Function * f, fb.Build());
+    VLOG(3) << f->DumpIr();
+    XLS_ASSIGN_OR_RETURN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
+    return absl::StrCat("0b",
+                        BitsToRawDigits(engine->MinUnsignedValue(n.node()),
+                                        FormatPreference::kBinary,
+                                        /*emit_leading_zeros=*/true));
   }
 
   absl::StatusOr<bool> GetNodesKnownUnsignedNotEquals(
-      absl::string_view lhs_known_bits, absl::string_view rhs_known_bits) {
+      std::string_view lhs_known_bits, std::string_view rhs_known_bits) {
     Package p("test_package");
     FunctionBuilder fb("f", &p);
     BValue lhs = MakeValueWithKnownBits(
@@ -140,13 +179,13 @@ class QueryEngineTest : public IrTestBase,
     BValue rhs = MakeValueWithKnownBits(
         "rhs", StringToTernaryVector(rhs_known_bits).value(), &fb);
     XLS_ASSIGN_OR_RETURN(Function * f, fb.Build());
-    XLS_VLOG(3) << f->DumpIr();
+    VLOG(3) << f->DumpIr();
     XLS_ASSIGN_OR_RETURN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
     return engine->NodesKnownUnsignedNotEquals(lhs.node(), rhs.node());
   }
 
   absl::StatusOr<bool> GetNodesKnownUnsignedEquals(
-      absl::string_view lhs_known_bits, absl::string_view rhs_known_bits) {
+      std::string_view lhs_known_bits, std::string_view rhs_known_bits) {
     Package p("test_package");
     FunctionBuilder fb("f", &p);
     BValue lhs = MakeValueWithKnownBits(
@@ -154,7 +193,7 @@ class QueryEngineTest : public IrTestBase,
     BValue rhs = MakeValueWithKnownBits(
         "rhs", StringToTernaryVector(rhs_known_bits).value(), &fb);
     XLS_ASSIGN_OR_RETURN(Function * f, fb.Build());
-    XLS_VLOG(3) << f->DumpIr();
+    VLOG(3) << f->DumpIr();
     XLS_ASSIGN_OR_RETURN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
     return engine->NodesKnownUnsignedEquals(lhs.node(), rhs.node());
   }
@@ -172,9 +211,9 @@ TEST_P(QueryEngineTest, SimpleBinaryOp) {
   for (int64_t i = 0; i < 32; ++i) {
     for (Node* node :
          {FindNode("x", f), FindNode("y", f), FindNode("add.1", f)}) {
-      EXPECT_FALSE(engine->IsKnown(BitLocation(node, i)));
-      EXPECT_FALSE(engine->IsOne(BitLocation(node, i)));
-      EXPECT_FALSE(engine->IsZero(BitLocation(node, i)));
+      EXPECT_FALSE(engine->IsKnown(TreeBitLocation(node, i)));
+      EXPECT_FALSE(engine->IsOne(TreeBitLocation(node, i)));
+      EXPECT_FALSE(engine->IsZero(TreeBitLocation(node, i)));
     }
   }
 }
@@ -372,27 +411,12 @@ TEST_P(QueryEngineTest, BitwiseOps) {
   )",
                                                        p.get()));
   XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
-  EXPECT_EQ(engine->GetKnownBits(FindNode("and.5", f)), UBits(0x00ffff, 24));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("and.5", f)),
-            UBits(0x00f000, 24));
   EXPECT_EQ(engine->ToString(FindNode("and.5", f)),
             "0bXXXX_XXXX_1111_0000_0000_0000");
-
-  EXPECT_EQ(engine->GetKnownBits(FindNode("not.6", f)), UBits(0x00ffff, 24));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("not.6", f)),
-            UBits(0x0000ff, 24));
   EXPECT_EQ(engine->ToString(FindNode("not.6", f)),
             "0bXXXX_XXXX_0000_0000_1111_1111");
-
-  EXPECT_EQ(engine->GetKnownBits(FindNode("or.7", f)), UBits(0x00ffff, 24));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("or.7", f)),
-            UBits(0x00fff0, 24));
   EXPECT_EQ(engine->ToString(FindNode("or.7", f)),
             "0bXXXX_XXXX_1111_1111_1111_0000");
-
-  EXPECT_EQ(engine->GetKnownBits(FindNode("xor.8", f)), UBits(0x00ffff, 24));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("xor.8", f)),
-            UBits(0x000ff0, 24));
   EXPECT_EQ(engine->ToString(FindNode("xor.8", f)),
             "0bXXXX_XXXX_0000_1111_1111_0000");
 }
@@ -422,22 +446,106 @@ TEST_P(QueryEngineTest, SignExtend) {
   )",
                                                        p.get()));
   XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
-  EXPECT_EQ(engine->GetKnownBits(FindNode("sign_ext.5", f)), UBits(0xfff0, 16));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("sign_ext.5", f)),
-            UBits(0xffa0, 16));
+  EXPECT_EQ(engine->ToString(FindNode("sign_ext.5", f)),
+            "0b1111_1111_1010_XXXX");
+  EXPECT_EQ(engine->ToString(FindNode("sign_ext.6", f)),
+            "0b0000_0000_0100_XXXX");
+  EXPECT_EQ(engine->ToString(FindNode("sign_ext.7", f)), "0b1010_XXXX");
+  EXPECT_EQ(engine->ToString(FindNode("sign_ext.9", f)),
+            "0bXXXX_XXXX_XXXX_XXXX_1010_XXXX");
+}
 
-  EXPECT_EQ(engine->GetKnownBits(FindNode("sign_ext.6", f)), UBits(0xfff0, 16));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("sign_ext.6", f)),
-            UBits(0x0040, 16));
+TEST_P(QueryEngineTest, KnownLeadingWithZeroExtend) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue param = fb.Param("foo", p->GetBitsType(3));
+  BValue zero_extend_main = fb.ZeroExtend(param, 16);
+  BValue zero_extend_concat_0 =
+      fb.ZeroExtend(fb.Concat({fb.Literal(UBits(0, 1)), param}), 16);
+  BValue zero_extend_concat_1 =
+      fb.ZeroExtend(fb.Concat({fb.Literal(UBits(1, 1)), param}), 16);
+  fb.Tuple({zero_extend_main, zero_extend_concat_0, zero_extend_concat_1});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
+  EXPECT_EQ(engine->KnownLeadingSignBits(zero_extend_main.node()), 13);
+  EXPECT_EQ(engine->KnownLeadingOnes(zero_extend_main.node()), 0);
+  EXPECT_EQ(engine->KnownLeadingZeros(zero_extend_main.node()), 13);
 
-  EXPECT_EQ(engine->GetKnownBits(FindNode("sign_ext.7", f)), UBits(0xf0, 8));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("sign_ext.7", f)),
-            UBits(0xa0, 8));
+  EXPECT_EQ(engine->KnownLeadingSignBits(zero_extend_concat_0.node()), 13);
+  EXPECT_EQ(engine->KnownLeadingOnes(zero_extend_concat_0.node()), 0);
+  EXPECT_EQ(engine->KnownLeadingZeros(zero_extend_concat_0.node()), 13);
 
-  EXPECT_EQ(engine->GetKnownBits(FindNode("sign_ext.9", f)),
-            UBits(0x0000f0, 24));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("sign_ext.9", f)),
-            UBits(0x0000a0, 24));
+  EXPECT_EQ(engine->KnownLeadingSignBits(zero_extend_concat_1.node()), 12);
+  EXPECT_EQ(engine->KnownLeadingOnes(zero_extend_concat_1.node()), 0);
+  EXPECT_EQ(engine->KnownLeadingZeros(zero_extend_concat_1.node()), 12);
+}
+
+TEST_P(QueryEngineTest, KnownLeadingWithSignExtend) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue param = fb.Param("foo", p->GetBitsType(3));
+  BValue sign_extend_main = fb.SignExtend(param, 16);
+  BValue sign_extend_concat_0 =
+      fb.SignExtend(fb.Concat({fb.Literal(UBits(0, 1)), param}), 16);
+  BValue sign_extend_concat_1 =
+      fb.SignExtend(fb.Concat({fb.Literal(UBits(1, 1)), param}), 16);
+  BValue sign_extend_zero_extend = fb.SignExtend(fb.ZeroExtend(param, 4), 16);
+  BValue sign_bit = fb.BitSlice(param, 2, 1);
+  BValue manual_sign_extend = fb.Concat({
+      sign_bit,
+      sign_bit,
+      sign_bit,
+      sign_bit,
+      sign_bit,  // 5
+      sign_bit,
+      sign_bit,
+      sign_bit,
+      sign_bit,
+      sign_bit,  // 10
+      sign_bit,
+      sign_bit,
+      sign_bit,  // 13
+      param,
+  });
+  fb.Tuple({sign_extend_main, sign_extend_concat_0, sign_extend_concat_1,
+            sign_extend_zero_extend, manual_sign_extend});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
+  if (GetParam() == QueryEngineType::kTernary) {
+    // TODO(allight): Ternary does not track sign bits well enough to see the
+    // sign_extend_main is a sign extend. Normally a stateless is unioned with
+    // it but this is a real restriction that should be improved upon at some
+    // point.
+    EXPECT_EQ(engine->KnownLeadingSignBits(sign_extend_main.node()), 1);
+  } else {
+    EXPECT_EQ(engine->KnownLeadingSignBits(sign_extend_main.node()), 14);
+  }
+  EXPECT_EQ(engine->KnownLeadingOnes(sign_extend_main.node()), 0);
+  EXPECT_EQ(engine->KnownLeadingZeros(sign_extend_main.node()), 0);
+
+  if (GetParam() == QueryEngineType::kTernary) {
+    // TODO(allight): Ternary does not track sign bits well enough to see the
+    // manual_sign_extend is a sign extend. Provenance tracking or BDDs would be
+    // needed to see this. Luckily this doesn't seem likely to be a common
+    // pattern.
+    EXPECT_EQ(engine->KnownLeadingSignBits(manual_sign_extend.node()), 1);
+  } else {
+    EXPECT_EQ(engine->KnownLeadingSignBits(manual_sign_extend.node()), 14);
+  }
+  EXPECT_EQ(engine->KnownLeadingOnes(manual_sign_extend.node()), 0);
+  EXPECT_EQ(engine->KnownLeadingZeros(manual_sign_extend.node()), 0);
+
+  EXPECT_EQ(engine->KnownLeadingSignBits(sign_extend_concat_0.node()), 13);
+  EXPECT_EQ(engine->KnownLeadingOnes(sign_extend_concat_0.node()), 0);
+  EXPECT_EQ(engine->KnownLeadingZeros(sign_extend_concat_0.node()), 13);
+
+  EXPECT_EQ(engine->KnownLeadingSignBits(sign_extend_concat_1.node()), 13);
+  EXPECT_EQ(engine->KnownLeadingOnes(sign_extend_concat_1.node()), 13);
+  EXPECT_EQ(engine->KnownLeadingZeros(sign_extend_concat_1.node()), 0);
+
+  EXPECT_EQ(engine->KnownLeadingSignBits(sign_extend_zero_extend.node()), 13);
+  EXPECT_EQ(engine->KnownLeadingOnes(sign_extend_zero_extend.node()), 0);
+  EXPECT_EQ(engine->KnownLeadingZeros(sign_extend_zero_extend.node()), 13);
 }
 
 TEST_P(QueryEngineTest, BinarySelect) {
@@ -454,9 +562,8 @@ TEST_P(QueryEngineTest, BinarySelect) {
   )",
                                                        p.get()));
   XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
-  EXPECT_EQ(engine->GetKnownBits(FindNode("sel.5", f)), UBits(0xf00f00, 24));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("sel.5", f)),
-            UBits(0xf00000, 24));
+  EXPECT_EQ(engine->ToString(FindNode("sel.5", f)),
+            "0b1111_XXXX_XXXX_0000_XXXX_XXXX");
 }
 
 TEST_P(QueryEngineTest, TernarySelectWithDefault) {
@@ -472,9 +579,8 @@ TEST_P(QueryEngineTest, TernarySelectWithDefault) {
   )",
                                                        p.get()));
   XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
-  EXPECT_EQ(engine->GetKnownBits(FindNode("sel.5", f)), UBits(0x0000f00f, 32));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("sel.5", f)),
-            UBits(0x0000f000, 32));
+  EXPECT_EQ(engine->ToString(FindNode("sel.5", f)),
+            "0bXXXX_XXXX_XXXX_XXXX_1111_XXXX_XXXX_0000");
 }
 
 TEST_P(QueryEngineTest, AndWithHighBitZeroes) {
@@ -488,9 +594,7 @@ TEST_P(QueryEngineTest, AndWithHighBitZeroes) {
   )",
                                                        p.get()));
   XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
-  EXPECT_EQ(engine->GetKnownBits(FindNode("and.4", f)), UBits(0xff00, 16));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("and.4", f)),
-            UBits(0x0000, 16));
+  EXPECT_EQ(engine->ToString(FindNode("and.4", f)), "0b0000_0000_XXXX_XXXX");
 }
 
 TEST_P(QueryEngineTest, NandTruthTable) {
@@ -504,8 +608,7 @@ TEST_P(QueryEngineTest, NandTruthTable) {
   )",
                                                        p.get()));
   XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("nand.3", f)),
-            UBits(0b1110, 4));
+  EXPECT_EQ(engine->ToString(FindNode("nand.3", f)), "0b1110");
 }
 
 TEST_P(QueryEngineTest, NorTruthTable) {
@@ -519,7 +622,7 @@ TEST_P(QueryEngineTest, NorTruthTable) {
   )",
                                                        p.get()));
   XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("nor.3", f)), UBits(0b1000, 4));
+  EXPECT_EQ(engine->ToString(FindNode("nor.3", f)), "0b1000");
 }
 
 TEST_P(QueryEngineTest, ShrlFullyKnownRhs) {
@@ -538,12 +641,8 @@ TEST_P(QueryEngineTest, ShrlFullyKnownRhs) {
   )",
                                                        p.get()));
   XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
-  EXPECT_EQ(engine->GetKnownBits(FindNode("concat.3", f)), UBits(0xff00, 16));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("concat.3", f)),
-            UBits(0xee00, 16));
-  EXPECT_EQ(engine->GetKnownBits(FindNode("shrl.5", f)), UBits(0xffff, 16));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("shrl.5", f)),
-            UBits(0x00ee, 16));
+  EXPECT_EQ(engine->ToString(FindNode("concat.3", f)), "0b1110_1110_XXXX_XXXX");
+  EXPECT_EQ(engine->ToString(FindNode("shrl.5", f)), "0b0000_0000_1110_1110");
 }
 
 TEST_P(QueryEngineTest, ShrlPartiallyKnownRhs) {
@@ -563,8 +662,7 @@ TEST_P(QueryEngineTest, ShrlPartiallyKnownRhs) {
                                                        p.get()));
   XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
   // The shift amount is at least 0b1 so we know the high bit must be zero.
-  EXPECT_EQ(engine->GetKnownBits(FindNode("shrl.5", f)), UBits(0x80, 8));
-  EXPECT_EQ(engine->GetKnownBitsValues(FindNode("shrl.5", f)), UBits(0x00, 8));
+  EXPECT_EQ(engine->ToString(FindNode("shrl.5", f)), "0b0XXX_XXXX");
 }
 
 TEST_P(QueryEngineTest, Decode) {
@@ -601,6 +699,53 @@ TEST_P(QueryEngineTest, Reverse) {
   EXPECT_THAT(RunOnUnaryOp("0bXX10", make_reverse), IsOkAndHolds("0b01XX"));
   EXPECT_THAT(RunOnUnaryOp("0bX1X0", make_reverse), IsOkAndHolds("0b0X1X"));
   EXPECT_THAT(RunOnUnaryOp("0bX0X0", make_reverse), IsOkAndHolds("0b0X0X"));
+}
+
+TEST_P(QueryEngineTest, Covers) {
+  EXPECT_THAT(GetCovers("0b", UBits(0, 0)), IsOkAndHolds(true));
+
+  EXPECT_THAT(GetCovers("0b0", UBits(0, 1)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0b0", UBits(1, 1)), IsOkAndHolds(false));
+  EXPECT_THAT(GetCovers("0b1", UBits(0, 1)), IsOkAndHolds(false));
+  EXPECT_THAT(GetCovers("0b1", UBits(1, 1)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0bX", UBits(0, 1)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0bX", UBits(1, 1)), IsOkAndHolds(true));
+
+  EXPECT_THAT(GetCovers("0b0000", UBits(0b0000, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0b0000", UBits(0b0110, 4)), IsOkAndHolds(false));
+
+  EXPECT_THAT(GetCovers("0b1111", UBits(0b1111, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0b1111", UBits(0b0111, 4)), IsOkAndHolds(false));
+
+  EXPECT_THAT(GetCovers("0b0101", UBits(0b0101, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0b0101", UBits(0b1010, 4)), IsOkAndHolds(false));
+
+  EXPECT_THAT(GetCovers("0b1010", UBits(0b1010, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0b1010", UBits(0b1011, 4)), IsOkAndHolds(false));
+
+  EXPECT_THAT(GetCovers("0bXX10", UBits(0b1110, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0bXX10", UBits(0b1010, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0bXX10", UBits(0b0110, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0bXX10", UBits(0b0010, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0bXX10", UBits(0b1100, 4)), IsOkAndHolds(false));
+  EXPECT_THAT(GetCovers("0bXX10", UBits(0b1111, 4)), IsOkAndHolds(false));
+
+  EXPECT_THAT(GetCovers("0b10XX", UBits(0b1011, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0b10XX", UBits(0b1010, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0b10XX", UBits(0b1001, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0b10XX", UBits(0b1000, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0b10XX", UBits(0b0011, 4)), IsOkAndHolds(false));
+  EXPECT_THAT(GetCovers("0b10XX", UBits(0b1111, 4)), IsOkAndHolds(false));
+
+  EXPECT_THAT(GetCovers("0bXXXX", UBits(0b1111, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0bXXXX", UBits(0b1100, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0bXXXX", UBits(0b0110, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0bXXXX", UBits(0b0011, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0bXXXX", UBits(0b1000, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0bXXXX", UBits(0b0100, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0bXXXX", UBits(0b0010, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0bXXXX", UBits(0b0001, 4)), IsOkAndHolds(true));
+  EXPECT_THAT(GetCovers("0bXXXX", UBits(0b0000, 4)), IsOkAndHolds(true));
 }
 
 TEST_P(QueryEngineTest, MaxUnsignedValue) {
@@ -694,6 +839,195 @@ TEST_P(QueryEngineTest, NodesKnownUnsignedEquals) {
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
   XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
   EXPECT_TRUE(engine->NodesKnownUnsignedEquals(a.node(), a.node()));
+}
+
+TEST_P(QueryEngineTest, DefaultSpecializeDoesNothing) {
+  if (GetParam() != QueryEngineType::kTernary) {
+    // Only these two should not have any specializations.
+    return;
+  }
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  // fn (x: u8, y: u8) { if (x < 4:u8) { x + 4 } else { y + 4 } }
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  BValue y = fb.Param("y", p->GetBitsType(8));
+  BValue x_plus_4 = fb.Add(x, fb.Literal(UBits(4, 8)));
+  BValue y_plus_4 = fb.Add(y, fb.Literal(UBits(4, 8)));
+  BValue cmp = fb.ULt(x, fb.Literal(UBits(4, 8)));
+  BValue result = fb.Select(cmp, {y_plus_4, x_plus_4});
+
+  XLS_ASSERT_OK_AND_ASSIGN(auto* f, fb.BuildWithReturnValue(result));
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
+
+  auto consequent_engine = engine->SpecializeGivenPredicate(
+      {PredicateState(result.node()->As<Select>(), 1)});
+  auto alternate_engine = engine->SpecializeGivenPredicate(
+      {PredicateState(result.node()->As<Select>(), 0)});
+  auto secondary_consequent_engine =
+      consequent_engine->SpecializeGivenPredicate({});
+
+  EXPECT_THAT(consequent_engine->Populate(f), Not(IsOk()));
+  EXPECT_THAT(alternate_engine->Populate(f), Not(IsOk()));
+
+#define EXPECT_EQUIV(call)                                    \
+  EXPECT_EQ(consequent_engine->call, engine->call);           \
+  EXPECT_EQ(secondary_consequent_engine->call, engine->call); \
+  EXPECT_EQ(alternate_engine->call, engine->call)
+
+  EXPECT_EQUIV(IsTracked(cmp.node()));
+  EXPECT_EQUIV(AtLeastOneNodeTrue({cmp.node()}));
+  EXPECT_EQUIV(AtMostOneNodeTrue({cmp.node()}));
+  EXPECT_EQUIV(AtMostOneBitTrue(cmp.node()));
+  EXPECT_EQUIV(AtLeastOneBitTrue(cmp.node()));
+  EXPECT_EQUIV(GetTernary(x_plus_4.node()));
+  EXPECT_EQUIV(GetIntervals(x_plus_4.node()));
+  EXPECT_EQUIV(AtMostOneTrue({TreeBitLocation(x_plus_4.node(), 1),
+                              TreeBitLocation(x_plus_4.node(), 7)}));
+  EXPECT_EQUIV(AtLeastOneTrue({TreeBitLocation(x_plus_4.node(), 1),
+                               TreeBitLocation(x_plus_4.node(), 7)}));
+  EXPECT_EQUIV(Implies(TreeBitLocation(cmp.node(), 0),
+                       TreeBitLocation(x_plus_4.node(), 7)));
+  EXPECT_EQUIV(ImpliedNodeValue({{TreeBitLocation(cmp.node(), 0), true}},
+                                x_plus_4.node()));
+  EXPECT_EQUIV(KnownEquals(TreeBitLocation(x_plus_4.node(), 6),
+                           TreeBitLocation(x_plus_4.node(), 7)));
+  EXPECT_EQUIV(KnownNotEquals(TreeBitLocation(x_plus_4.node(), 6),
+                              TreeBitLocation(x_plus_4.node(), 7)));
+#undef EXPECT_EQUIV
+}
+
+class TestForwardingQueryEngine : public ForwardingQueryEngine {
+ public:
+  explicit TestForwardingQueryEngine(QueryEngine& engine) : engine_(engine) {}
+
+ protected:
+  QueryEngine& real() override { return engine_; }
+  const QueryEngine& real() const override { return engine_; }
+
+ private:
+  QueryEngine& engine_;
+};
+
+TEST_P(QueryEngineTest, SpecializeOnNodes) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(4));
+  BValue y = fb.Param("y", p->GetBitsType(4));
+  BValue result = fb.Add(x, y);
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.BuildWithReturnValue(result));
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
+
+  XLS_ASSERT_OK_AND_ASSIGN(TernaryVector x_tern,
+                           StringToTernaryVector("0b0011"));
+  XLS_ASSERT_OK_AND_ASSIGN(TernaryVector y_tern,
+                           StringToTernaryVector("0b0101"));
+  std::unique_ptr<QueryEngine> info_source = engine->SpecializeGiven(
+      {{x.node(),
+        ValueKnowledge{.ternary =
+                           LeafTypeTree<TernaryVector>::CreateSingleElementTree(
+                               x.GetType(), x_tern)}},
+       {y.node(),
+        ValueKnowledge{.ternary =
+                           LeafTypeTree<TernaryVector>::CreateSingleElementTree(
+                               y.GetType(), y_tern)}}});
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<QueryEngine> specialized,
+      engine->SpecializeOnNodes({x.node(), y.node()}, *info_source));
+
+  if (GetParam() == QueryEngineType::kBdd) {
+    EXPECT_THAT(specialized->GetTernary(x.node()),
+                testing::Optional(LttIs<TernaryVector>(
+                    testing::ElementsAre(TernaryIs("0b0011")))));
+    EXPECT_THAT(specialized->GetTernary(y.node()),
+                testing::Optional(LttIs<TernaryVector>(
+                    testing::ElementsAre(TernaryIs("0b0101")))));
+    EXPECT_THAT(specialized->GetTernary(result.node()),
+                testing::Optional(LttIs<TernaryVector>(
+                    testing::ElementsAre(TernaryIs("0b1000")))));
+  } else {
+    EXPECT_EQ(specialized->GetTernary(result.node()),
+              engine->GetTernary(result.node()));
+  }
+
+  // Test ForwardingQueryEngine::SpecializeOnNodes delegates to the wrapped
+  // engine.
+  TestForwardingQueryEngine forwarding(*engine);
+  XLS_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<QueryEngine> fwd_specialized,
+      forwarding.SpecializeOnNodes({x.node(), y.node()}, *info_source));
+  EXPECT_EQ(fwd_specialized->GetTernary(result.node()),
+            specialized->GetTernary(result.node()));
+}
+
+TEST_P(QueryEngineTest, TernaryAnnotator) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+     fn f(x: bits[2]) -> (bits[4], bits[2]) {
+        literal.1: bits[2] = literal(value=0b10, id=1)
+        concat.2: bits[4] = concat(literal.1, x, id=2)
+        ret tuple.3: (bits[4], bits[2]) = tuple(concat.2, literal.1, id=3)
+     }
+  )",
+                                                       p.get()));
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
+  TernaryAnnotator annotator(engine.get());
+  EXPECT_EQ(annotator.NodeAnnotation(FindNode("x", f)).suffix,
+            "LeafTypeTree(type=bits[2], elements={0bXX})");
+  EXPECT_EQ(annotator.NodeAnnotation(FindNode("literal.1", f)).suffix,
+            "LeafTypeTree(type=bits[2], elements={0b10})");
+  EXPECT_EQ(annotator.NodeAnnotation(FindNode("concat.2", f)).suffix,
+            "LeafTypeTree(type=bits[4], elements={0b10XX})");
+  if (GetParam() == QueryEngineType::kTernary) {
+    EXPECT_EQ(annotator.NodeAnnotation(FindNode("tuple.3", f)).suffix,
+              "LeafTypeTree(type=(bits[4], bits[2]), elements={0b10XX, 0b10})");
+  } else {
+    EXPECT_EQ(annotator.NodeAnnotation(FindNode("tuple.3", f)).suffix,
+              "LeafTypeTree(type=(bits[4], bits[2]), elements={0bXXXX, 0bXX})");
+  }
+  EXPECT_THAT(
+      f->DumpIr(annotator),
+      testing::HasSubstr("concat.2: bits[4] = concat(literal.1, x, id=2) "
+                         "LeafTypeTree(type=bits[4], elements={0b10XX})"));
+
+  BddQueryEngine empty_engine;
+  TernaryAnnotator empty_annotator(&empty_engine);
+  EXPECT_FALSE(
+      empty_annotator.NodeAnnotation(FindNode("x", f)).suffix.has_value());
+}
+
+TEST_P(QueryEngineTest, IntervalAnnotator) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, ParseFunction(R"(
+     fn f(x: bits[2]) -> (bits[4], bits[2]) {
+        literal.1: bits[2] = literal(value=0b10, id=1)
+        concat.2: bits[4] = concat(literal.1, x, id=2)
+        ret tuple.3: (bits[4], bits[2]) = tuple(concat.2, literal.1, id=3)
+     }
+  )",
+                                                       p.get()));
+  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<QueryEngine> engine, GetEngine(f));
+  IntervalAnnotator annotator(engine.get());
+  EXPECT_EQ(annotator.NodeAnnotation(FindNode("x", f)).suffix,
+            "LeafTypeTree(type=bits[2], elements={[[0, 3]]})");
+  EXPECT_EQ(annotator.NodeAnnotation(FindNode("literal.1", f)).suffix,
+            "LeafTypeTree(type=bits[2], elements={[[2, 2]]})");
+  EXPECT_EQ(annotator.NodeAnnotation(FindNode("concat.2", f)).suffix,
+            "LeafTypeTree(type=bits[4], elements={[[8, 11]]})");
+  if (GetParam() == QueryEngineType::kTernary) {
+    EXPECT_EQ(annotator.NodeAnnotation(FindNode("tuple.3", f)).suffix,
+              "LeafTypeTree(type=(bits[4], bits[2]), "
+              "elements={[[8, 11]], [[2, 2]]})");
+  } else {
+    EXPECT_EQ(annotator.NodeAnnotation(FindNode("tuple.3", f)).suffix,
+              "LeafTypeTree(type=(bits[4], bits[2]), "
+              "elements={[[0, 15]], [[0, 3]]})");
+  }
+  EXPECT_THAT(
+      f->DumpIr(annotator),
+      testing::HasSubstr("concat.2: bits[4] = concat(literal.1, x, id=2) "
+                         "LeafTypeTree(type=bits[4], elements={[[8, 11]]})"));
 }
 
 INSTANTIATE_TEST_SUITE_P(

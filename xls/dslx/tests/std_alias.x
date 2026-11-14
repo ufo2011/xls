@@ -12,15 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import std as my_std
+import std as my_std;
 
-fn main(x: u2) -> u1 {
-  my_std::lsb(x)
-}
+fn main(x: u2) -> u1 { my_std::lsb(x) }
 
-#![test]
+#[test]
 fn main_test() {
-  let _ = assert_eq(main(u2:0b01), u1:1);
-  let _ = assert_eq(main(u2:0b10), u1:0);
-  ()
+    assert_eq(main(u2:0b01), u1:1);
+    assert_eq(main(u2:0b10), u1:0);
 }

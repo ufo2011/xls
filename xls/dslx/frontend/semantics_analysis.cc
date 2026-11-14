@@ -1,0 +1,893 @@
+// Copyright 2025 The XLS Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "xls/dslx/frontend/semantics_analysis.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "absl/base/casts.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
+#include "xls/codegen/vast/verilog_keywords.h"
+#include "xls/common/attribute_data.h"
+#include "xls/common/status/ret_check.h"
+#include "xls/common/status/status_macros.h"
+#include "xls/dslx/errors.h"
+#include "xls/dslx/frontend/ast.h"
+#include "xls/dslx/frontend/ast_node.h"
+#include "xls/dslx/frontend/ast_node_visitor_with_default.h"
+#include "xls/dslx/frontend/ast_utils.h"
+#include "xls/dslx/frontend/bindings.h"
+#include "xls/dslx/frontend/builtin_stubs_utils.h"
+#include "xls/dslx/frontend/domain_struct_rewriter.h"
+#include "xls/dslx/frontend/lambda_rewriter.h"
+#include "xls/dslx/frontend/module.h"
+#include "xls/dslx/frontend/pos.h"
+#include "xls/dslx/frontend/token_utils.h"
+#include "xls/dslx/import_data.h"
+#include "xls/dslx/import_routines.h"
+#include "xls/dslx/type_system/deduce_utils.h"
+#include "xls/dslx/type_system/type.h"
+#include "xls/dslx/type_system_v2/import_utils.h"
+#include "xls/dslx/type_system_v2/type_annotation_utils.h"
+#include "xls/dslx/warning_collector.h"
+#include "xls/dslx/warning_kind.h"
+
+namespace xls::dslx {
+
+namespace {
+// Warns if the next-to-last statement in a block has a trailing semi and the
+// last statement is a nil tuple expression, as this is redundant; i.e.
+//
+//    {
+//      foo;
+//      ()  <-- useless, semi on previous statement implies it
+//    }
+void DetectUselessTrailingTuplePattern(const StatementBlock* block,
+                                       WarningCollector& warning_collector) {
+  // TODO(https://github.com/google/xls/issues/1124) 2023-08-31 Proc config
+  // parsing functions synthesize a tuple at the end, and we don't want to flag
+  // that since the user didn't even create it.
+  if (block->parent()->kind() == AstNodeKind::kFunction &&
+      dynamic_cast<const Function*>(block->parent())->tag() ==
+          FunctionTag::kProcConfig) {
+    return;
+  }
+
+  // Need at least a statement (i.e. with semicolon after it) and an
+  // expression-statement at the end to match this pattern.
+  if (block->statements().size() < 2) {
+    return;
+  }
+
+  // Make sure we ignore this if we're only following an implicit prologue (as
+  // is used to convert implicit-token-parameter semantics for now).
+  // TODO(https://github.com/google/xls/issues/1401): Remove once we no longer
+  // support implicit token parameter semantics.
+  const Statement* next_to_last_stmt =
+      block->statements()[block->statements().size() - 2];
+  if (next_to_last_stmt->GetSpan().has_value() &&
+      next_to_last_stmt->GetSpan()->limit() <=
+          block->span().start().BumpCol()) {
+    return;
+  }
+
+  // Trailing statement has to be an expression-statement.
+  const Statement* last_stmt = block->statements().back();
+  if (!std::holds_alternative<Expr*>(last_stmt->wrapped())) {
+    return;
+  }
+
+  // It has to be a tuple.
+  const auto* last_expr = std::get<Expr*>(last_stmt->wrapped());
+  auto* trailing_tuple = dynamic_cast<const XlsTuple*>(last_expr);
+  if (trailing_tuple == nullptr) {
+    return;
+  }
+
+  // Tuple has to be nil.
+  if (!trailing_tuple->empty()) {
+    return;
+  }
+
+  warning_collector.Add(
+      trailing_tuple->span(), WarningKind::kTrailingTupleAfterSemi,
+      absl::StrFormat("Block has a trailing nil (empty) tuple after a "
+                      "semicolon -- this is implied, please remove it"));
+}
+
+bool IsBlockJustUnitTuple(const StatementBlock& block) {
+  if (block.empty()) {
+    return true;
+  }
+  if (block.size() != 1) {
+    return false;
+  }
+  const Statement* statement = block.statements().front();
+  const Statement::Wrapped& wrapped = statement->wrapped();
+  if (!std::holds_alternative<Expr*>(wrapped)) {
+    return false;
+  }
+  const auto* expr = std::get<Expr*>(wrapped);
+  auto* tuple = dynamic_cast<const XlsTuple*>(expr);
+  if (tuple == nullptr) {
+    return false;
+  }
+  return tuple->empty();
+}
+
+bool IsBlockWithOneFailStmt(const StatementBlock& block) {
+  if (block.size() != 1) {
+    return false;
+  }
+  const Statement* statement = block.statements().front();
+  const Statement::Wrapped& wrapped = statement->wrapped();
+  if (!std::holds_alternative<Expr*>(wrapped)) {
+    return false;
+  }
+  const auto* expr = std::get<Expr*>(wrapped);
+  auto* invocation = dynamic_cast<const Invocation*>(expr);
+  if (invocation == nullptr) {
+    return false;
+  }
+  Expr* callee = invocation->callee();
+  auto* name_ref = dynamic_cast<const NameRef*>(callee);
+  if (name_ref == nullptr) {
+    return false;
+  }
+  AnyNameDef any_name_def = name_ref->name_def();
+  if (!std::holds_alternative<BuiltinNameDef*>(any_name_def)) {
+    return false;
+  }
+  auto* bnd = std::get<BuiltinNameDef*>(any_name_def);
+  return bnd->identifier() == "fail!";
+}
+
+void WarnOnConditionalContainingJustFailStatement(
+    const Conditional& node, WarningCollector& warning_collector) {
+  const StatementBlock* consequent = node.consequent();
+  std::variant<StatementBlock*, Conditional*> alternate_ast_node =
+      node.alternate();
+  if (!std::holds_alternative<StatementBlock*>(alternate_ast_node)) {
+    return;
+  }
+  const StatementBlock* alternate =
+      std::get<StatementBlock*>(alternate_ast_node);
+
+  if (IsBlockWithOneFailStmt(*consequent) && IsBlockJustUnitTuple(*alternate)) {
+    std::string message = absl::StrFormat(
+        "`if test { fail!(...) } else { () }` pattern should be replaced with "
+        "`assert!(test, ...)`");
+    warning_collector.Add(node.span(), WarningKind::kShouldUseAssert,
+                          std::move(message));
+  }
+}
+
+// Sees if the function is named with a `_test` suffix but not marked with a
+// test annotation -- this is likely to be a user mistake, so we give a warning.
+void WarnIfConfusinglyNamedLikeTest(const Function& f,
+                                    WarningCollector& warning_collector) {
+  if (!absl::EndsWith(f.identifier(), "_test")) {
+    return;
+  }
+  AstNode* parent = f.parent();
+  if (parent == nullptr || parent->kind() != AstNodeKind::kTestFunction) {
+    warning_collector.Add(
+        f.span(), WarningKind::kMisleadingFunctionName,
+        absl::StrFormat("Function `%s` ends with `_test` but is "
+                        "not marked as a unit test via #[test]",
+                        f.identifier()));
+  }
+}
+
+// Warn folks if it's not following
+// https://doc.rust-lang.org/1.0.0/style/style/naming/README.html
+void WarnOnInappropriateMemberName(std::string_view member_name,
+                                   const Span& span, const Module& module,
+                                   WarningCollector& warning_collector) {
+  if (!IsAcceptablySnakeCase(member_name) &&
+      !module.attributes().contains(
+          ModuleAttribute::kAllowNonstandardMemberNaming)) {
+    warning_collector.Add(
+        span, WarningKind::kMemberNaming,
+        absl::StrFormat("Standard style is snake_case for struct member names; "
+                        "got: `%s`",
+                        member_name));
+  }
+}
+
+void WarnOnSystemVerilogKeywordStructMemberName(
+    std::string_view member_name, const Span& span,
+    WarningCollector& warning_collector) {
+  if (SystemVerilogKeywords().contains(member_name)) {
+    warning_collector.Add(
+        span, WarningKind::kVerilogKeywordName,
+        absl::StrFormat(
+            "Struct member name `%s` is a Verilog/SystemVerilog keyword; "
+            "(System)Verilog code generation may fail",
+            member_name));
+  }
+}
+
+// Checks whether an expression may have side-effects. It may have
+// false-positives, for example an invocation may actually have no side-effects,
+// but because we do not recursively look into the callee, we conservatively
+// mark it as potentially side-effect causing. Conversely, if an expression is
+// determined to have no side-effects, it is definitely useless and thus should
+// be flagged.
+class SideEffectExpressionFinder : public AstNodeVisitorWithDefault {
+ public:
+  SideEffectExpressionFinder() : has_side_effect_(false) {}
+
+  absl::Status HandleInvocation(const Invocation* node) override {
+    has_side_effect_ = true;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleSpawn(const Spawn* node) override {
+    has_side_effect_ = true;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleFormatMacro(const FormatMacro* node) override {
+    has_side_effect_ = true;
+    return absl::OkStatus();
+  }
+
+  absl::Status DefaultHandler(const AstNode* node) override {
+    for (const AstNode* child : node->GetChildren(/*want_types=*/false)) {
+      XLS_RETURN_IF_ERROR(child->Accept(this));
+      // We only need to find one side-effect.
+      if (has_side_effect_) {
+        return absl::OkStatus();
+      }
+    }
+    return absl::OkStatus();
+  }
+
+  bool HasSideEffect() const { return has_side_effect_; }
+
+ private:
+  bool has_side_effect_;
+};
+
+// An impl-style proc automatically derives the `Spawn` attribute whether the
+// user says this or not. This visitor adds it to the `derive` list for each
+// proc where not present, creating the whole `derive` attribute if necessary to
+// achieve this.
+class AddSpawnTraitToProcDefs : public AstNodeRecursiveVisitor {
+ public:
+  AddSpawnTraitToProcDefs() : AstNodeRecursiveVisitor(/*want_types=*/true) {}
+
+  absl::Status HandleProcDef(const ProcDef* node) override {
+    std::optional<Attribute*> existing_attribute =
+        GetAttribute(node, AttributeKind::kDerive);
+    if (existing_attribute.has_value()) {
+      for (const AttributeData::Argument& argument :
+           (*existing_attribute)->args()) {
+        if (std::holds_alternative<std::string>(argument) &&
+            std::get<std::string>(argument) == kSpawnTraitName) {
+          return absl::OkStatus();
+        }
+      }
+
+      (*existing_attribute)->AddArgument(std::string(kSpawnTraitName));
+      return absl::OkStatus();
+    }
+
+    Attribute* new_attribute = node->owner()->Make<Attribute>(
+        Span::None(), Span::None(),
+        AttributeData(AttributeKind::kDerive,
+                      std::vector<AttributeData::Argument>{
+                          std::string(kSpawnTraitName)}));
+    const_cast<ProcDef*>(node)->AddAttribute(new_attribute);
+    return absl::OkStatus();
+  }
+
+ private:
+  static constexpr std::string_view kSpawnTraitName = "Spawn";
+};
+
+class PreTypecheckPass : public AstNodeRecursiveVisitor {
+ public:
+  PreTypecheckPass(WarningCollector& warning_collector,
+                   const FileTable& file_table)
+      : AstNodeRecursiveVisitor(/*want_types=*/true),
+        warning_collector_(warning_collector),
+        file_table_(file_table) {}
+
+  absl::Status HandleStatementBlock(const StatementBlock* node) override {
+    for (size_t i = 0; i < node->statements().size(); ++i) {
+      const Statement* s = node->statements()[i];
+      // We only want to check the last statement for "useless
+      // expression-statement" property if it is not yielding a value from a
+      // block; e.g.
+      //
+      //    {
+      //      my_invocation!();
+      //      u32:42  // <- ok, no trailing semi
+      //    }
+      //
+      // vs
+      //
+      //    {
+      //      my_invocation!();
+      //      u32:42;  // <- useless, trailing semi means block yields nil
+      //    }
+      bool should_check_useless_expression =
+          std::holds_alternative<Expr*>(s->wrapped()) &&
+          (i != node->statements().size() - 1 || node->trailing_semi());
+
+      if (should_check_useless_expression) {
+        SideEffectExpressionFinder visitor;
+        XLS_RETURN_IF_ERROR(s->Accept(&visitor));
+        if (!visitor.HasSideEffect()) {
+          warning_collector_.Add(
+              *(s->GetSpan()), WarningKind::kUselessExpressionStatement,
+              absl::StrFormat("Expression statement `%s` appears "
+                              "useless (i.e. has no side-effects)",
+                              s->ToString()));
+        }
+      }
+    }
+    DetectUselessTrailingTuplePattern(node, warning_collector_);
+    return DefaultHandler(node);
+  }
+
+  absl::Status HandleConditional(const Conditional* node) override {
+    WarnOnConditionalContainingJustFailStatement(*node, warning_collector_);
+    return DefaultHandler(node);
+  }
+
+  absl::Status HandleFuzzTestFunction(const FuzzTestFunction* node) override {
+    const Function& f = node->fn();
+    if (f.IsParametric()) {
+      return TypeInferenceErrorStatus(
+          f.GetSpan().value(), nullptr,
+          absl::StrFormat("Cannot fuzz test parametric function `%s`",
+                          f.identifier()),
+          file_table_);
+    }
+    if (f.params().empty()) {
+      return TypeInferenceErrorStatus(
+          f.GetSpan().value(), nullptr,
+          absl::StrFormat("Can only fuzz test functions with at least 1 "
+                          "parameter; function `%s` has 0",
+                          node->identifier()),
+          file_table_);
+    }
+    if (!node->domains().has_value()) {
+      return DefaultHandler(node);
+    }
+
+    const XlsTuple* domains = *node->domains();
+    int64_t domain_count = domain_count = domains->members().size();
+    if (domain_count != f.params().size()) {
+      return TypeInferenceErrorStatus(
+          node->GetSpan().value(), nullptr,
+          absl::StrFormat("fuzz_test attribute has %d domain argument%s, but "
+                          "function `%s` has %d parameter%s",
+                          domain_count, domain_count == 1 ? "" : "s",
+                          f.identifier(), f.params().size(),
+                          f.params().size() == 1 ? "" : "s"),
+          file_table_);
+    }
+    return DefaultHandler(node);
+  }
+
+  absl::Status HandleFunction(const Function* node) override {
+    WarnIfConfusinglyNamedLikeTest(*node, warning_collector_);
+
+    // If this function is an instance method on a parametric struct, ensure
+    // that it doesn't duplicate any parametric bindings from the struct.
+    if (node->IsMethodOnParametricStruct() && node->IsParametric()) {
+      const auto* struct_ref = absl::down_cast<const TypeRefTypeAnnotation*>(
+          (*node->impl())->struct_ref());
+      StructDef* struct_def =
+          std::get<StructDef*>(struct_ref->type_ref()->type_definition());
+
+      ParametricBindings bindings(node->parametric_bindings());
+      for (ParametricBinding* parametric_binding :
+           struct_def->parametric_bindings()) {
+        if (node->parametric_keys().contains(
+                parametric_binding->identifier())) {
+          return xls::dslx::ParseErrorStatus(
+              bindings.at(parametric_binding->identifier())->span(),
+              absl::StrFormat("Parametric binding `%s` shadows binding from "
+                              "struct definition",
+                              parametric_binding->identifier()),
+              file_table_);
+        }
+      }
+    }
+    return DefaultHandler(node);
+  }
+
+  absl::Status HandleParam(const Param* node) override {
+    const auto* parent_fn = dynamic_cast<const Function*>(node->parent());
+    if (parent_fn == nullptr || parent_fn->tag() != FunctionTag::kNormal) {
+      return DefaultHandler(node);
+    }
+    if (SystemVerilogKeywords().contains(node->identifier())) {
+      warning_collector_.Add(
+          node->name_def()->span(), WarningKind::kVerilogKeywordName,
+          absl::StrFormat(
+              "Parameter name `%s` is a Verilog/SystemVerilog keyword; "
+              "(System)Verilog code generation may fail",
+              node->identifier()));
+    }
+    return DefaultHandler(node);
+  }
+
+  absl::Status HandleStructDef(const StructDef* node) override {
+    for (const auto* member : node->members()) {
+      WarnOnInappropriateMemberName(member->name(), member->name_def()->span(),
+                                    *node->owner(), warning_collector_);
+      WarnOnSystemVerilogKeywordStructMemberName(
+          member->name(), member->name_def()->span(), warning_collector_);
+    }
+    return DefaultHandler(node);
+  }
+
+  absl::Status HandleProc(const Proc* node) override {
+    in_legacy_proc_ = true;
+    XLS_RETURN_IF_ERROR(DefaultHandler(node));
+    in_legacy_proc_ = false;
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleSelfTypeAnnotation(
+      const SelfTypeAnnotation* node) override {
+    if (in_legacy_proc_) {
+      return TypeInferenceErrorStatus(
+          node->span(), nullptr,
+          "Use of `Self` inside legacy procs is not supported.", file_table_);
+    }
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleProcDef(const ProcDef* node) override {
+    for (const auto* member : node->members()) {
+      WarnOnInappropriateMemberName(member->name(), member->name_def()->span(),
+                                    *node->owner(), warning_collector_);
+    }
+    return DefaultHandler(node);
+  }
+
+  absl::Status HandleXlsTuple(const XlsTuple* node) override {
+    // If the tuple is generated by the parser as part of a FuzzTestFunction,
+    // skip the warning.
+    if (node->parent() != nullptr &&
+        node->parent()->kind() == AstNodeKind::kFuzzTestFunction) {
+      return DefaultHandler(node);
+    }
+
+    // Give a warning if the tuple is on a single line, is more than one
+    // element, but has a trailing comma.
+    //
+    // Note: warning diagnostics and type checking are currently fused together,
+    // but this is a pure post-parsing warning -- currently type checking the
+    // pass that has a warning collector available.
+    if (node->span().start().lineno() == node->span().limit().lineno() &&
+        node->members().size() > 1 && node->has_trailing_comma()) {
+      std::string message = absl::StrFormat(
+          "Tuple expression (with >1 element) is on a single "
+          "line, but has a trailing comma.");
+      warning_collector_.Add(node->span(),
+                             WarningKind::kSingleLineTupleTrailingComma,
+                             std::move(message));
+    }
+    return DefaultHandler(node);
+  }
+
+  absl::Status HandleConstantDef(const ConstantDef* node) override {
+    WarnOnInappropriateConstantName(node->identifier(), node->span(),
+                                    *node->owner(), &warning_collector_);
+    return DefaultHandler(node);
+  }
+
+  absl::Status HandleLet(const Let* node) override {
+    if (IsWildcardLeaf(node->pattern())) {
+      warning_collector_.Add(GetPatternSpan(node->pattern()),
+                             WarningKind::kUselessLetBinding,
+                             "`let _ = expr;` statement can be simplified to "
+                             "`expr;` -- there is no "
+                             "need for a `let` binding here");
+    }
+
+    if (node->is_const()) {
+      NameDef* name_def = GetPatternNameDefs(node->pattern())[0];
+      WarnOnInappropriateConstantName(name_def->identifier(), node->span(),
+                                      *node->owner(), &warning_collector_);
+    }
+
+    return DefaultHandler(node);
+  }
+
+ private:
+  WarningCollector& warning_collector_;
+
+  const FileTable& file_table_;
+  bool in_legacy_proc_ = false;
+};
+
+class CollectUseDef : public AstNodeRecursiveVisitor {
+ public:
+  CollectUseDef() : AstNodeRecursiveVisitor(/*want_types=*/true) {}
+
+  absl::Status HandleNameDef(const NameDef* node) override {
+    // Users can silence unused warnings by prefixing an identifier with an
+    // underscore to make it more well documented; e.g.
+    //  let (one, _two, three) = ...;  // _two can go unused
+    if (!absl::StartsWith(node->identifier(), "_")) {
+      defs_.insert(node);
+    }
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleNameRef(const NameRef* node) override {
+    AddUse(node->name_def());
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleTypeRef(const TypeRef* node) override {
+    AddUse(TypeDefinitionGetNameDef(node->type_definition()));
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleTypeAlias(const TypeAlias* node) override {
+    // Do not mark type alias as unused.
+    return node->type_annotation().Accept(this);
+  }
+
+  const absl::flat_hash_set<const NameDef*>& Defs() const { return defs_; }
+  const absl::flat_hash_set<const NameDef*>& Uses() const { return uses_; }
+
+ private:
+  void AddUse(const AnyNameDef& any_name_def) {
+    if (const NameDef* const* name_def =
+            std::get_if<const NameDef*>(&any_name_def)) {
+      if (!uses_.insert(*name_def).second) {
+        return;
+      }
+
+      // If any name in a tuple binding is used, consider all names in that
+      // binding used. Users typically want to keep meaningful names for each
+      // component even when only some components are referenced.
+      const AstNode* node = *name_def;
+      while (node->parent() &&
+             node->parent()->kind() == AstNodeKind::kTuplePattern) {
+        node = absl::down_cast<const TuplePattern*>(node->parent());
+      }
+      if (node != *name_def) {
+        ConstPatternTree pattern = absl::down_cast<const TuplePattern*>(node);
+        for (const NameDef* pattern_name_def : GetPatternNameDefs(pattern)) {
+          uses_.insert(pattern_name_def);
+        }
+      }
+    }
+  }
+
+  absl::flat_hash_set<const NameDef*> defs_;
+  absl::flat_hash_set<const NameDef*> uses_;
+};
+
+// Replaces the type annotation for proc state members with
+// BuiltinProcState<TheOriginalType>. In legacy procs, this affects the next()
+// param nodes. In impl-style procs, it affects the declared state members of
+// the proc.
+class ProcStateVisitor : public AstNodeRecursiveVisitor {
+ public:
+  // Creates a visitor using `import_data` and the given `StructDef` for the
+  // builtin `BuiltinProcState` struct.
+  ProcStateVisitor(ImportData& import_data, StructDef* state_struct_def,
+                   const TypecheckModuleFn& typecheck_imported_module)
+      : import_data_(import_data),
+        state_struct_def_(state_struct_def),
+        typecheck_imported_module_(typecheck_imported_module) {}
+
+  absl::Status HandleFunction(const Function* node) override {
+    // Legacy proc has multiple pointers to functions within the AST. This could
+    // cause the HandleParam visitor to run multiple times on the same function.
+    if (!processed_fns_.insert(node).second) {
+      return absl::OkStatus();
+    }
+    return DefaultHandler(node);
+  }
+
+  absl::Status HandleParam(const Param* node) override {
+    if (node->parent() != nullptr &&
+        node->parent()->kind() == AstNodeKind::kFunction) {
+      const Function* fn = absl::down_cast<const Function*>(node->parent());
+      if (fn->tag() == FunctionTag::kProcNext) {
+        const_cast<Param*>(node)->set_type_annotation(
+            CreateStateTypeAnnotation(node->owner(), node->type_annotation(),
+                                      node->type_annotation()->span()));
+      }
+    }
+    return absl::OkStatus();
+  }
+
+  absl::Status HandleProcDef(const ProcDef* node) override {
+    for (StructMemberNode* member : node->members()) {
+      TypeAnnotation* type = member->type();
+
+      // Don't do the T -> State<T> conversion for channels, channel arrays,
+      // I/O objects, or sub-procs.
+      if (IsChannelOrChannelArrayAnnotation(type) ||
+          IsIoObjectAnnotation(type)) {
+        continue;
+      }
+      XLS_ASSIGN_OR_RETURN(
+          std::optional<const StructDefBase*> def,
+          GetStructOrProcDef(type, import_data_, typecheck_imported_module_));
+      if (def.has_value() && (*def)->kind() == AstNodeKind::kProcDef) {
+        continue;
+      }
+
+      if (auto* tr_type = dynamic_cast<const TypeRefTypeAnnotation*>(type)) {
+        if (ToAstNode(tr_type->type_ref()->type_definition()) ==
+            state_struct_def_) {
+          // Already wrapped
+          continue;
+        }
+      }
+
+      member->set_type(
+          CreateStateTypeAnnotation(node->owner(), type, type->span()));
+    }
+    return absl::OkStatus();
+  }
+
+ private:
+  TypeAnnotation* CreateStateTypeAnnotation(Module* module,
+                                            TypeAnnotation* underlying_type,
+                                            const Span& span) {
+    TypeRef* state_typeref = module->Make<TypeRef>(span, state_struct_def_);
+    std::vector<ExprOrType> parametrics = {underlying_type};
+    return module->Make<TypeRefTypeAnnotation>(span, state_typeref,
+                                               parametrics);
+  }
+
+  ImportData& import_data_;
+  StructDef* const state_struct_def_;
+  const TypecheckModuleFn& typecheck_imported_module_;
+  absl::flat_hash_set<const Function*> processed_fns_;
+};
+
+// Generates a trivial `fn next(self) {}` in a ProcDef that does not have one.
+// Such a proc may just be stitching subprocs together and not doing any runtime
+// work itself. The generated `next` function has an attribute of kind
+// `kTrivialNext` for downstream recognition. For example, IR conversion
+// requires the top proc to have a real next function.
+class ProcDefTrivialNextGenerator : public AstNodeRecursiveVisitor {
+ public:
+  ProcDefTrivialNextGenerator()
+      : AstNodeRecursiveVisitor(/*want_types=*/true) {}
+
+  absl::Status HandleProcDef(const ProcDef* node) override {
+    if (!node->impl().has_value()) {
+      return absl::OkStatus();
+    }
+    if (GetProcNextFunction(node).has_value()) {
+      return absl::OkStatus();
+    }
+
+    Module* module = node->owner();
+    XLS_RET_CHECK(node->impl().has_value());
+    Impl* impl = *node->impl();
+
+    NameDef* fn_name_def =
+        module->Make<NameDef>(node->span(), "next", /*definer=*/nullptr);
+    SelfTypeAnnotation* self_type = module->Make<SelfTypeAnnotation>(
+        node->span(), /*explicit_type=*/false, impl->struct_ref());
+    NameDef* self_name_def =
+        module->Make<NameDef>(node->span(), "self", /*definer=*/nullptr);
+    Param* param = module->Make<Param>(self_name_def, self_type);
+    self_name_def->set_definer(param);
+    std::vector<Param*> params = {param};
+    StatementBlock* body = module->Make<StatementBlock>(
+        node->span(), std::vector<Statement*>{}, /*trailing_semi=*/true,
+        /*has_braces=*/true);
+    Function* next_fn = module->Make<Function>(
+        node->span(), fn_name_def, std::vector<ParametricBinding*>{}, params,
+        /*return_type=*/nullptr, body, FunctionTag::kNormal,
+        /*is_public=*/false, /*is_stub=*/false);
+    next_fn->set_impl(impl);
+    fn_name_def->set_definer(next_fn);
+
+    Attribute* trivial_next_attr = module->Make<Attribute>(
+        Span::None(), Span::None(),
+        AttributeData(AttributeKind::kTrivialNext,
+                      std::vector<AttributeData::Argument>{}));
+    next_fn->AddAttribute(trivial_next_attr);
+    next_fn->SetParentNonLexical(impl);
+    next_fn->set_compiler_derived(true);
+    impl->AddMember(next_fn);
+    return absl::OkStatus();
+  }
+};
+
+class ConfiguredValueUsageVisitor : public AstNodeRecursiveVisitor {
+ public:
+  ConfiguredValueUsageVisitor(std::string_view module_name,
+                              ImportData& import_data)
+      : AstNodeRecursiveVisitor(/*want_types=*/true),
+        module_name_(module_name),
+        import_data_(import_data) {}
+
+  absl::Status HandleInvocation(const Invocation* node) override {
+    if (node->callee() != nullptr &&
+        node->callee()->kind() == AstNodeKind::kNameRef &&
+        absl::down_cast<const NameRef*>(node->callee())->identifier() ==
+            "configured_value_or" &&
+        !node->args().empty() &&
+        node->args()[0]->kind() == AstNodeKind::kString) {
+      import_data_.NoteConfiguredValueUsed(
+          module_name_,
+          absl::down_cast<const String*>(node->args()[0])->text());
+    }
+    return DefaultHandler(node);
+  }
+
+ private:
+  std::string_view module_name_;
+  ImportData& import_data_;
+};
+
+}  // namespace
+
+SemanticsAnalysis::SemanticsAnalysis(bool suppress_warnings)
+    : suppress_warnings_(suppress_warnings) {}
+
+absl::Status SemanticsAnalysis::RunPreTypeCheckPass(
+    Module& module, WarningCollector& warning_collector,
+    ImportData& import_data,
+    const TypecheckModuleFn& typecheck_imported_module) {
+  ProcDefTrivialNextGenerator next_generator;
+  XLS_RETURN_IF_ERROR(module.Accept(&next_generator));
+
+  if (module.attributes().contains(ModuleAttribute::kExplicitStateAccess)) {
+    XLS_ASSIGN_OR_RETURN(Module * builtins,
+                         import_data.GetBuiltinStubsModule());
+    XLS_ASSIGN_OR_RETURN(
+        StructDef * state_struct_def,
+        builtins->GetMemberOrError<StructDef>(kBuiltinProcStateStructName));
+    ProcStateVisitor state_visitor(import_data, state_struct_def,
+                                   typecheck_imported_module);
+    XLS_RETURN_IF_ERROR(module.Accept(&state_visitor));
+  }
+  XLS_RETURN_IF_ERROR(RewriteLambdas(module, import_data));
+  XLS_RETURN_IF_ERROR(RewriteDomainStructs(module, import_data));
+
+  AddSpawnTraitToProcDefs add_spawn_trait;
+  XLS_RETURN_IF_ERROR(module.Accept(&add_spawn_trait));
+
+  module_ = &module;
+  import_data_ = &import_data;
+
+  ConfiguredValueUsageVisitor configured_value_usage_visitor(module.name(),
+                                                             import_data);
+  XLS_RETURN_IF_ERROR(module.Accept(&configured_value_usage_visitor));
+
+  if (suppress_warnings_) {
+    return absl::OkStatus();
+  }
+  PreTypecheckPass pass(warning_collector, import_data.file_table());
+
+  for (const ModuleMember& top : module.top()) {
+    if (const Function* const* func = std::get_if<Function*>(&top)) {
+      CollectUseDef visitor;
+      XLS_RETURN_IF_ERROR((*func)->body()->Accept(&visitor));
+
+      maybe_unreferenced_defs.emplace_back(
+          std::make_pair(*func, std::vector<const NameDef*>()));
+      std::vector<const NameDef*>& defs_in_func =
+          maybe_unreferenced_defs.back().second;
+
+      for (const NameDef* def : visitor.Defs()) {
+        if (!visitor.Uses().contains(def)) {
+          defs_in_func.emplace_back(def);
+          def_to_type_.try_emplace(def, nullptr);
+        }
+      }
+    }
+  }
+
+  return module.Accept(&pass);
+}
+
+// If a possibly unused def is concretized to a non-token type at any possible
+// context, it is truly unused.
+void SemanticsAnalysis::SetNameDefType(const NameDef* def, const Type* type) {
+  auto found = def_to_type_.find(def);
+  if (found != def_to_type_.end()) {
+    if ((found->second && found->second->IsToken()) || !found->second) {
+      found->second = type->CloneToUnique();
+    }
+  }
+}
+
+absl::Status SemanticsAnalysis::RunPostTypeCheckPass(
+    WarningCollector& warning_collector) {
+  if (suppress_warnings_) {
+    return absl::OkStatus();
+  }
+  // Report unused defs.
+  for (auto& [f, unused_defs] : maybe_unreferenced_defs) {
+    // Sort them for reporting stability.
+    std::sort(
+        unused_defs.begin(), unused_defs.end(),
+        [](const NameDef* a, const NameDef* b) {
+          return a->span() < b->span() ||
+                 (a->span() == b->span() && a->identifier() < b->identifier());
+        });
+    for (const NameDef* def : unused_defs) {
+      std::unique_ptr<Type>& type = def_to_type_.at(def);
+      // Tokens are implicitly joined at the end of a proc `next()`, so we
+      // don't warn on these.
+      if (type && !type->IsToken()) {
+        warning_collector.Add(
+            def->span(), WarningKind::kUnusedDefinition,
+            absl::StrFormat(
+                "Definition of `%s` (type `%s`) is not used in function `%s`",
+                def->identifier(), type->ToString(), f->identifier()));
+      }
+    }
+  }
+
+  if (module_ != nullptr && import_data_ != nullptr &&
+      !import_data_->defer_unused_check()) {
+    Span span =
+        module_->GetSpan().has_value()
+            ? Span(module_->GetSpan()->start(), module_->GetSpan()->start())
+            : Span::Fake();
+    for (const ConfiguredValueGroup& group :
+         import_data_->configured_value_groups()) {
+      if (group.used) {
+        continue;
+      }
+      if (group.scope_modules.empty()) {
+        warning_collector.Add(
+            span, WarningKind::kUnusedConfiguredValue,
+            absl::StrFormat("Configured value `%s` is not used", group.key));
+      } else if (group.loaded_scope_modules.size() ==
+                 group.scope_modules.size()) {
+        warning_collector.Add(
+            span, WarningKind::kUnusedConfiguredValue,
+            absl::StrFormat(
+                "Configured value `%s@%s` is not used in module(s) %s",
+                group.key, absl::StrJoin(group.scope_modules, "+"),
+                absl::StrJoin(group.scope_modules, ", ")));
+      }
+    }
+  }
+
+  return absl::OkStatus();
+}
+
+}  // namespace xls::dslx

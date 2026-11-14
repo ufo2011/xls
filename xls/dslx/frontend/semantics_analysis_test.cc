@@ -1,0 +1,117 @@
+// Copyright 2026 The XLS Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "xls/dslx/frontend/semantics_analysis.h"
+
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <string_view>
+
+#include "gtest/gtest.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "xls/common/status/matchers.h"
+#include "xls/dslx/create_import_data.h"
+#include "xls/dslx/frontend/ast.h"
+#include "xls/dslx/frontend/module.h"
+#include "xls/dslx/import_data.h"
+#include "xls/dslx/parse_and_typecheck.h"
+#include "xls/dslx/warning_collector.h"
+
+namespace xls::dslx {
+namespace {
+
+TEST(SemanticsAnalysisTest, StatefulProcDoubleTypecheck) {
+  constexpr std::string_view kProgram = R"(
+#![feature(explicit_state_access)]
+proc Counter {
+    state: u32,
+}
+)";
+  auto import_data = CreateImportDataForTest();
+  XLS_ASSERT_OK_AND_ASSIGN(
+      TypecheckedModule tm,
+      ParseAndTypecheck(kProgram, "fake_path.x", "the_module", &import_data));
+
+  // Run semantics analysis on the module again. This runs ProcStateVisitor.
+  // It should succeed and not double-wrap the state member.
+  WarningCollector warnings(import_data.enabled_warnings());
+  auto dummy_typecheck =
+      [](std::unique_ptr<Module>,
+         std::filesystem::path) -> absl::StatusOr<std::unique_ptr<ModuleInfo>> {
+    return absl::InternalError("Dummy typecheck should not be called");
+  };
+  SemanticsAnalysis semantics_analysis;
+  XLS_EXPECT_OK(semantics_analysis.RunPreTypeCheckPass(
+      *tm.module, warnings, import_data, dummy_typecheck));
+
+  // Verify structurally that the member is not double-wrapped.
+  XLS_ASSERT_OK_AND_ASSIGN(ProcDef * proc,
+                           tm.module->GetMemberOrError<ProcDef>("Counter"));
+  ASSERT_EQ(proc->members().size(), 1);
+  StructMemberNode* member = proc->members()[0];
+  EXPECT_EQ(member->type()->ToString(), "BuiltinProcState<u32>");
+}
+
+TEST(SemanticsAnalysisTest, ModuleWithoutSpanDoesNotCrashPostTypeCheckPass) {
+  auto import_data = CreateImportDataForTest();
+  XLS_ASSERT_OK(import_data.RegisterConfiguredValues({"unused_key:42"}));
+  Module module("synthetic_module", /*fs_path=*/std::nullopt,
+                import_data.file_table());
+  ASSERT_FALSE(module.GetSpan().has_value());
+
+  WarningCollector warnings(import_data.enabled_warnings());
+  auto dummy_typecheck =
+      [](std::unique_ptr<Module>,
+         std::filesystem::path) -> absl::StatusOr<std::unique_ptr<ModuleInfo>> {
+    return absl::InternalError("Dummy typecheck should not be called");
+  };
+  SemanticsAnalysis semantics_analysis;
+  XLS_ASSERT_OK(semantics_analysis.RunPreTypeCheckPass(
+      module, warnings, import_data, dummy_typecheck));
+  XLS_ASSERT_OK(semantics_analysis.RunPostTypeCheckPass(warnings));
+  ASSERT_EQ(warnings.warnings().size(), 1);
+}
+
+TEST(SemanticsAnalysisTest, SourceAndSinkNotWrappedInBuiltinProcState) {
+  constexpr std::string_view kProgram = R"(
+#![feature(type_inference_v2)]
+#![feature(explicit_state_access)]
+#![feature(io_objects)]
+proc Loopback {
+    input: Source<u32>,
+    output: Sink<u32>,
+    in_bus: Source<u32>[4],
+    out_bus: Sink<u32>[4],
+    state: u32,
+}
+)";
+  auto import_data = CreateImportDataForTest();
+  XLS_ASSERT_OK_AND_ASSIGN(
+      TypecheckedModule tm,
+      ParseAndTypecheck(kProgram, "fake_path.x", "the_module", &import_data));
+
+  XLS_ASSERT_OK_AND_ASSIGN(ProcDef * proc,
+                           tm.module->GetMemberOrError<ProcDef>("Loopback"));
+  ASSERT_EQ(proc->members().size(), 5);
+  EXPECT_EQ(proc->members()[0]->type()->ToString(), "Source<u32>");
+  EXPECT_EQ(proc->members()[1]->type()->ToString(), "Sink<u32>");
+  EXPECT_EQ(proc->members()[2]->type()->ToString(), "Source<u32>[4]");
+  EXPECT_EQ(proc->members()[3]->type()->ToString(), "Sink<u32>[4]");
+  EXPECT_EQ(proc->members()[4]->type()->ToString(), "BuiltinProcState<u32>");
+}
+
+}  // namespace
+}  // namespace xls::dslx

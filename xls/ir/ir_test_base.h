@@ -15,15 +15,32 @@
 #ifndef XLS_IR_IR_TEST_BASE_H_
 #define XLS_IR_IR_TEST_BASE_H_
 
+#include <cstdint>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
-#include "xls/common/source_location.h"
+#include "absl/strings/str_format.h"
+#include "absl/strings/str_replace.h"
+#include "absl/types/span.h"
+#include "xls/data_structures/leaf_type_tree.h"
+#include "xls/estimators/delay_model/delay_estimator.h"
 #include "xls/ir/function.h"
 #include "xls/ir/function_base.h"
 #include "xls/ir/node.h"
+#include "xls/ir/op.h"
 #include "xls/ir/package.h"
 #include "xls/ir/proc.h"
+#include "xls/ir/ternary.h"
+#include "xls/ir/type.h"
+#include "xls/ir/value.h"
 #include "xls/ir/verifier.h"
 
 namespace xls {
@@ -33,86 +50,67 @@ namespace xls {
 // explicitly call the verifier.
 class VerifiedPackage : public Package {
  public:
-  explicit VerifiedPackage(absl::string_view name,
-                           absl::optional<absl::string_view> entry)
-      : Package(name, entry) {}
+  explicit VerifiedPackage(std::string_view name) : Package(name) {}
   ~VerifiedPackage() override;
+
+  void AcceptInvalid() { verify_ = false; }
+
+ private:
+  bool verify_ = true;
 };
 
 // A test base class with convenience functions for IR tests.
 class IrTestBase : public ::testing::Test {
- protected:
-  IrTestBase() {}
+ public:
+  IrTestBase() = default;
 
   static std::string TestName() {
-    return ::testing::UnitTest::GetInstance()->current_test_info()->name();
+    // If we try to run the program it can't have the '/' in its name. Remove
+    // them so this pattern works.
+    std::string name =
+        ::testing::UnitTest::GetInstance()->current_test_info()->name();
+    absl::StrReplaceAll(std::vector{std::pair{"/", "_"}}, &name);
+    return name;
   }
 
   // Creates an empty package with a name equal to TestName().
   static std::unique_ptr<VerifiedPackage> CreatePackage() {
-    return absl::make_unique<VerifiedPackage>(TestName(), absl::nullopt);
+    return std::make_unique<VerifiedPackage>(TestName());
   }
 
   // Parses the given text as a package and replaces the owned packaged with the
   // result. Package can be accessed by calling "package()".
   static absl::StatusOr<std::unique_ptr<VerifiedPackage>> ParsePackage(
-      absl::string_view text);
+      std::string_view text);
 
   // As above but skips IR verification and returns an ordinary Package..
   static absl::StatusOr<std::unique_ptr<Package>> ParsePackageNoVerify(
-      absl::string_view text);
+      std::string_view text);
 
   // Parse the input_string as a function into the given package.
-  absl::StatusOr<Function*> ParseFunction(absl::string_view text,
+  absl::StatusOr<Function*> ParseFunction(std::string_view text,
                                           Package* package);
 
   // Parse the input_string as a proc into the given package.
-  absl::StatusOr<Proc*> ParseProc(absl::string_view text, Package* package);
+  absl::StatusOr<Proc*> ParseProc(std::string_view text, Package* package);
 
   // Finds and returns the node in the given package (function) with the given
   // name. Dies if no such node exists.
-  static Node* FindNode(absl::string_view name, Package* package);
-  static Node* FindNode(absl::string_view name, FunctionBase* function);
+  static Node* FindNode(std::string_view name, Package* package);
+  static Node* FindNode(std::string_view name, FunctionBase* function);
 
-  // Finds and returns the function or proc in the given package with the given
-  // name. Dies if no such function or proc  exists.
-  static Function* FindFunction(absl::string_view name, Package* package);
-  static Proc* FindProc(absl::string_view name, Package* package);
+  // Finds returns True if the node in the given package (function)
+  // with the given name.
+  static bool HasNode(std::string_view name, Package* package);
+  static bool HasNode(std::string_view name, FunctionBase* function);
 
-  // Runs the given package (passed as IR text) and EXPECTs the result to equal
-  // 'expected'. Runs the package in several ways:
-  // (1) unoptimized IR through the interpreter.
-  // (2) optimized IR through the interpreter. (enabled with run_optimized)
-  // (3) pipeline generator emitted Verilog through a Verilog simulator.
-  //          (enabled with simulate)
-  static void RunAndExpectEq(
-      const absl::flat_hash_map<std::string, uint64_t>& args, uint64_t expected,
-      absl::string_view package_text, bool run_optimized = true,
-      bool simulate = true,
-      xabsl::SourceLocation loc = xabsl::SourceLocation::current());
+  // Finds and returns the function, proc, or block in the given package with
+  // the given name. Dies if no such function or proc exists.
+  static Function* FindFunction(std::string_view name, Package* package);
+  static Proc* FindProc(std::string_view name, Package* package);
+  static Block* FindBlock(std::string_view name, Package* package);
 
-  // Overload which takes Bits as arguments and the expected result.
-  static void RunAndExpectEq(
-      const absl::flat_hash_map<std::string, Bits>& args, Bits expected,
-      absl::string_view package_text, bool run_optimized = true,
-      bool simulate = true,
-      xabsl::SourceLocation loc = xabsl::SourceLocation::current());
-
-  // Overload which takes Values as arguments and the expected result.
-  static void RunAndExpectEq(
-      const absl::flat_hash_map<std::string, Value>& args, Value expected,
-      absl::string_view package_text, bool run_optimized = true,
-      bool simulate = true,
-      xabsl::SourceLocation loc = xabsl::SourceLocation::current());
-
- private:
-  // Helper for RunAndExpectEq which accepts arguments and expectation as Values
-  // and takes a std::unique_ptr<Package>.
-  static void RunAndExpectEq(
-      const absl::flat_hash_map<std::string, Value>& args,
-      const Value& expected, std::unique_ptr<Package>&& package,
-      bool run_optimized = true, bool simulate = true);
-
+ protected:
   // Converts the given map of uint64_t arguments into a map of Value argument
   // with the appropriate bit widths as determined by the package.
   static absl::StatusOr<absl::flat_hash_map<std::string, Value>>
@@ -124,6 +122,144 @@ class IrTestBase : public ::testing::Test {
   static absl::StatusOr<Value> UInt64ResultToValue(uint64_t value,
                                                    Package* package);
 };
+
+class TestDelayEstimator : public DelayEstimator {
+ public:
+  explicit TestDelayEstimator(int64_t base_delay = 1)
+      : DelayEstimator("test"), base_delay_(base_delay) {}
+
+  absl::StatusOr<int64_t> GetOperationDelayInPs(Node* node) const override {
+    switch (node->op()) {
+      case Op::kAfterAll:
+      case Op::kMinDelay:
+      case Op::kBitSlice:
+      case Op::kConcat:
+      case Op::kLiteral:
+      case Op::kParam:
+      case Op::kStateRead:
+      case Op::kNext:
+      case Op::kReceive:
+      case Op::kSend:
+      case Op::kTupleIndex:
+        return 0;
+      case Op::kUDiv:
+      case Op::kSDiv:
+        return 2 * base_delay_;
+      default:
+        return base_delay_;
+    }
+  }
+
+ private:
+  int64_t base_delay_;
+};
+
+// Helper to record IR before and after some test event which changes it.
+struct ScopedRecordIr {
+ public:
+  explicit ScopedRecordIr(Package* p, std::string_view name = "",
+                          bool with_initial = true)
+      : p_(p), name_(name) {
+    if (with_initial) {
+      testing::Test::RecordProperty(
+          absl::StrFormat("initial%s%s", name_.empty() ? "" : "_", name_),
+          p_->DumpIr());
+    }
+  }
+  ~ScopedRecordIr() {
+    testing::Test::RecordProperty(
+        absl::StrFormat("final%s%s", name_.empty() ? "" : "_", name_),
+        p_->DumpIr());
+  }
+
+ private:
+  Package* p_;
+  std::string name_;
+};
+
+// Helper to record something on failure.
+template <typename T>
+struct ScopedMaybeRecord {
+ public:
+  ScopedMaybeRecord(std::string_view title, T t) : title_(title), t_(t) {}
+  ~ScopedMaybeRecord() {
+    if (testing::Test::HasFailure()) {
+      if constexpr (std::is_convertible_v<T, std::string_view>) {
+        testing::Test::RecordProperty(title_, t_);
+      } else {
+        testing::Test::RecordProperty(title_, testing::PrintToString(t_));
+      }
+    }
+  }
+
+ private:
+  std::string title_;
+  T t_;
+};
+
+template <typename T>
+ScopedMaybeRecord(std::string_view, T) -> ScopedMaybeRecord<T>;
+
+template <typename T>
+class LeafTypeTreeIsMatcher {
+ public:
+  LeafTypeTreeIsMatcher(testing::Matcher<Type*> type,
+                        testing::Matcher<absl::Span<T const>> elements)
+      : type_(type), elements_(std::move(elements)) {}
+  using is_gtest_matcher = void;
+  bool MatchAndExplain(const SharedLeafTypeTree<T>& ltt,
+                       testing::MatchResultListener* listener) const {
+    return MatchAndExplain(ltt.AsView(), listener);
+  }
+  bool MatchAndExplain(const LeafTypeTree<T>& ltt,
+                       testing::MatchResultListener* listener) const {
+    return MatchAndExplain(ltt.AsView(), listener);
+  }
+  bool MatchAndExplain(const LeafTypeTreeView<T>& ltt,
+                       testing::MatchResultListener* listener) const {
+    *listener << "LeafTypeTree with ";
+    return type_.MatchAndExplain(ltt.type(), listener) &&
+           elements_.MatchAndExplain(ltt.elements(), listener);
+  }
+
+  void DescribeBothTo(std::ostream* os, bool is_negation) const {
+    *os << " is " << (is_negation ? "not " : "") << "a LeafTypeTree with type "
+        << testing::DescribeMatcher<Type*>(type_) << " and elements "
+        << testing::DescribeMatcher<std::vector<T>>(elements_);
+  }
+  void DescribeTo(std::ostream* os) const { DescribeBothTo(os, false); }
+
+  void DescribeNegationTo(std::ostream* os) const { DescribeBothTo(os, true); }
+
+ private:
+  testing::Matcher<Type*> type_;
+  testing::Matcher<absl::Span<T const>> elements_;
+};
+
+template <typename T>
+LeafTypeTreeIsMatcher<T> LttIs(testing::Matcher<Type*> type,
+                               testing::Matcher<absl::Span<T const>> elements) {
+  return LeafTypeTreeIsMatcher<T>(std::move(type), std::move(elements));
+}
+template <typename T>
+LeafTypeTreeIsMatcher<T> LttIs(testing::Matcher<absl::Span<T const>> elements) {
+  return LeafTypeTreeIsMatcher<T>(testing::_, std::move(elements));
+}
+
+namespace internal {
+MATCHER_P(BadTernary, sv, "") {
+  *result_listener << "The ternary string '" << sv << "' is not valid";
+  return false;
+}
+}  // namespace internal
+
+inline testing::Matcher<TernaryVector> TernaryIs(std::string_view sv) {
+  auto tv = StringToTernaryVector(sv);
+  if (tv.ok()) {
+    return testing::ElementsAreArray(*tv);
+  }
+  return internal::BadTernary(sv);
+}
 
 }  // namespace xls
 

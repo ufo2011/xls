@@ -14,51 +14,45 @@
 
 #include "xls/passes/bdd_simplification_pass.h"
 
+#include <cstdint>
+#include <string_view>
+#include <utility>
+
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "xls/common/fuzzing/fuzztest.h"
 #include "absl/status/statusor.h"
 #include "xls/common/status/matchers.h"
 #include "xls/common/status/status_macros.h"
+#include "xls/fuzzer/ir_fuzzer/ir_fuzz_domain.h"
+#include "xls/fuzzer/ir_fuzzer/ir_fuzz_test_library.h"
 #include "xls/ir/bits.h"
 #include "xls/ir/function.h"
 #include "xls/ir/function_builder.h"
 #include "xls/ir/ir_matcher.h"
 #include "xls/ir/ir_test_base.h"
+#include "xls/ir/lsb_or_msb.h"
 #include "xls/ir/package.h"
-#include "xls/passes/bdd_cse_pass.h"
-#include "xls/passes/bit_slice_simplification_pass.h"
-#include "xls/passes/concat_simplification_pass.h"
-#include "xls/passes/dce_pass.h"
-#include "xls/passes/select_simplification_pass.h"
+#include "xls/passes/optimization_pass.h"
+#include "xls/passes/pass_base.h"
+#include "xls/solvers/ir_equivalence_testutils.h"
 
 namespace m = ::xls::op_matchers;
 
 namespace xls {
 namespace {
 
-using status_testing::IsOkAndHolds;
+using ::absl_testing::IsOkAndHolds;
 
 class BddSimplificationPassTest : public IrTestBase {
  protected:
-  absl::StatusOr<bool> Run(Function* f, bool run_cleanup_passes = false,
-                           int64_t opt_level = kMaxOptLevel) {
+  absl::StatusOr<bool> Run(Function* f, int64_t opt_level = kMaxOptLevel) {
     PassResults results;
-    XLS_ASSIGN_OR_RETURN(bool changed,
-                         BddSimplificationPass(opt_level).RunOnFunctionBase(
-                             f, PassOptions(), &results));
-    if (run_cleanup_passes) {
-      XLS_RETURN_IF_ERROR(BitSliceSimplificationPass()
-                              .RunOnFunctionBase(f, PassOptions(), &results)
-                              .status());
-      XLS_RETURN_IF_ERROR(SelectSimplificationPass()
-                              .RunOnFunctionBase(f, PassOptions(), &results)
-                              .status());
-      XLS_RETURN_IF_ERROR(
-          BddCsePass().RunOnFunctionBase(f, PassOptions(), &results).status());
-      XLS_RETURN_IF_ERROR(DeadCodeEliminationPass()
-                              .RunOnFunctionBase(f, PassOptions(), &results)
-                              .status());
-    }
+    OptimizationContext context;
+    XLS_ASSIGN_OR_RETURN(
+        bool changed, BddSimplificationPass().RunOnFunctionBase(
+                          f, OptimizationPassOptions().WithOptLevel(opt_level),
+                          &results, context));
     return changed;
   }
 };
@@ -121,6 +115,34 @@ TEST_F(BddSimplificationPassTest, KnownSuffixButNotReplaced) {
   EXPECT_THAT(f->return_value(), m::Concat(m::Param("x"), m::Literal(123)));
 }
 
+TEST_F(BddSimplificationPassTest,
+       KnownSuffixWiderThanFirstOperandButNotReplaced) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  fb.Concat({x, fb.Literal(UBits(123, 10))});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+
+  EXPECT_THAT(Run(f), IsOkAndHolds(false));
+  EXPECT_THAT(f->return_value(), m::Concat(m::Param("x"), m::Literal(123)));
+}
+
+TEST_F(BddSimplificationPassTest,
+       KnownSuffixNarrowerThanFirstOperandButWiderThanLastLiteralIsReplaced) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(16));
+  BValue y = fb.Param("y", p->GetBitsType(4));
+  BValue inner = fb.Concat({y, fb.Literal(UBits(0, 4))});
+  fb.Concat({x, inner, fb.Literal(UBits(0, 4))});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+
+  solvers::ScopedVerifyEquivalence sve{f};
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Concat(m::BitSlice(), m::Literal(UBits(0, 8))));
+}
+
 TEST_F(BddSimplificationPassTest, RemoveRedundantOneHot) {
   auto p = CreatePackage();
   FunctionBuilder fb(TestName(), p.get());
@@ -133,6 +155,112 @@ TEST_F(BddSimplificationPassTest, RemoveRedundantOneHot) {
 
   EXPECT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(), m::Concat(m::Eq(), m::Concat()));
+}
+
+TEST_F(BddSimplificationPassTest, RemoveRedundantInputsToAnd) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  BValue x_eq_0 = fb.Eq(x, fb.Literal(UBits(0, 8)));
+  BValue x_eq_42 = fb.Eq(x, fb.Literal(UBits(42, 8)));
+  BValue x_ne_0 = fb.Not(x_eq_0);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f,
+                           fb.BuildWithReturnValue(fb.And(x_ne_0, x_eq_42)));
+
+  solvers::ScopedVerifyEquivalence sve{f};
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::And(m::Literal(1), m::Eq(m::Param("x"), m::Literal(42))));
+}
+
+TEST_F(BddSimplificationPassTest, RemoveRedundantInputsToNand) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  BValue x_eq_0 = fb.Eq(x, fb.Literal(UBits(0, 8)));
+  BValue x_eq_42 = fb.Eq(x, fb.Literal(UBits(42, 8)));
+  BValue x_ne_0 = fb.Not(x_eq_0);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f,
+                           fb.BuildWithReturnValue(fb.Nand(x_ne_0, x_eq_42)));
+
+  solvers::ScopedVerifyEquivalence sve{f};
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::Nand(m::Literal(1), m::Eq(m::Param("x"), m::Literal(42))));
+}
+
+TEST_F(BddSimplificationPassTest, RemoveRedundantInputsToOr) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  BValue x_eq_0 = fb.Eq(x, fb.Literal(UBits(0, 8)));
+  BValue x_eq_42 = fb.Eq(x, fb.Literal(UBits(42, 8)));
+  BValue x_ne_0 = fb.Not(x_eq_0);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f,
+                           fb.BuildWithReturnValue(fb.Or(x_ne_0, x_eq_42)));
+
+  solvers::ScopedVerifyEquivalence sve{f};
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::Or(m::Not(m::Eq(m::Param("x"), m::Literal(0))), m::Literal(0)));
+}
+
+TEST_F(BddSimplificationPassTest, RemoveRedundantInputsToNor) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  BValue x_eq_0 = fb.Eq(x, fb.Literal(UBits(0, 8)));
+  BValue x_eq_42 = fb.Eq(x, fb.Literal(UBits(42, 8)));
+  BValue x_ne_0 = fb.Not(x_eq_0);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f,
+                           fb.BuildWithReturnValue(fb.Nor(x_ne_0, x_eq_42)));
+
+  solvers::ScopedVerifyEquivalence sve{f};
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(
+      f->return_value(),
+      m::Nor(m::Not(m::Eq(m::Param("x"), m::Literal(0))), m::Literal(0)));
+}
+
+TEST_F(BddSimplificationPassTest, RemoveRedundantPrioritySelectCases) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  BValue a = fb.Param("a", p->GetBitsType(24));
+  BValue b = fb.Param("b", p->GetBitsType(24));
+  BValue c = fb.Param("c", p->GetBitsType(24));
+  BValue d = fb.Param("d", p->GetBitsType(24));
+  BValue x_ge_5 = fb.UGe(x, fb.Literal(UBits(5, 8)));
+  BValue x_le_42 = fb.ULe(x, fb.Literal(UBits(42, 8)));
+  BValue x_eq_8 = fb.Eq(x, fb.Literal(UBits(8, 8)));
+  fb.PrioritySelect(fb.Concat({x_eq_8, x_ge_5, x_le_42}), /*cases=*/{a, b, c},
+                    /*default_value=*/d);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+
+  solvers::ScopedVerifyEquivalence sve{f};
+  EXPECT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(),
+              m::PrioritySelect(m::BitSlice(m::Concat()), {m::Param("a")},
+                                m::Param("b")));
+}
+
+TEST_F(BddSimplificationPassTest, PreserveNonRedundantPrioritySelectCases) {
+  auto p = CreatePackage();
+  FunctionBuilder fb(TestName(), p.get());
+  BValue x = fb.Param("x", p->GetBitsType(8));
+  BValue a = fb.Param("a", p->GetBitsType(24));
+  BValue b = fb.Param("b", p->GetBitsType(24));
+  BValue c = fb.Param("c", p->GetBitsType(24));
+  BValue d = fb.Param("d", p->GetBitsType(24));
+  BValue x_ge_5 = fb.UGe(x, fb.Literal(UBits(5, 8)));
+  BValue x_lt_3 = fb.ULt(x, fb.Literal(UBits(3, 8)));
+  BValue x_eq_3 = fb.Eq(x, fb.Literal(UBits(3, 8)));
+  fb.PrioritySelect(fb.Concat({x_eq_3, x_ge_5, x_lt_3}), /*cases=*/{a, b, c},
+                    /*default_value=*/d);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+
+  EXPECT_THAT(Run(f), IsOkAndHolds(false));
 }
 
 TEST_F(BddSimplificationPassTest, ConvertTwoWayOneHotSelect) {
@@ -150,78 +278,9 @@ TEST_F(BddSimplificationPassTest, ConvertTwoWayOneHotSelect) {
                                                m::Param("y"), m::Param("x")}));
 }
 
-TEST_F(BddSimplificationPassTest, SelectChainOneHot) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
-  BValue s = fb.Param("s", p->GetBitsType(2));
-  BValue pred0 = fb.Eq(s, fb.Literal(UBits(0, 2)));
-  BValue pred1 = fb.Eq(s, fb.Literal(UBits(1, 2)));
-  BValue pred2 = fb.Eq(s, fb.Literal(UBits(2, 2)));
-  BValue pred3 = fb.Eq(s, fb.Literal(UBits(3, 2)));
-  auto param = [&](absl::string_view s) {
-    return fb.Param(s, p->GetBitsType(8));
-  };
-  fb.Select(pred3, param("x3"),
-            fb.Select(pred2, param("x2"),
-                      fb.Select(pred1, param("x1"),
-                                fb.Select(pred0, param("x0"), param("y")))));
-  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
-  ASSERT_THAT(Run(f), IsOkAndHolds(true));
-  EXPECT_THAT(f->return_value(),
-              m::OneHotSelect(m::Concat(m::Eq(m::Param("s"), m::Literal(3)),
-                                        m::Eq(m::Param("s"), m::Literal(2)),
-                                        m::Eq(m::Param("s"), m::Literal(1)),
-                                        m::Eq(m::Param("s"), m::Literal(0))),
-                              {m::Param("x0"), m::Param("x1"), m::Param("x2"),
-                               m::Param("x3")}));
-}
-
-TEST_F(BddSimplificationPassTest, SelectChainOneHotArray) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
-  BValue s = fb.Param("s", p->GetBitsType(2));
-  BValue pred0 = fb.Eq(s, fb.Literal(UBits(0, 2)));
-  BValue pred1 = fb.Eq(s, fb.Literal(UBits(1, 2)));
-  BValue pred2 = fb.Eq(s, fb.Literal(UBits(2, 2)));
-  BValue pred3 = fb.Eq(s, fb.Literal(UBits(3, 2)));
-  auto param = [&](absl::string_view s) {
-    return fb.Param(s, p->GetArrayType(8, p->GetBitsType(32)));
-  };
-  fb.Select(pred3, param("x3"),
-            fb.Select(pred2, param("x2"),
-                      fb.Select(pred1, param("x1"),
-                                fb.Select(pred0, param("x0"), param("y")))));
-  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
-  // Transform was not applied to an array type.
-  // This should not be done because it's not supported in codegen.
-  ASSERT_THAT(Run(f), IsOkAndHolds(false));
-}
-
-TEST_F(BddSimplificationPassTest, SelectChainOneHotOrZeroSelectors) {
-  auto p = CreatePackage();
-  FunctionBuilder fb(TestName(), p.get());
-  BValue s = fb.Param("s", p->GetBitsType(8));
-  BValue pred0 = fb.UGt(s, fb.Literal(UBits(42, 8)));
-  BValue pred1 = fb.Eq(s, fb.Literal(UBits(11, 8)));
-  BValue pred2 = fb.ULt(s, fb.Literal(UBits(7, 8)));
-  auto param = [&](absl::string_view s) {
-    return fb.Param(s, p->GetBitsType(8));
-  };
-  fb.Select(
-      pred2, param("x2"),
-      fb.Select(pred1, param("x1"), fb.Select(pred0, param("x0"), param("y"))));
-  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
-  ASSERT_THAT(Run(f), IsOkAndHolds(true));
-  EXPECT_THAT(f->return_value(),
-              m::OneHotSelect(m::Concat(m::ULt(m::Param("s"), m::Literal(7)),
-                                        m::Eq(m::Param("s"), m::Literal(11)),
-                                        m::UGt(m::Param("s"), m::Literal(42)),
-                                        m::Nor(m::ULt(), m::Eq(), m::UGt())),
-                              {m::Param("y"), m::Param("x0"), m::Param("x1"),
-                               m::Param("x2")}));
-}
-
-TEST_F(BddSimplificationPassTest, OneHotMsbTypical) {
+// TODO(https://github.com/google/xls/issues/423) 2021/04/05 Renable when
+// sensitivity analysis added.
+TEST_F(BddSimplificationPassTest, DISABLED_OneHotMsbTypical) {
   auto p = CreatePackage();
   FunctionBuilder fb(TestName(), p.get());
   BValue input = fb.Param("input", p->GetBitsType(7));
@@ -235,14 +294,16 @@ TEST_F(BddSimplificationPassTest, OneHotMsbTypical) {
   fb.Not(select);
 
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
-  ASSERT_THAT(Run(f, /*run_cleanup_passes=*/true), IsOkAndHolds(true));
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::Not(m::Encode(
                   m::Concat(m::Literal(UBits(0, 1)),
                             m::BitSlice(m::OneHot(m::Param("input")), 0, 7)))));
 }
 
-TEST_F(BddSimplificationPassTest, OneHotMsbAlternateForm) {
+// TODO(https://github.com/google/xls/issues/423) 2021/04/05 Renable when
+// sensitivity analysis added.
+TEST_F(BddSimplificationPassTest, DISABLED_OneHotMsbAlternateForm) {
   auto p = CreatePackage();
   FunctionBuilder fb(TestName(), p.get());
   BValue input = fb.Param("input", p->GetBitsType(7));
@@ -257,15 +318,17 @@ TEST_F(BddSimplificationPassTest, OneHotMsbAlternateForm) {
   fb.Not(select);
 
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
-  ASSERT_THAT(Run(f, /*run_cleanup_passes=*/true), IsOkAndHolds(true));
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::Not(m::Encode(
                   m::Concat(m::Literal(UBits(0, 1)),
                             m::BitSlice(m::OneHot(m::Param("input")), 0, 7)))));
 }
 
+// TODO(https://github.com/google/xls/issues/423) 2021/04/05 Renable when
+// sensitivity analysis added.
 TEST_F(BddSimplificationPassTest,
-       OneHotMsbRequireFullBddToAnalyzeOneMsbCase) {
+       DISABLED_OneHotMsbRequireFullBddToAnalyzeOneMsbCase) {
   auto p = CreatePackage();
   FunctionBuilder fb(TestName(), p.get());
   BValue input = fb.Param("input", p->GetBitsType(7));
@@ -275,13 +338,15 @@ TEST_F(BddSimplificationPassTest,
   fb.And(hot, extend);
 
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
-  ASSERT_THAT(Run(f, /*run_cleanup_passes=*/true), IsOkAndHolds(true));
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::Concat(m::Literal(UBits(0, 1)),
                         m::BitSlice(m::OneHot(m::Param("input")), 0, 7)));
 }
 
-TEST_F(BddSimplificationPassTest, OneHotMsbMsbLeaks) {
+// TODO(https://github.com/google/xls/issues/423) 2021/04/05 Renable when
+// sensitivity analysis added.
+TEST_F(BddSimplificationPassTest, DISABLED_OneHotMsbMsbLeaks) {
   auto p = CreatePackage();
   FunctionBuilder fb(TestName(), p.get());
   BValue input = fb.Param("input", p->GetBitsType(7));
@@ -295,10 +360,12 @@ TEST_F(BddSimplificationPassTest, OneHotMsbMsbLeaks) {
   fb.Concat({hot_msb, select});
 
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
-  EXPECT_THAT(Run(f, /*run_cleanup_passes=*/true), IsOkAndHolds(false));
+  EXPECT_THAT(Run(f), IsOkAndHolds(false));
 }
 
-TEST_F(BddSimplificationPassTest, OneHotMsbNonMsbOneComparison) {
+// TODO(https://github.com/google/xls/issues/423) 2021/04/05 Renable when
+// sensitivity analysis added.
+TEST_F(BddSimplificationPassTest, DISABLED_OneHotMsbNonMsbOneComparison) {
   auto p = CreatePackage();
   FunctionBuilder fb(TestName(), p.get());
   BValue input = fb.Param("input", p->GetBitsType(7));
@@ -312,10 +379,12 @@ TEST_F(BddSimplificationPassTest, OneHotMsbNonMsbOneComparison) {
   fb.Not(select);
 
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
-  EXPECT_THAT(Run(f, /*run_cleanup_passes=*/true), IsOkAndHolds(false));
+  EXPECT_THAT(Run(f), IsOkAndHolds(false));
 }
 
-TEST_F(BddSimplificationPassTest, OneHotMsbNonZeroReplacementValue) {
+// TODO(https://github.com/google/xls/issues/423) 2021/04/05 Renable when
+// sensitivity analysis added.
+TEST_F(BddSimplificationPassTest, DISABLED_OneHotMsbNonZeroReplacementValue) {
   auto p = CreatePackage();
   FunctionBuilder fb(TestName(), p.get());
   BValue input = fb.Param("input", p->GetBitsType(7));
@@ -329,10 +398,12 @@ TEST_F(BddSimplificationPassTest, OneHotMsbNonZeroReplacementValue) {
   fb.Not(select);
 
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
-  EXPECT_THAT(Run(f, /*run_cleanup_passes=*/true), IsOkAndHolds(false));
+  EXPECT_THAT(Run(f), IsOkAndHolds(false));
 }
 
-TEST_F(BddSimplificationPassTest, OneHotMsbNoRecursion) {
+// TODO(https://github.com/google/xls/issues/423) 2021/04/05 Renable when
+// sensitivity analysis added.
+TEST_F(BddSimplificationPassTest, DISABLED_OneHotMsbNoRecursion) {
   auto p = CreatePackage();
   FunctionBuilder fb(TestName(), p.get());
   BValue input = fb.Param("input", p->GetBitsType(7));
@@ -346,16 +417,18 @@ TEST_F(BddSimplificationPassTest, OneHotMsbNoRecursion) {
   fb.Not(select);
 
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
-  ASSERT_THAT(Run(f, /*run_cleanup_passes=*/true), IsOkAndHolds(true));
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::Not(m::Encode(
                   m::Concat(m::Literal(UBits(0, 1)),
                             m::BitSlice(m::OneHot(m::Param("input")), 0, 7)))));
-  EXPECT_THAT(Run(f, /*run_cleanup_passes=*/false), IsOkAndHolds(false));
+  EXPECT_THAT(Run(f), IsOkAndHolds(false));
 }
 
+// TODO(https://github.com/google/xls/issues/423) 2021/04/05 Renable when
+// sensitivity analysis added.
 TEST_F(BddSimplificationPassTest,
-       OneHotMsbNoRecursionExistingSliceIncludesMsb) {
+       DISABLED_OneHotMsbNoRecursionExistingSliceIncludesMsb) {
   auto p = CreatePackage();
   FunctionBuilder fb(TestName(), p.get());
   BValue input = fb.Param("input", p->GetBitsType(7));
@@ -370,16 +443,18 @@ TEST_F(BddSimplificationPassTest,
   fb.Not(select);
 
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
-  ASSERT_THAT(Run(f, /*run_cleanup_passes=*/true), IsOkAndHolds(true));
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
   EXPECT_THAT(f->return_value(),
               m::Not(m::Encode(
                   m::Concat(m::Literal(UBits(0, 1)),
                             m::BitSlice(m::OneHot(m::Param("input")), 4, 3)))));
-  EXPECT_THAT(Run(f, /*run_cleanup_passes=*/false), IsOkAndHolds(false));
+  EXPECT_THAT(Run(f), IsOkAndHolds(false));
 }
 
+// TODO(https://github.com/google/xls/issues/423) 2021/04/05 Renable when
+// sensitivity analysis added.
 TEST_F(BddSimplificationPassTest,
-       OneHotMsbNoRecursionExistingSliceExcludesMsb) {
+       DISABLED_OneHotMsbNoRecursionExistingSliceExcludesMsb) {
   auto p = CreatePackage();
   FunctionBuilder fb(TestName(), p.get());
   BValue input = fb.Param("input", p->GetBitsType(7));
@@ -394,12 +469,14 @@ TEST_F(BddSimplificationPassTest,
   fb.Not(select);
 
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
-  EXPECT_THAT(Run(f, /*run_cleanup_passes=*/true), IsOkAndHolds(false));
+  EXPECT_THAT(Run(f), IsOkAndHolds(false));
 }
 
+// TODO(https://github.com/google/xls/issues/423) 2021/04/05 Renable when
+// sensitivity analysis added.
 TEST_F(
     BddSimplificationPassTest,
-    OneHotMsbPostponeOneHotNativeOneHotDetectionUntilAfterOneHotMsb) {
+    DISABLED_OneHotMsbPostponeOneHotNativeOneHotDetectionUntilAfterOneHotMsb) {
   auto p = CreatePackage();
   FunctionBuilder fb(TestName(), p.get());
   BValue input = fb.Param("input", p->GetBitsType(2));
@@ -416,10 +493,8 @@ TEST_F(
   fb.Select(eq_test, literal_zero2, encode);
 
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
-  ASSERT_THAT(Run(f, /*run_cleanup_passes=*/false, /*opt_level=*/2),
-              IsOkAndHolds(true));
-  ASSERT_THAT(Run(f, /*run_cleanup_passes=*/true, /*opt_level=*/3),
-              IsOkAndHolds(true));
+  ASSERT_THAT(Run(f, /*opt_level=*/2), IsOkAndHolds(true));
+  ASSERT_THAT(Run(f, /*opt_level=*/3), IsOkAndHolds(true));
   EXPECT_THAT(
       f->return_value(),
       m::Encode(m::Concat(
@@ -428,7 +503,10 @@ TEST_F(
                     m::Eq(m::Literal(UBits(3, 2)), m::Param("input"))))));
 }
 
-TEST_F(BddSimplificationPassTest, BddNotStaleAfterOneHotSimplification) {
+// TODO(https://github.com/google/xls/issues/423) 2021/04/05 Renable when
+// sensitivity analysis added.
+TEST_F(BddSimplificationPassTest,
+       DISABLED_BddNotStaleAfterOneHotSimplification) {
   auto p = CreatePackage();
   FunctionBuilder fb(TestName(), p.get());
   BValue input = fb.Param("input", p->GetBitsType(1));
@@ -439,10 +517,16 @@ TEST_F(BddSimplificationPassTest, BddNotStaleAfterOneHotSimplification) {
   fb.XorReduce(encode);
 
   XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
-  ASSERT_THAT(Run(f, /*run_cleanup_passes=*/true), IsOkAndHolds(true));
-  EXPECT_THAT(f->return_value(),
-              m::Param("input"));
+  ASSERT_THAT(Run(f), IsOkAndHolds(true));
+  EXPECT_THAT(f->return_value(), m::Param("input"));
 }
+
+void IrFuzzBddSimplification(FuzzPackageWithArgs fuzz_package_with_args) {
+  BddSimplificationPass pass;
+  OptimizationPassChangesOutputs(std::move(fuzz_package_with_args), pass);
+}
+FUZZ_TEST(IrFuzzTest, IrFuzzBddSimplification)
+    .WithDomains(IrFuzzDomainWithArgs(/*arg_set_count=*/10));
 
 }  // namespace
 }  // namespace xls

@@ -14,13 +14,14 @@
 
 #include "xls/noc/config/virtual_channel_config_proto_builder.h"
 
-#include "xls/common/proto_adaptor_utils.h"
+#include <cstdint>
+#include <string_view>
 
 namespace xls::noc {
 
 VirtualChannelConfigProtoBuilder& VirtualChannelConfigProtoBuilder::WithName(
-    absl::string_view name) {
-  proto_->set_name(xls::ToProtoString(name));
+    std::string_view name) {
+  proto_->set_name(name);
   return *this;
 }
 

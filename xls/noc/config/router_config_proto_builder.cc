@@ -14,20 +14,28 @@
 
 #include "xls/noc/config/router_config_proto_builder.h"
 
-#include "xls/common/proto_adaptor_utils.h"
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "xls/noc/config/arbiter_scheme_config_proto_builder.h"
+#include "xls/noc/config/network_config.pb.h"
+#include "xls/noc/config/port_config_proto_builder.h"
+#include "xls/noc/config/routing_scheme_config_proto_builder.h"
 
 namespace xls::noc {
 
 RouterConfigProtoBuilder& RouterConfigProtoBuilder::WithName(
-    absl::string_view name) {
-  proto_->set_name(xls::ToProtoString(name));
+    std::string_view name) {
+  proto_->set_name(name);
   return *this;
 }
 
 PortConfigProtoBuilder RouterConfigProtoBuilder::WithInputPort(
-    absl::string_view name) {
+    std::string_view name) {
   PortConfigProto* port = proto_->add_ports();
-  port->set_name(xls::ToProtoString(name));
+  port->set_name(name);
   port->set_direction(PortConfigProto::INPUT);
   if (virtual_channels_for_input_.has_value()) {
     for (const std::string& virtual_channel :
@@ -39,9 +47,9 @@ PortConfigProtoBuilder RouterConfigProtoBuilder::WithInputPort(
 }
 
 PortConfigProtoBuilder RouterConfigProtoBuilder::WithOutputPort(
-    absl::string_view name) {
+    std::string_view name) {
   PortConfigProto* port = proto_->add_ports();
-  port->set_name(xls::ToProtoString(name));
+  port->set_name(name);
   port->set_direction(PortConfigProto::OUTPUT);
   if (virtual_channels_for_output_.has_value()) {
     for (const std::string& virtual_channel :
@@ -54,14 +62,14 @@ PortConfigProtoBuilder RouterConfigProtoBuilder::WithOutputPort(
 
 RouterConfigProtoBuilder&
 RouterConfigProtoBuilder::SetDefaultVirtualChannelsForInputPort(
-    absl::optional<std::vector<std::string>> virtual_channels) {
+    std::optional<std::vector<std::string>> virtual_channels) {
   virtual_channels_for_input_ = virtual_channels;
   return *this;
 }
 
 RouterConfigProtoBuilder&
 RouterConfigProtoBuilder::SetDefaultVirtualChannelsForOutputPort(
-    absl::optional<std::vector<std::string>> virtual_channels) {
+    std::optional<std::vector<std::string>> virtual_channels) {
   virtual_channels_for_output_ = virtual_channels;
   return *this;
 }

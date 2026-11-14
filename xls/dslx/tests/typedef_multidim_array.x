@@ -18,15 +18,11 @@
 type TypeX = u6;
 
 // Identity function.
-fn id(x: u6[3][2]) -> u6[3][2] {
-  x
-}
+fn main(x: u6[3][2]) -> u6[3][2] { x }
 
-#![test]
-fn array_typedef() {
-  let a : u6[3][2] = [[TypeX:1, TypeX:2, TypeX:3],
-                      [TypeX:4, TypeX:5, TypeX:6]];
-  let b : TypeX[3][2] = [[TypeX:1, TypeX:2, TypeX:3],
-                         [TypeX:4, TypeX:5, TypeX:6]];
-  assert_eq(id(a), id(b))
+#[test]
+fn main_test() {
+    let a: u6[3][2] = [[TypeX:1, TypeX:2, TypeX:3], [TypeX:4, TypeX:5, TypeX:6]];
+    let b: TypeX[3][2] = [[TypeX:1, TypeX:2, TypeX:3], [TypeX:4, TypeX:5, TypeX:6]];
+    assert_eq(main(a), main(b))
 }

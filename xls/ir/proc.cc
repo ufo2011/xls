@@ -14,78 +14,1098 @@
 
 #include "xls/ir/proc.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/algorithm/container.h"
+#include "absl/base/casts.h"
+#include "absl/container/btree_set.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
+#include "absl/types/optional_ref.h"
+#include "absl/types/span.h"
+#include "xls/common/status/ret_check.h"
+#include "xls/common/status/status_macros.h"
+#include "xls/ir/change_listener.h"
+#include "xls/ir/channel.h"
 #include "xls/ir/function.h"
+#include "xls/ir/function_base.h"
+#include "xls/ir/ir_annotator.h"
+#include "xls/ir/name_uniquer.h"
 #include "xls/ir/node.h"
-#include "xls/ir/node_iterator.h"
+#include "xls/ir/nodes.h"
+#include "xls/ir/op.h"
+#include "xls/ir/package.h"
+#include "xls/ir/proc_instantiation.h"
+#include "xls/ir/source_location.h"
+#include "xls/ir/state_element.h"
+#include "xls/ir/topo_sort.h"
+#include "xls/ir/type.h"
+#include "xls/ir/value.h"
+#include "xls/ir/value_utils.h"
 
 namespace xls {
 
-std::string Proc::DumpIr(bool recursive) const {
-  // TODO(meheff): Remove recursive argument. Recursively dumping multiple
-  // functions should be a method at the Package level, not the function/proc
-  // level.
-  XLS_CHECK(!recursive);
-
-  std::string res = absl::StrFormat(
-      "proc %s(%s: %s, %s: %s, init=%s) {\n", name(), TokenParam()->GetName(),
-      TokenParam()->GetType()->ToString(), StateParam()->GetName(),
-      StateParam()->GetType()->ToString(), InitValue().ToHumanString());
-
-  for (Node* node : TopoSort(const_cast<Proc*>(this))) {
-    if (node->op() == Op::kParam) {
-      continue;
-    }
-    absl::StrAppend(&res, "  ", node->ToString(), "\n");
+std::string Proc::DumpIr(const IrAnnotator& annotate) const {
+  std::string res = DumpAttributes();
+  absl::StrAppendFormat(&res, "%s%sproc %s", IsTop() ? "top " : "",
+                        IsScheduled() ? "scheduled_" : "", name());
+  if (is_new_style_proc()) {
+    absl::StrAppendFormat(
+        &res, "<%s>",
+        absl::StrJoin(
+            interface_, ", ",
+            [&](std::string* s, const ChannelInterface* interface) {
+              auto chan_note = annotate.ChannelInterfaceAnnotation(interface);
+              std::string base = absl::StrFormat(
+                  "%s: %s %s", interface->name(), interface->type()->ToString(),
+                  interface->direction() == ChannelDirection::kSend ? "out"
+                                                                    : "in");
+              absl::StrAppend(s, chan_note.Decorate(base));
+            }));
   }
-  absl::StrAppend(&res, "  next (", NextToken()->GetName(), ", ",
-                  NextState()->GetName(), ")\n");
+  auto state_formatter = [&](std::string* s, StateElement* state) {
+    auto state_note = annotate.StateElementAnnotation(state);
+    std::string base =
+        absl::StrFormat("%s: %s", state->name(), state->type()->ToString());
+    if (!state->loc().Empty()) {
+      absl::StrAppendFormat(&base, " pos=%s", state->loc().ToString());
+    }
+    absl::StrAppend(s, state_note.Decorate(base));
+  };
+  absl::StrAppend(&res, "(",
+                  absl::StrJoin(StateElements(), ", ", state_formatter));
+  auto initial_value_formatter = [&](std::string* s, StateElement* state) {
+    auto init_note = annotate.StateElementInitialValueAnnotation(state);
+    absl::StrAppend(s,
+                    init_note.Decorate(state->initial_value().ToHumanString()));
+  };
+  if (!StateElements().empty()) {
+    absl::StrAppendFormat(
+        &res, ", init={%s}",
+        absl::StrJoin(StateElements(), ", ", initial_value_formatter));
+  }
+  if (!StateElements().empty() &&
+      absl::c_any_of(StateElements(), [](StateElement* state) -> bool {
+        return state->non_synthesizable();
+      })) {
+    absl::StrAppend(&res, ", non_synth={");
+    bool first = true;
+    for (StateElement* state : StateElements()) {
+      if (state->non_synthesizable()) {
+        if (!first) {
+          absl::StrAppend(&res, ", ");
+        }
+        absl::StrAppendFormat(&res, "%s", state->name());
+        first = false;
+      }
+    }
+    absl::StrAppend(&res, "}");
+  }
+  absl::StrAppend(&res, ") {\n");
 
+  if (is_new_style_proc()) {
+    for (ChannelInterface* channel_interface : interface_) {
+      auto chan_note = annotate.ChannelInterfaceAnnotation(channel_interface);
+      absl::StrAppendFormat(&res, "  %s\n",
+                            chan_note.Decorate(channel_interface->ToString()));
+    }
+    for (Channel* channel : channels()) {
+      auto chan_note = annotate.ChannelAnnotation(channel);
+      absl::StrAppendFormat(&res, "  %s\n",
+                            chan_note.Decorate(channel->ToString()));
+      ChannelInterface* send_iface =
+          GetChannelInterface(channel->name(), ChannelDirection::kSend).value();
+      auto send_note = annotate.ChannelInterfaceAnnotation(send_iface);
+      absl::StrAppendFormat(&res, "  %s\n",
+                            send_note.Decorate(send_iface->ToString()));
+      ChannelInterface* recv_iface =
+          GetChannelInterface(channel->name(), ChannelDirection::kReceive)
+              .value();
+      auto recv_note = annotate.ChannelInterfaceAnnotation(recv_iface);
+      absl::StrAppendFormat(&res, "  %s\n",
+                            recv_note.Decorate(recv_iface->ToString()));
+    }
+    for (const std::unique_ptr<ProcInstantiation>& instantiation :
+         proc_instantiations()) {
+      auto inst_note =
+          annotate.ProcInstantiationAnnotation(instantiation.get());
+      absl::StrAppendFormat(&res, "  %s\n",
+                            inst_note.Decorate(instantiation->ToString()));
+    }
+  }
+
+  if (IsScheduled() || !is_block_source_) {
+    absl::StrAppend(&res, DumpFunctionBaseNodes(IrAnnotatorJoiner(
+                              IrAnnotatorRef(annotate),
+                              TopoSortAnnotator(!is_block_source_))));
+  }
   absl::StrAppend(&res, "}\n");
   return res;
 }
 
-absl::Status Proc::SetNextToken(Node* next) {
-  if (!next->GetType()->IsToken()) {
-    return absl::InvalidArgumentError(absl::StrFormat(
-        "Cannot set next token to \"%s\", expected token type but has type %s",
-        next->GetName(), next->GetType()->ToString()));
+int64_t Proc::GetStateFlatBitCount() const {
+  int64_t total = 0;
+  for (StateElement* state_element : StateElements()) {
+    total += state_element->type()->GetFlatBitCount();
   }
-  next_token_ = next;
+  return total;
+}
+
+absl::StatusOr<StateElement*> Proc::GetStateElementByName(
+    std::string_view name) const {
+  if (std::optional<StateElement*> state_element =
+          MaybeGetStateElementByName(name);
+      state_element.has_value()) {
+    return *state_element;
+  }
+  return absl::NotFoundError(absl::StrFormat(
+      "Proc %s has no state element named %s", this->name(), name));
+}
+
+std::optional<StateElement*> Proc::MaybeGetStateElementByName(
+    std::string_view name) const {
+  auto it = state_elements_.find(name);
+  if (it == state_elements_.end()) {
+    return std::nullopt;
+  }
+  return it->second.get();
+}
+
+absl::StatusOr<int64_t> Proc::GetStateElementIndex(
+    StateElement* state_element) const {
+  if (std::optional<int64_t> index = MaybeGetStateElementIndex(state_element);
+      index.has_value()) {
+    return *index;
+  }
+  return absl::InvalidArgumentError(
+      absl::StrCat("Given state element is not a state element of this proc: ",
+                   state_element->ToString()));
+}
+std::optional<int64_t> Proc::MaybeGetStateElementIndex(
+    StateElement* state_element) const {
+  if (auto it = absl::c_find(state_vec_, state_element);
+      it != state_vec_.end()) {
+    return std::distance(state_vec_.begin(), it);
+  }
+  return std::nullopt;
+}
+
+absl::Status Proc::RemoveStateElement(int64_t index) {
+  XLS_RET_CHECK_LT(index, GetStateElementCount());
+
+  StateElement* old_state_element = GetStateElement(index);
+  auto old_state_read_it = state_reads_.find(old_state_element);
+  if (old_state_read_it != state_reads_.end()) {
+    for (StateRead* read : old_state_read_it->second) {
+      if (!read->users().empty()) {
+        return absl::InvalidArgumentError(absl::StrFormat(
+            "Cannot remove state element %d of proc %s, existing "
+            "state read %s has uses",
+            index, name(), read->GetNameView()));
+      }
+      XLS_RETURN_IF_ERROR(FunctionBase::RemoveNode(read));
+    }
+    // TODO(allight): This should ideally not need to be done manually.
+    state_reads_.erase(old_state_read_it);
+  }
+
+  state_elements_.erase(old_state_element->name());
+  state_vec_.erase(state_vec_.begin() + index);
   return absl::OkStatus();
 }
 
-absl::Status Proc::SetNextState(Node* next) {
-  if (next->GetType() != StateType()) {
-    return absl::InvalidArgumentError(absl::StrFormat(
-        "Cannot set next state to \"%s\"; type %s does not match "
-        "proc state type %s",
-        next->GetName(), next->GetType()->ToString(), StateType()->ToString()));
+absl::Status Proc::RemoveAllStateElements() {
+  // TODO(allight): This relies on side tables being valid. For now just let it
+  // go.
+  for (const auto& [elem, reads] : state_reads_) {
+    for (StateRead* read : reads) {
+      if (read != nullptr) {
+        XLS_RETURN_IF_ERROR(FunctionBase::RemoveNode(read))
+            << "Cannot remove " << elem->ToString() << " of proc " << name()
+            << " because read '" << read->ToString()
+            << "' could not be removed.";
+      }
+    }
+    XLS_RETURN_IF_ERROR(state_name_uniquer_.ReleaseIdentifier(elem->name()))
+        << "Cannot release name of " << elem->ToString();
   }
-  next_state_ = next;
+  state_vec_.clear();
+  state_reads_.clear();
+  state_elements_.clear();
   return absl::OkStatus();
 }
 
-absl::Status Proc::ReplaceState(absl::string_view state_param_name,
-                                Node* next_state) {
-  Param* old_state_param = StateParam();
-  if (!old_state_param->users().empty()) {
-    return absl::InvalidArgumentError(
-        absl::StrFormat("Existing state param \"%s\" still has uses",
-                        old_state_param->GetName()));
-  }
+absl::StatusOr<StateRead*> Proc::AppendStateElement(
+    std::string_view requested_state_name, const Value& init_value,
+    std::optional<Node*> read_predicate, std::optional<Node*> next_state,
+    bool non_synthesizable, const SourceInfo& loc) {
+  return InsertStateElement(GetStateElementCount(), requested_state_name,
+                            init_value, read_predicate, next_state,
+                            non_synthesizable, loc);
+}
 
-  // Add a new state param node.
+absl::StatusOr<StateElement*> Proc::InsertUnreadStateElement(
+    int64_t index, std::string_view requested_state_name,
+    const Value& init_value, const SourceInfo& loc, bool non_synthesizable) {
+  XLS_RET_CHECK_LE(index, GetStateElementCount());
+  std::string state_name = UniquifyStateName(requested_state_name);
+  state_elements_[state_name] = std::make_unique<StateElement>(
+      state_name, package()->GetTypeForValue(init_value), init_value, loc,
+      non_synthesizable);
+  StateElement* state_element = state_elements_.at(state_name).get();
+  state_vec_.insert(state_vec_.begin() + index, state_element);
+  return state_element;
+}
+
+absl::StatusOr<StateRead*> Proc::AddStateRead(StateElement* state_element,
+                                              std::optional<Node*> predicate,
+                                              std::optional<std::string> label,
+                                              const SourceInfo& loc) {
   XLS_ASSIGN_OR_RETURN(
-      state_param_,
-      MakeNodeWithName<Param>(/*loc=*/absl::nullopt, state_param_name,
-                              next_state->GetType()));
-  next_state_ = next_state;
+      StateRead * state_read,
+      MakeNodeWithName<StateRead>(loc, state_element, predicate, label,
+                                  state_element->name()));
+  state_reads_[state_element].push_back(state_read);
+  return state_read;
+}
 
-  XLS_RET_CHECK(!HasImplicitUse(old_state_param));
-  XLS_RETURN_IF_ERROR(RemoveNode(old_state_param, /*remove_param_ok=*/true));
+absl::StatusOr<StateRead*> Proc::InsertStateElement(
+    int64_t index, std::string_view requested_state_name,
+    const Value& init_value, std::optional<Node*> read_predicate,
+    std::optional<Node*> next_state, bool non_synthesizable,
+    const SourceInfo& loc) {
+  XLS_ASSIGN_OR_RETURN(
+      StateElement * state_element,
+      InsertUnreadStateElement(index, requested_state_name, init_value, loc,
+                               non_synthesizable));
+  XLS_ASSIGN_OR_RETURN(StateRead * state_read,
+                       MakeNodeWithName<StateRead>(
+                           loc, state_element, read_predicate,
+                           /*label=*/std::nullopt, state_element->name()));
+  state_reads_[state_element].push_back(state_read);
+
+  if (next_state.has_value()) {
+    Node* next_node = next_state.value();
+    if (!ValueConformsToType(init_value, next_node->GetType())) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Cannot add state element at %d, next state value %s (type %s) does "
+          "not match type of initial value: %s",
+          index, next_node->GetName(), next_node->GetType()->ToString(),
+          init_value.ToString()));
+    }
+    XLS_RETURN_IF_ERROR(MakeNode<Next>(SourceInfo(), state_element, *next_state,
+                                       /*predicate=*/std::nullopt,
+                                       /*label=*/std::nullopt)
+                            .status());
+  }
+
+  return state_read;
+}
+
+bool Proc::HasImplicitUse(Node* node) const { return false; }
+
+absl::StatusOr<Proc*> Proc::Clone(
+    std::string_view new_name, Package* target_package,
+    const absl::flat_hash_map<std::string, std::string>& channel_remapping,
+    const absl::flat_hash_map<const FunctionBase*, FunctionBase*>&
+        call_remapping,
+    const absl::flat_hash_map<std::string, std::string>& state_name_remapping,
+    absl::optional_ref<absl::flat_hash_map<Node*, Node*>>
+        original_node_to_clone,
+    const absl::flat_hash_map<std::string, std::string>&
+        spawned_proc_name_remapping) const {
+  auto new_chan_name = [&](std::string_view n) -> std::string_view {
+    if (channel_remapping.contains(n)) {
+      return channel_remapping.at(n);
+    }
+    return n;
+  };
+
+  absl::flat_hash_map<Node*, Node*> original_to_clone;
+  if (target_package == nullptr) {
+    target_package = package();
+  }
+  Proc* cloned_proc;
+  if (IsScheduled()) {
+    if (is_new_style_proc()) {
+      cloned_proc = target_package->AddProc(std::make_unique<ScheduledProc>(
+          new_name,
+          /*interface=*/absl::Span<std::unique_ptr<ChannelInterface>>(),
+          target_package));
+    } else {
+      cloned_proc = target_package->AddProc(
+          std::make_unique<ScheduledProc>(new_name, target_package));
+    }
+  } else {
+    if (is_new_style_proc()) {
+      cloned_proc = target_package->AddProc(std::make_unique<Proc>(
+          new_name,
+          /*interface=*/absl::Span<std::unique_ptr<ChannelInterface>>(),
+          target_package));
+    } else {
+      cloned_proc = target_package->AddProc(
+          std::make_unique<Proc>(new_name, target_package));
+    }
+  }
+
+  auto remap_name =
+      [](const absl::flat_hash_map<std::string, std::string>& mapping,
+         std::string_view orig) -> std::string_view {
+    if (!mapping.contains(orig)) {
+      return orig;
+    }
+    return mapping.at(orig);
+  };
+  for (StateElement* state_element : StateElements()) {
+    XLS_RETURN_IF_ERROR(
+        cloned_proc
+            ->InsertUnreadStateElement(
+                cloned_proc->GetStateElementCount(),
+                remap_name(state_name_remapping, state_element->name()),
+                state_element->initial_value(), state_element->loc(),
+                state_element->non_synthesizable())
+            .status());
+  }
+  if (is_new_style_proc()) {
+    absl::flat_hash_map<ChannelInterface*, ChannelInterface*> channel_map;
+    for (ChannelInterface* channel_interface : interface()) {
+      XLS_ASSIGN_OR_RETURN(
+          Type * new_ty,
+          target_package->MapTypeFromOtherPackage(channel_interface->type()));
+      if (channel_interface->direction() == ChannelDirection::kSend) {
+        XLS_ASSIGN_OR_RETURN(
+            SendChannelInterface * send_channel,
+            cloned_proc->AddOutputChannelInterface(
+                dynamic_cast<SendChannelInterface*>(channel_interface)
+                    ->Clone(new_chan_name(channel_interface->name()), new_ty)));
+        channel_map[channel_interface] = send_channel;
+      } else {
+        XLS_ASSIGN_OR_RETURN(
+            ReceiveChannelInterface * recv_channel,
+            cloned_proc->AddInputChannelInterface(
+                dynamic_cast<ReceiveChannelInterface*>(channel_interface)
+                    ->Clone(new_chan_name(channel_interface->name()), new_ty)));
+        channel_map[channel_interface] = recv_channel;
+      }
+    }
+    for (Channel* channel : channels()) {
+      std::unique_ptr<Channel> new_channel;
+      XLS_ASSIGN_OR_RETURN(
+          Type * chan_type,
+          target_package->MapTypeFromOtherPackage(channel->type()));
+      if (channel->kind() == ChannelKind::kStreaming) {
+        StreamingChannel* streaming_channel =
+            absl::down_cast<StreamingChannel*>(channel);
+        new_channel = std::make_unique<StreamingChannel>(
+            new_chan_name(channel->name()), channel->id(),
+            channel->supported_ops(), chan_type, channel->initial_values(),
+            streaming_channel->channel_config(),
+            streaming_channel->flow_control(), streaming_channel->strictness());
+      } else {
+        new_channel = std::make_unique<SingleValueChannel>(
+            new_chan_name(channel->name()), channel->id(),
+            channel->supported_ops(), chan_type);
+      }
+      XLS_ASSIGN_OR_RETURN(auto channel_with_interfaces,
+                           cloned_proc->AddChannel(std::move(new_channel)));
+      if (channel->CanSend()) {
+        XLS_ASSIGN_OR_RETURN(auto send_channel_interface,
+                             GetSendChannelInterface(channel->name()));
+        channel_map[send_channel_interface] =
+            channel_with_interfaces.send_interface;
+      }
+      if (channel->CanReceive()) {
+        XLS_ASSIGN_OR_RETURN(auto recv_channel_interface,
+                             GetReceiveChannelInterface(channel->name()));
+        channel_map[recv_channel_interface] =
+            channel_with_interfaces.receive_interface;
+      }
+    }
+
+    for (const std::unique_ptr<ProcInstantiation>& instantiation :
+         proc_instantiations()) {
+      std::string_view remapped_name = remap_name(
+          spawned_proc_name_remapping, instantiation->proc()->name());
+
+      XLS_ASSIGN_OR_RETURN(Proc * new_spawnee,
+                           target_package->GetProc(remapped_name));
+
+      std::vector<ChannelInterface*> remapped_args;
+      remapped_args.reserve(instantiation->channel_args().size());
+      for (auto* channel_interface : instantiation->channel_args()) {
+        remapped_args.push_back(channel_map[channel_interface]);
+      }
+
+      XLS_RETURN_IF_ERROR(
+          cloned_proc
+              ->AddProcInstantiation(remapped_name, remapped_args, new_spawnee)
+              .status());
+    }
+  }
+
+  XLS_ASSIGN_OR_RETURN(std::vector<Node*> topo_sort_nodes,
+                       TopoSort(const_cast<Proc*>(this)));
+  for (Node* node : topo_sort_nodes) {
+    std::vector<Node*> cloned_operands;
+    for (Node* operand : node->operands()) {
+      cloned_operands.push_back(original_to_clone.at(operand));
+    }
+
+    switch (node->op()) {
+      case Op::kStateRead: {
+        StateRead* src = node->As<StateRead>();
+        StateElement* src_elem = src->state_element();
+        XLS_ASSIGN_OR_RETURN(int64_t idx, GetStateElementIndex(src_elem));
+        StateElement* cloned_elem = cloned_proc->GetStateElement(idx);
+
+        std::optional<Node*> cloned_predicate;
+        if (src->predicate().has_value()) {
+          cloned_predicate = original_to_clone.at(src->predicate().value());
+        }
+
+        XLS_ASSIGN_OR_RETURN(StateRead * cloned_state_read,
+                             cloned_proc->MakeNodeWithName<StateRead>(
+                                 src->loc(), cloned_elem, cloned_predicate,
+                                 src->label(), cloned_elem->name()));
+        cloned_proc->state_reads_[cloned_elem].push_back(cloned_state_read);
+        original_to_clone[node] = cloned_state_read;
+        break;
+      }
+      case Op::kReceive: {
+        Receive* src = node->As<Receive>();
+        std::string_view channel = new_chan_name(src->channel_name());
+        XLS_ASSIGN_OR_RETURN(
+            ChannelRef channel_ref,
+            cloned_proc->GetChannelRef(channel, ChannelDirection::kReceive));
+        XLS_ASSIGN_OR_RETURN(Type * payload_type,
+                             cloned_proc->package()->MapTypeFromOtherPackage(
+                                 ChannelRefType(channel_ref)));
+        if (is_new_style_proc()) {
+          XLS_ASSIGN_OR_RETURN(
+              original_to_clone[node],
+              cloned_proc->MakeNodeWithName<Receive>(
+                  src->loc(), cloned_operands[0],
+                  cloned_operands.size() == 2
+                      ? std::optional<Node*>(cloned_operands[1])
+                      : std::nullopt,
+                  channel, src->is_blocking(), payload_type, src->GetName()));
+        } else {
+          XLS_ASSIGN_OR_RETURN(
+              original_to_clone[node],
+              cloned_proc->MakeNodeWithName<Receive>(
+                  src->loc(), cloned_operands[0],
+                  cloned_operands.size() == 2
+                      ? std::optional<Node*>(cloned_operands[1])
+                      : std::nullopt,
+                  channel, src->is_blocking(), payload_type, src->GetName()));
+        }
+        break;
+      }
+      case Op::kSend: {
+        Send* src = node->As<Send>();
+        if (is_new_style_proc()) {
+          XLS_ASSIGN_OR_RETURN(
+              original_to_clone[node],
+              cloned_proc->MakeNodeWithName<Send>(
+                  src->loc(), cloned_operands[0], cloned_operands[1],
+                  cloned_operands.size() == 3
+                      ? std::optional<Node*>(cloned_operands[2])
+                      : std::nullopt,
+                  new_chan_name(src->channel_name()), src->GetName()));
+        } else {
+          std::string_view channel = new_chan_name(src->channel_name());
+          XLS_ASSIGN_OR_RETURN(
+              original_to_clone[node],
+              cloned_proc->MakeNodeWithName<Send>(
+                  src->loc(), cloned_operands[0], cloned_operands[1],
+                  cloned_operands.size() == 3
+                      ? std::optional<Node*>(cloned_operands[2])
+                      : std::nullopt,
+                  channel, src->GetName()));
+        }
+        break;
+      }
+      // Remap CountedFor body.
+      case Op::kCountedFor: {
+        CountedFor* src = node->As<CountedFor>();
+        auto remapped_call = call_remapping.find(src->body());
+        if (remapped_call == call_remapping.end()) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Could not find mapping for CountedFor target %s.",
+              src->GetName()));
+        }
+        Function* body = dynamic_cast<Function*>(remapped_call->second);
+        if (body == nullptr) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "CountedFor target was not mapped to a function."));
+        }
+        XLS_ASSIGN_OR_RETURN(
+            original_to_clone[node],
+            cloned_proc->MakeNodeWithName<CountedFor>(
+                src->loc(), cloned_operands[0],
+                absl::Span<Node*>(cloned_operands).subspan(1),
+                src->trip_count(), src->stride(), body, src->GetName()));
+        break;
+      }
+      // Remap Map to_apply.
+      case Op::kMap: {
+        Map* src = node->As<Map>();
+        auto remapped_call = call_remapping.find(src->to_apply());
+        if (remapped_call == call_remapping.end()) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Could not find mapping for Map target %s.", src->GetName()));
+        }
+        Function* to_apply = dynamic_cast<Function*>(remapped_call->second);
+        if (to_apply == nullptr) {
+          return absl::InvalidArgumentError(
+              absl::StrFormat("Map target was not mapped to a function."));
+        }
+        XLS_ASSIGN_OR_RETURN(
+            original_to_clone[node],
+            cloned_proc->MakeNodeWithName<Map>(src->loc(), cloned_operands[0],
+                                               to_apply, src->GetName()));
+        break;
+      }
+      // Remap Invoke to_apply.
+      case Op::kInvoke: {
+        Invoke* src = node->As<Invoke>();
+        auto remapped_call = call_remapping.find(src->to_apply());
+        if (remapped_call == call_remapping.end()) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Could not find mapping for Invoke %s's target %s.",
+              src->GetName(), src->to_apply()->name()));
+        }
+        Function* to_apply = dynamic_cast<Function*>(remapped_call->second);
+        if (to_apply == nullptr) {
+          return absl::InvalidArgumentError(
+              absl::StrFormat("Invoke target was not mapped to a function."));
+        }
+        XLS_ASSIGN_OR_RETURN(
+            original_to_clone[node],
+            cloned_proc->MakeNodeWithName<Invoke>(src->loc(), cloned_operands,
+                                                  to_apply, src->GetName()));
+        break;
+      }
+      // Default clone.
+      default: {
+        XLS_ASSIGN_OR_RETURN(
+            original_to_clone[node],
+            node->CloneInNewFunction(cloned_operands, cloned_proc));
+        break;
+      }
+    }
+  }
+  if (IsScheduled()) {
+    cloned_proc->ClearStages();
+    for (const Stage& stage : stages()) {
+      XLS_ASSIGN_OR_RETURN(Stage cloned_stage, stage.Clone(original_to_clone));
+      cloned_proc->AddStage(std::move(cloned_stage));
+    }
+  }
+
+  if (original_node_to_clone.has_value()) {
+    for (auto& [original_node, cloned_node] : original_to_clone) {
+      (*original_node_to_clone)[original_node] = cloned_node;
+    }
+  }
+
+  return cloned_proc;
+}
+
+absl::StatusOr<Type*> Proc::GetChannelReferenceType(
+    std::string_view name) const {
+  if (is_new_style_proc()) {
+    for (const std::unique_ptr<ChannelInterface>& channel_interface :
+         channel_interfaces_) {
+      if (name == channel_interface->name()) {
+        return channel_interface->type();
+      }
+    }
+    return absl::NotFoundError(absl::StrFormat(
+        "No channel reference `%s` in proc `%s`", name, this->name()));
+  }
+  XLS_ASSIGN_OR_RETURN(Channel * channel, package()->GetChannel(name));
+  return channel->type();
+}
+
+absl::StatusOr<ChannelWithInterfaces> Proc::AddChannel(
+    std::unique_ptr<Channel> channel) {
+  XLS_RET_CHECK(is_new_style_proc());
+  std::string channel_name{channel->name()};
+  auto [channel_it, inserted] =
+      channels_.insert({channel_name, std::move(channel)});
+  if (!inserted) {
+    return absl::InternalError(
+        absl::StrFormat("Channel already exists with name `%s` on proc `%s`.",
+                        channel_name, name()));
+  }
+  Channel* channel_ptr = channel_it->second.get();
+
+  // Verify the channel id is unique.
+  for (Channel* ch : channel_vec_) {
+    if (ch->id() == channel_ptr->id()) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Channel already exists with id %d on proc `%s`", ch->id(), name()));
+    }
+  }
+
+  // The channel name must be a valid identifier.
+  if (!NameUniquer::IsValidIdentifier(channel_ptr->name())) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat("Invalid channel name: \"%s\"", channel_ptr->name()));
+  }
+
+  channel_vec_.push_back(channel_ptr);
+  std::optional<ChannelStrictness> strictness;
+  FlowControl flow_control = FlowControl::kNone;
+  if (StreamingChannel* streaming_channel =
+          dynamic_cast<StreamingChannel*>(channel_ptr)) {
+    strictness = streaming_channel->strictness();
+    flow_control = streaming_channel->flow_control();
+  }
+
+  auto send_channel_interface = std::make_unique<SendChannelInterface>(
+      channel_ptr->name(), channel_ptr->type(), channel_ptr->kind());
+  send_channel_interface->SetStrictness(strictness);
+  send_channel_interface->SetFlowControl(flow_control);
+  auto receive_channel_interface = std::make_unique<ReceiveChannelInterface>(
+      channel_ptr->name(), channel_ptr->type(), channel_ptr->kind());
+  receive_channel_interface->SetStrictness(strictness);
+  receive_channel_interface->SetFlowControl(flow_control);
+
+  ChannelWithInterfaces channel_interfaces{
+      .channel = channel_ptr,
+      .send_interface = send_channel_interface.get(),
+      .receive_interface = receive_channel_interface.get()};
+  channel_interfaces_.push_back(std::move(send_channel_interface));
+  channel_interfaces_.push_back(std::move(receive_channel_interface));
+  return channel_interfaces;
+}
+
+absl::Status Proc::RemoveChannel(Channel* channel) {
+  XLS_RET_CHECK(is_new_style_proc());
+  auto chan_it = channels_.find(channel->name());
+  XLS_RET_CHECK(chan_it->second.get() == channel)
+      << "Channel with name `" << channel->name() << "` in proc `" << name()
+      << "` is not the same channel provided.";
+
+  XLS_ASSIGN_OR_RETURN(
+      ChannelInterface * send_interface,
+      GetChannelInterface(channel->name(), ChannelDirection::kSend));
+  XLS_ASSIGN_OR_RETURN(
+      ChannelInterface * receive_interface,
+      GetChannelInterface(channel->name(), ChannelDirection::kReceive));
+  std::erase_if(
+      channel_interfaces_, [&](const std::unique_ptr<ChannelInterface>& ref) {
+        return ref.get() == send_interface || ref.get() == receive_interface;
+      });
+
+  channels_.erase(chan_it);
   return absl::OkStatus();
+}
+
+absl::Status Proc::RemoveAllChannelsAndInterfaces() {
+  XLS_RET_CHECK(is_new_style_proc());
+  channel_interfaces_.clear();
+  channels_.clear();
+  channel_vec_.clear();
+  interface_.clear();
+  return absl::OkStatus();
+}
+
+absl::StatusOr<Channel*> Proc::GetChannel(std::string_view name) {
+  XLS_RET_CHECK(is_new_style_proc());
+  auto it = channels_.find(name);
+  if (it != channels_.end()) {
+    return it->second.get();
+  }
+  return absl::NotFoundError(absl::StrFormat(
+      "No channel with name `%s` in proc `%s`. Available [%s]", name,
+      this->name(),
+      absl::StrJoin(channels_, ", ", [](std::string* s, const auto& channel) {
+        absl::StrAppendFormat(s, "`%s`", channel.first);
+      })));
+}
+
+bool Proc::HasChannelWithName(std::string_view name) {
+  CHECK(is_new_style_proc());
+  return channels_.find(name) != channels_.end();
+}
+
+absl::StatusOr<ChannelRef> Proc::GetChannelRef(std::string_view name,
+                                               ChannelDirection direction) {
+  if (is_new_style_proc()) {
+    return GetChannelInterface(name, direction);
+  }
+  return package()->GetChannel(name);
+}
+
+bool Proc::ChannelIsOwnedByProc(Channel* channel) {
+  CHECK(is_new_style_proc());
+  auto it = channels_.find(channel->name());
+  if (it != channels_.end()) {
+    return it->second.get() == channel;
+  }
+  return false;
+}
+
+absl::StatusOr<ReceiveChannelInterface*> Proc::AddInputChannelInterface(
+    std::unique_ptr<ReceiveChannelInterface> channel_interface) {
+  XLS_ASSIGN_OR_RETURN(ChannelInterface * channel_interface_ptr,
+                       AddChannelInterface(std::move(channel_interface)));
+  return absl::down_cast<ReceiveChannelInterface*>(channel_interface_ptr);
+}
+
+absl::StatusOr<SendChannelInterface*> Proc::AddOutputChannelInterface(
+    std::unique_ptr<SendChannelInterface> channel_interface) {
+  XLS_ASSIGN_OR_RETURN(ChannelInterface * channel_interface_ptr,
+                       AddChannelInterface(std::move(channel_interface)));
+  return absl::down_cast<SendChannelInterface*>(channel_interface_ptr);
+}
+
+absl::StatusOr<ChannelInterface*> Proc::AddChannelInterface(
+    std::unique_ptr<ChannelInterface> channel_interface) {
+  XLS_RET_CHECK(is_new_style_proc());
+  if (channels_.contains(channel_interface->name())) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat("Cannot add channel `%s` to proc `%s`. Already a "
+                        "channel of same name defined in the proc.",
+                        channel_interface->name(), name()));
+  }
+  for (const std::unique_ptr<ChannelInterface>& other_channel_interface :
+       channel_interfaces_) {
+    if (other_channel_interface->name() == channel_interface->name() &&
+        other_channel_interface->direction() ==
+            channel_interface->direction()) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Cannot add channel `%s` to proc `%s`. Already an "
+          "%s channel of same name on the proc.",
+          channel_interface->name(), name(),
+          other_channel_interface->direction() == ChannelDirection::kReceive
+              ? "input"
+              : "output"));
+    }
+  }
+  channel_interfaces_.push_back(std::move(channel_interface));
+  interface_.push_back(channel_interfaces_.back().get());
+  return interface_.back();
+}
+
+absl::StatusOr<ReceiveChannelInterface*> Proc::AddInputChannel(
+    std::string_view name, Type* type, ChannelKind kind,
+    FlowControl flow_control, std::optional<ChannelStrictness> strictness) {
+  XLS_ASSIGN_OR_RETURN(
+      ReceiveChannelInterface * interface,
+      AddInputChannelInterface(
+          std::make_unique<ReceiveChannelInterface>(name, type, kind)));
+  interface->SetStrictness(strictness);
+  interface->SetFlowControl(flow_control);
+  return interface;
+}
+
+absl::StatusOr<SendChannelInterface*> Proc::AddOutputChannel(
+    std::string_view name, Type* type, ChannelKind kind,
+    FlowControl flow_control, std::optional<ChannelStrictness> strictness) {
+  XLS_ASSIGN_OR_RETURN(
+      SendChannelInterface * interface,
+      AddOutputChannelInterface(
+          std::make_unique<SendChannelInterface>(name, type, kind)));
+  interface->SetStrictness(strictness);
+  interface->SetFlowControl(flow_control);
+  return interface;
+}
+
+absl::StatusOr<ChannelInterface*> Proc::AddInterfaceChannel(
+    std::string_view name, ChannelDirection direction, Type* type,
+    ChannelKind kind, FlowControl flow_control,
+    std::optional<ChannelStrictness> strictness) {
+  if (direction == ChannelDirection::kSend) {
+    return AddOutputChannel(name, type, kind, flow_control, strictness);
+  }
+  return AddInputChannel(name, type, kind, flow_control, strictness);
+}
+
+absl::Status Proc::RemoveChannelInterface(ChannelInterface* channel_interface) {
+  auto interface_it =
+      std::find(interface_.begin(), interface_.end(), channel_interface);
+  if (interface_it == interface_.end()) {
+    return absl::NotFoundError(absl::StrFormat(
+        "Channel reference `%s` (%p) is not on the interface of proc `%s`",
+        channel_interface->name(), channel_interface, name()));
+  }
+  interface_.erase(interface_it);
+
+  std::erase_if(channel_interfaces_,
+                [&](const std::unique_ptr<ChannelInterface>& ref) {
+                  return ref.get() == channel_interface;
+                });
+  return absl::OkStatus();
+}
+
+bool Proc::IsOnProcInterface(ChannelInterface* channel_interface) {
+  return std::find(interface_.begin(), interface_.end(), channel_interface) !=
+         interface_.end();
+}
+
+absl::StatusOr<ProcInstantiation*> Proc::AddProcInstantiation(
+    std::string_view name, absl::Span<ChannelInterface* const> channel_args,
+    Proc* proc) {
+  XLS_RET_CHECK(is_new_style_proc());
+  proc_instantiations_.push_back(
+      std::make_unique<ProcInstantiation>(name, channel_args, proc));
+  return proc_instantiations_.back().get();
+}
+absl::StatusOr<std::vector<std::unique_ptr<ProcInstantiation>>>
+Proc::RemoveAllProcInstantiations() {
+  XLS_RET_CHECK(is_new_style_proc());
+  std::vector<std::unique_ptr<ProcInstantiation>> result;
+  std::swap(result, proc_instantiations_);
+  return std::move(result);
+}
+
+bool Proc::HasChannelInterface(std::string_view name,
+                               ChannelDirection direction) const {
+  CHECK(is_new_style_proc());
+  for (const std::unique_ptr<ChannelInterface>& channel_interface :
+       channel_interfaces_) {
+    if (name == channel_interface->name() &&
+        direction == channel_interface->direction()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+absl::StatusOr<ChannelInterface*> Proc::GetChannelInterface(
+    std::string_view name, ChannelDirection direction) const {
+  XLS_RET_CHECK(is_new_style_proc());
+  for (const std::unique_ptr<ChannelInterface>& channel_interface :
+       channel_interfaces_) {
+    if (channel_interface->name() == name &&
+        channel_interface->direction() == direction) {
+      return channel_interface.get();
+    }
+  }
+  return absl::NotFoundError(
+      absl::StrFormat("No %s channel reference `%s` in proc `%s`",
+                      ChannelDirectionToString(direction), name, this->name()));
+}
+
+absl::StatusOr<SendChannelInterface*> Proc::GetSendChannelInterface(
+    std::string_view name) const {
+  XLS_RET_CHECK(is_new_style_proc());
+  XLS_ASSIGN_OR_RETURN(ChannelInterface * channel_interface,
+                       GetChannelInterface(name, ChannelDirection::kSend));
+  return absl::down_cast<SendChannelInterface*>(channel_interface);
+}
+
+absl::StatusOr<ReceiveChannelInterface*> Proc::GetReceiveChannelInterface(
+    std::string_view name) const {
+  XLS_RET_CHECK(is_new_style_proc());
+  XLS_ASSIGN_OR_RETURN(ChannelInterface * channel_interface,
+                       GetChannelInterface(name, ChannelDirection::kReceive));
+  return absl::down_cast<ReceiveChannelInterface*>(channel_interface);
+}
+
+absl::StatusOr<ProcInstantiation*> Proc::GetProcInstantiation(
+    std::string_view instantiation_name) const {
+  for (const std::unique_ptr<ProcInstantiation>& instantiation :
+       proc_instantiations()) {
+    if (instantiation->name() == instantiation_name) {
+      return instantiation.get();
+    }
+  }
+  return absl::NotFoundError(
+      absl::StrFormat("No proc instantiation named `%s` in proc `%s`",
+                      instantiation_name, name()));
+}
+
+absl::Status Proc::ConvertToNewStyle() {
+  if (is_new_style_proc()) {
+    return absl::InternalError("Proc is already new style.");
+  }
+  is_new_style_proc_ = true;
+  return absl::OkStatus();
+}
+
+absl::StatusOr<StateElement*> Proc::TransformStateElement(
+    StateElement* old_state_element, const Value& init_value,
+    Proc::StateElementTransformer& transform) {
+  std::string orig_name(old_state_element->name());
+  XLS_ASSIGN_OR_RETURN(
+      StateElement * new_state_element,
+      AppendUnreadStateElement(
+          absl::StrFormat("TEMP_NAME__%s__", orig_name), init_value,
+          old_state_element->non_synthesizable(), old_state_element->loc()));
+
+  std::string temp_name = new_state_element->name();
+  absl::Span<StateRead* const> old_state_reads =
+      GetStateReadsByStateElement(old_state_element);
+  std::vector<std::string> orig_read_names;
+  orig_read_names.reserve(old_state_reads.size());
+  for (StateRead* old_state_read : old_state_reads) {
+    orig_read_names.push_back(std::string(old_state_read->GetNameView()));
+  }
+
+  std::vector<StateRead*> new_state_reads;
+  new_state_reads.reserve(old_state_reads.size());
+  std::vector<std::pair<Node*, Node*>> to_replace;
+  to_replace.reserve(old_state_reads.size());
+
+  for (StateRead* old_state_read : old_state_reads) {
+    XLS_ASSIGN_OR_RETURN(
+        std::optional<Node*> read_predicate,
+        transform.TransformReadPredicate(this, old_state_read));
+    XLS_ASSIGN_OR_RETURN(
+        StateRead * new_state_read,
+        AddStateRead(new_state_element, read_predicate, old_state_read->label(),
+                     old_state_read->loc()));
+    new_state_reads.push_back(new_state_read);
+
+    XLS_ASSIGN_OR_RETURN(
+        Node * new_state_value,
+        transform.TransformStateRead(this, new_state_read, old_state_read));
+    to_replace.push_back({old_state_read, new_state_value});
+  }
+
+  struct NextTransformation {
+    Next* old_next;
+    Node* new_value;
+    std::optional<Node*> new_predicate;
+  };
+  std::vector<NextTransformation> transforms;
+  for (Next* nxt : next_values(old_state_element)) {
+    NextTransformation& new_next = transforms.emplace_back();
+    new_next.old_next = nxt;
+    XLS_ASSIGN_OR_RETURN(new_next.new_value, transform.TransformNextValue(
+                                                 this, new_state_element, nxt));
+    XLS_RET_CHECK(new_next.new_value->GetType() == new_state_element->type())
+        << "New value is not compatible type. Expected: "
+        << new_state_element->type() << " got " << new_next.new_value;
+    XLS_ASSIGN_OR_RETURN(
+        new_next.new_predicate,
+        transform.TransformNextPredicate(this, new_state_element, nxt));
+  }
+
+  // We've transformed all the graph elements. Start replacing them.
+
+  // Switch old_state_read's name to a temporary to-remove name
+  std::string to_remove_name = UniquifyStateName(
+      absl::StrFormat("TO_REMOVE_TRANSFORMED_STATE__%s__", orig_name));
+  auto orig_storage = state_elements_.extract(orig_name);
+  orig_storage.key() = to_remove_name;
+  old_state_element->SetName(to_remove_name);
+  for (StateRead* old_state_read : old_state_reads) {
+    old_state_read->SetName(to_remove_name);
+  }
+  CHECK(state_elements_.insert(std::move(orig_storage)).inserted);
+
+  // Take over the old state element & read names.
+  auto new_storage = state_elements_.extract(temp_name);
+  new_storage.key() = orig_name;
+  new_state_element->SetName(orig_name);
+  for (size_t i = 0; i < old_state_reads.size(); ++i) {
+    new_state_reads[i]->SetNameDirectly(orig_read_names[i]);
+  }
+  CHECK(state_elements_.insert(std::move(new_storage)).inserted);
+
+  // Identity-ify the old next nodes and create new ones.
+  for (const NextTransformation& nt : transforms) {
+    XLS_ASSIGN_OR_RETURN(
+        Next * nxt,
+        MakeNodeWithName<Next>(nt.old_next->loc(), new_state_element,
+                               nt.new_value, nt.new_predicate,
+                               nt.old_next->label(), nt.old_next->GetName()));
+    to_replace.push_back({nt.old_next, nxt});
+    // Identity-ify the old next.
+    XLS_ASSIGN_OR_RETURN(
+        Node * placeholder,
+        MakeNode<Literal>(nt.old_next->loc(),
+                          ZeroOfType(old_state_element->type())));
+    XLS_RET_CHECK(
+        nt.old_next->ReplaceOperand(nt.old_next->value(), placeholder));
+  }
+  for (const auto& [old_n, new_n] : to_replace) {
+    XLS_RETURN_IF_ERROR(
+        old_n->ReplaceUsesWith(new_n, /*replace_implicit_uses=*/false));
+  }
+  return new_state_element;
+}
+
+absl::Status Proc::InternalRebuildSideTables() {
+  XLS_RET_CHECK(params_.empty());
+  // Why is next-values in base but not elements?
+  next_values_.clear();
+  next_values_by_state_element_.clear();
+  state_reads_.clear();
+  for (Node* n : nodes()) {
+    if (n->Is<StateRead>()) {
+      state_reads_[n->As<StateRead>()->state_element()].push_back(
+          n->As<StateRead>());
+    } else if (n->Is<Next>()) {
+      next_values_.push_back(n->As<Next>());
+      next_values_by_state_element_[n->As<Next>()->state_element()].insert(
+          n->As<Next>());
+    }
+  }
+  // TODO(allight): We should make it so we can recover channel/proc-inst things
+  // here too. Ditto for the state elements themselves.
+  return absl::OkStatus();
+}
+
+void Proc::MoveFrom(Proc& other) {
+  MoveLogicFrom(other);
+  MoveNonLogicFrom(other);
+}
+
+void Proc::MoveNonLogicFrom(Proc& other) {
+  is_new_style_proc_ = other.is_new_style_proc_;
+  state_elements_ = std::move(other.state_elements_);
+  state_vec_ = std::move(other.state_vec_);
+  state_name_uniquer_ = std::move(other.state_name_uniquer_);
+  // We keep the StateReads alongside their StateElements, which makes it
+  // possible to maintain the `state_reads_` map even while building the
+  // skeletal "source" proc for a ScheduledBlock.
+  FunctionBase::MoveFrom(other,
+                         [](const Node* n) { return n->Is<StateRead>(); });
+  state_reads_ = std::move(other.state_reads_);
+  channel_interfaces_ = std::move(other.channel_interfaces_);
+  interface_ = std::move(other.interface_);
+  proc_instantiations_ = std::move(other.proc_instantiations_);
+  channels_ = std::move(other.channels_);
+  channel_vec_ = std::move(other.channel_vec_);
+}
+
+absl::Status Proc::RemoveNode(Node* n) {
+  if (n->Is<StateRead>()) {
+    StateRead* read = n->As<StateRead>();
+    auto it = state_reads_.find(read->state_element());
+    if (it != state_reads_.end()) {
+      std::vector<StateRead*>& reads = it->second;
+      auto read_it = std::find(reads.begin(), reads.end(), read);
+      if (read_it != reads.end()) {
+        reads.erase(read_it);
+      }
+      if (reads.empty()) {
+        state_reads_.erase(it);
+      }
+    }
+  }
+  return FunctionBase::RemoveNode(n);
 }
 
 }  // namespace xls
